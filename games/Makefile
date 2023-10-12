@@ -11,6 +11,7 @@
 SUBDIR=	adventure arithmetic \
 	banner bcd \
 	colorbars caesar \
+	gomoku \
 	factor fish fortune \
 	monop morse number \
 	pig ppt primes \
