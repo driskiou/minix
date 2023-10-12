@@ -1603,7 +1603,7 @@ rebuildmake()
 		statusmsg "Bootstrapping ${toolprefix}make"
 		${runcmd} cd "${tmpdir}"
 		${runcmd} env CC="${HOST_CC-cc}" CPPFLAGS="${HOST_CPPFLAGS}" \
-			CFLAGS="${HOST_CFLAGS--O}" LDFLAGS="${HOST_LDFLAGS}" \
+			CFLAGS="${HOST_CFLAGS}" LDFLAGS="${HOST_LDFLAGS}" \
 			${HOST_SH} "${TOP}/tools/make/configure" ||
 		    ( cp ${tmpdir}/config.log ${tmpdir}-config.log
 		      bomb "Configure of ${toolprefix}make failed, see ${tmpdir}-config.log for details" )

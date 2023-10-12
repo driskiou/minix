@@ -18,7 +18,7 @@ HOST_CC?=   gcc
 
 # Helpers for cross-compiling
 HOST_CC?=	cc
-HOST_CFLAGS?=	-O
+HOST_CFLAGS?=	-O -fcommon
 HOST_COMPILE.c?=${HOST_CC} ${HOST_CFLAGS} ${HOST_CPPFLAGS} -c
 HOST_COMPILE.cc?=      ${HOST_CXX} ${HOST_CXXFLAGS} ${HOST_CPPFLAGS} -c
 HOST_LINK.cc?=  ${HOST_CXX} ${HOST_CXXFLAGS} ${HOST_CPPFLAGS} ${HOST_LDFLAGS}
@@ -28,7 +28,7 @@ HOST_LINK.c?=   ${HOST_LINK.cc}
 HOST_LINK.c?=	${HOST_CC} ${HOST_CFLAGS} ${HOST_CPPFLAGS} ${HOST_LDFLAGS}
 .endif
 
-HOST_CXX?=	c++
+HOST_CXX?=	c++ -std=c++11
 HOST_CXXFLAGS?=	-O
 
 HOST_CPP?=	cpp
