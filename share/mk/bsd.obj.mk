@@ -1,4 +1,4 @@
-#	$NetBSD: bsd.obj.mk,v 1.49 2010/01/25 00:43:00 christos Exp $
+#	$NetBSD: bsd.obj.mk,v 1.54 2023/06/03 21:23:49 lukem Exp $
 
 .if !defined(_BSD_OBJ_MK_)
 _BSD_OBJ_MK_=1
@@ -27,6 +27,7 @@ obj:
 		exit 1; \
 	fi;
 .endif
+.if ${.CURDIR} == ${.OBJDIR}
 	@if [ ! -d ${__objdir} ]; then \
 		mkdir -p ${__objdir}; \
 		if [ ! -d ${__objdir} ]; then \
@@ -34,13 +35,15 @@ obj:
 		fi; \
 		${_MKSHMSG} " objdir  ${__objdir}"; \
 	fi
+.endif
 .else
 PAWD?=		/bin/pwd
 
-__objdir=	obj${OBJMACHINE:D.${MACHINE}}
+__objdirsuffix=	${OBJMACHINE:D.${MACHINE}${OBJMACHINE_ARCH:D-${MACHINE_ARCH}}}
+__objdir=	obj${__objdirsuffix}
 
 __usrobjdir=	${BSDOBJDIR}${USR_OBJMACHINE:D.${MACHINE}}
-__usrobjdirpf=	${USR_OBJMACHINE:D:U${OBJMACHINE:D.${MACHINE}}}
+__usrobjdirpf=	${USR_OBJMACHINE:D:U${__objdirsuffix}}
 
 .if defined(BUILDID)
 __objdir:=	${__objdir}.${BUILDID}
@@ -48,7 +51,7 @@ __usrobjdirpf:=	${__usrobjdirpf}.${BUILDID}
 __need_objdir_target=yes
 .endif
 
-.if defined(OBJHOSTMACHINE) && (${MKHOSTOBJ:Uno} != "no")
+.if defined(OBJHOSTMACHINE) && (${MKHOSTOBJ} != "no")
 # In case .CURDIR has been twiddled by a .mk file and is now relative,
 # make it absolute again.
 .if ${__curdir:M/*} == ""
@@ -67,7 +70,7 @@ __need_objdir_target=yes
 
 obj:
 	@cd "${__curdir}"; \
-	here=`${PAWD}`/; subdir=$${here#${BSDSRCDIR}/}; \
+	here=$$(${PAWD})/; subdir=$${here#${BSDSRCDIR}/}; \
 	if [ "$$here" != "$$subdir" ]; then \
 		if [ ! -d ${__usrobjdir} ]; then \
 			echo "BSDOBJDIR ${__usrobjdir} does not exist, bailing..."; \
@@ -76,7 +79,7 @@ obj:
 		subdir=$${subdir%/}; \
 		dest=${__usrobjdir}/$$subdir${__usrobjdirpf}; \
 		if  [ -x ${TOOL_STAT} ] && \
-		    ttarg=`${TOOL_STAT} -qf '%Y' $${here}${__objdir}` && \
+		    ttarg=$$(${TOOL_STAT} -qf '%Y' $${here}${__objdir}) && \
 		    [ "$$dest" = "$$ttarg" ]; then \
 			: ; \
 		else \
