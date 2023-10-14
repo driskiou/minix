@@ -916,6 +916,8 @@ nobomb_getmakevar()
 	"${make}" -m ${TOP}/share/mk -s -B -f- _x_ <<EOF || return 1
 _x_:
 	echo \${$1}
+# LSC FIXME: We are cross compiling, so overwrite default and build tools
+USETOOLS:=yes
 .include <bsd.prog.mk>
 .include <bsd.kernobj.mk>
 EOF
@@ -2049,12 +2051,18 @@ EOF
 			fi
 		done
 
-		cat <<EOF
+		eval cat <<EOF
+MAKEWRAPPERMACHINE=${makewrappermachine:-${MACHINE}}; export MAKEWRAPPERMACHINE
+USETOOLS=yes; export USETOOLS
+# LSC We are cross compiling, so do not install to root!
+MKINSTALLBOOT=no; export MKINSTALLBOOT
+EOF
+	} | eval sort -u "${makewrapout}"
+	eval cat <<EOF "${makewrapout}"
 
 exec "\${TOOLDIR}/bin/${toolprefix}make" \${1+"\$@"}
 EOF
-	} | eval cat "${makewrapout}"
-	[ "${runcmd}" = "echo" ] && echo EOF
+		[ "${runcmd}" = "echo" ] && echo EOF
 	${runcmd} chmod +x "${makewrapper}"
 	statusmsg2 "Updated makewrapper:" "${makewrapper}"
 }
@@ -2581,17 +2589,7 @@ main()
 			installworld "${arg}"
 			;;
 
-		rump)
-			make_in_dir . do-distrib-dirs
-			make_in_dir . includes
-			make_in_dir lib/csu dependall
-			make_in_dir lib/csu install
-			make_in_dir external/gpl3/gcc/lib/libgcc dependall
-			make_in_dir external/gpl3/gcc/lib/libgcc install
-			dorump "${op}"
-			;;
-
-		rumptest)
+		rump|rumptest)
 			dorump "${op}"
 			;;
 
