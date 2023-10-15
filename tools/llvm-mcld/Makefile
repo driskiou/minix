@@ -2,6 +2,6 @@
 
 HOSTPROGNAME=	ld.mcld
 HOSTPROG_CXX=	ld.mcld
-HOST_SRCDIR=	external/bsd/llvm/bin/llvm-mcld
+HOST_SRCDIR=	external/apache2/llvm/bin/llvm-mcld
 
 .include "${.CURDIR}/../Makefile.host"

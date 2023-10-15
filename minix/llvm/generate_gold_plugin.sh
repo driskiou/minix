@@ -3,7 +3,7 @@
 cd $(dirname $0)
 
 : ${NETBSDSRCDIR=${PWD}/../..}
-: ${LLVMSRCDIR=${NETBSDSRCDIR}/external/bsd/llvm/dist}
+: ${LLVMSRCDIR=${NETBSDSRCDIR}/external/apache2/llvm/dist}
 : ${ARCH=i386}
 : ${JOBS=1}
 : ${OBJ_LLVM=${NETBSDSRCDIR}/../obj_llvm.${ARCH}}
