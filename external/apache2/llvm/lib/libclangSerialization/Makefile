@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.5 2013/02/04 15:00:36 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:57 joerg Exp $
 
 LIB=	clangSerialization
 
@@ -15,8 +15,11 @@ SRCS+=	ASTCommon.cpp \
 	ASTWriterStmt.cpp \
 	GeneratePCH.cpp \
 	GlobalModuleIndex.cpp \
-	Module.cpp \
-	ModuleManager.cpp
+	InMemoryModuleCache.cpp \
+	ModuleFile.cpp \
+	ModuleFileExtension.cpp \
+	ModuleManager.cpp \
+	PCHContainerOperations.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>

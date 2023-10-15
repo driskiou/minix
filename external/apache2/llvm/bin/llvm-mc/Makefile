@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.21 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:48 joerg Exp $
 
 PROG_CXX=	llvm-mc
 NOMAN=		yes
@@ -16,40 +16,40 @@ LLVM_LIBS+= \
 	AArch64TargetInfo \
 	AArch64AsmParser \
 	AArch64MCTargetDesc \
-	AArch64AsmPrinter \
 	AArch64Disassembler \
 	AArch64Utils \
+	AMDGPUCodeGen \
+	AMDGPUTargetInfo \
+	AMDGPUMCTargetDesc \
+	AMDGPUAsmParser \
+	AMDGPUDisassembler \
+	AMDGPUUtils \
 	ARMCodeGen \
 	ARMTargetInfo \
 	ARMAsmParser \
 	ARMMCTargetDesc \
-	ARMAsmPrinter \
 	ARMDisassembler \
+	ARMUtils \
 	MipsCodeGen \
 	MipsTargetInfo \
 	MipsAsmParser \
 	MipsDisassembler \
 	MipsMCTargetDesc \
-	MipsAsmPrinter \
 	PowerPCCodeGen \
 	PowerPCAsmParser \
 	PowerPCDisassembler \
 	PowerPCTargetInfo \
 	PowerPCMCTargetDesc \
-	PowerPCAsmPrinter \
 	SparcAsmParser \
 	SparcCodeGen \
 	SparcTargetInfo \
 	SparcMCTargetDesc \
 	SparcDisassembler \
-	SparcAsmPrinter \
 	X86AsmParser \
 	X86CodeGen \
 	X86TargetInfo \
 	X86MCTargetDesc \
 	X86Disassembler \
-	X86AsmPrinter \
-	X86Utils \
 	MCDisassembler \
 	Object \
 	SelectionDAG \
@@ -61,8 +61,10 @@ LLVM_LIBS+= \
 	AsmPrinter \
 	MCParser \
 	MC \
+	BinaryFormat \
 	IR \
-	Support
+	Support \
+	Demangle
 
 LDADD+=	-lz
 DPADD+=	${LIBZ}

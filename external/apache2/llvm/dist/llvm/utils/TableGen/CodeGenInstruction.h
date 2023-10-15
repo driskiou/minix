@@ -1,9 +1,8 @@
 //===- CodeGenInstruction.h - Instruction Class Wrapper ---------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,25 +14,27 @@
 #define LLVM_UTILS_TABLEGEN_CODEGENINSTRUCTION_H
 
 #include "llvm/ADT/StringRef.h"
-#include "llvm/CodeGen/MachineValueType.h"
-#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/MachineValueType.h"
+#include "llvm/Support/SMLoc.h"
+#include <cassert>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace llvm {
+template <typename T> class ArrayRef;
   class Record;
   class DagInit;
   class CodeGenTarget;
-  class StringRef;
 
   class CGIOperandList {
   public:
     class ConstraintInfo {
-      enum { None, EarlyClobber, Tied } Kind;
-      unsigned OtherTiedOperand;
+      enum { None, EarlyClobber, Tied } Kind = None;
+      unsigned OtherTiedOperand = 0;
+
     public:
-      ConstraintInfo() : Kind(None) {}
+      ConstraintInfo() = default;
 
       static ConstraintInfo getEarlyClobber() {
         ConstraintInfo I;
@@ -56,6 +57,17 @@ namespace llvm {
       unsigned getTiedOperand() const {
         assert(isTied());
         return OtherTiedOperand;
+      }
+
+      bool operator==(const ConstraintInfo &RHS) const {
+        if (Kind != RHS.Kind)
+          return false;
+        if (Kind == Tied && OtherTiedOperand != RHS.OtherTiedOperand)
+          return false;
+        return true;
+      }
+      bool operator!=(const ConstraintInfo &RHS) const {
+        return !(*this == RHS);
       }
     };
 
@@ -170,7 +182,7 @@ namespace llvm {
     /// where $foo is a whole operand and $foo.bar refers to a suboperand.
     /// This aborts if the name is invalid.  If AllowWholeOp is true, references
     /// to operands with suboperands are allowed, otherwise not.
-    std::pair<unsigned,unsigned> ParseOperandName(const std::string &Op,
+    std::pair<unsigned,unsigned> ParseOperandName(StringRef Op,
                                                   bool AllowWholeOp = true);
 
     /// getFlattenedOperandNumber - Flatten a operand/suboperand pair into a
@@ -199,14 +211,14 @@ namespace llvm {
       return false;
     }
 
-    void ProcessDisableEncoding(std::string Value);
+    void ProcessDisableEncoding(StringRef Value);
   };
 
 
   class CodeGenInstruction {
   public:
     Record *TheDef;            // The actual record defining this instruction.
-    std::string Namespace;     // The namespace the instruction is in.
+    StringRef Namespace;       // The namespace the instruction is in.
 
     /// AsmString - The format string used to emit a .s file for the
     /// instruction.
@@ -221,20 +233,26 @@ namespace llvm {
     std::vector<Record*> ImplicitDefs, ImplicitUses;
 
     // Various boolean values we track for the instruction.
+    bool isPreISelOpcode : 1;
     bool isReturn : 1;
+    bool isEHScopeReturn : 1;
     bool isBranch : 1;
     bool isIndirectBranch : 1;
     bool isCompare : 1;
     bool isMoveImm : 1;
+    bool isMoveReg : 1;
     bool isBitcast : 1;
     bool isSelect : 1;
     bool isBarrier : 1;
     bool isCall : 1;
+    bool isAdd : 1;
+    bool isTrap : 1;
     bool canFoldAsLoad : 1;
     bool mayLoad : 1;
     bool mayLoad_Unset : 1;
     bool mayStore : 1;
     bool mayStore_Unset : 1;
+    bool mayRaiseFPException : 1;
     bool isPredicable : 1;
     bool isConvertibleToThreeAddress : 1;
     bool isCommutable : 1;
@@ -255,6 +273,13 @@ namespace llvm {
     bool isRegSequence : 1;
     bool isExtractSubreg : 1;
     bool isInsertSubreg : 1;
+    bool isConvergent : 1;
+    bool hasNoSchedulingInfo : 1;
+    bool FastISelShouldIgnore : 1;
+    bool hasChain : 1;
+    bool hasChain_Inferred : 1;
+    bool variadicOpsAreDefs : 1;
+    bool isAuthenticated : 1;
 
     std::string DeprecatedReason;
     bool HasComplexDeprecationPredicate;
@@ -281,6 +306,22 @@ namespace llvm {
     /// include text from the specified variant, returning the new string.
     static std::string FlattenAsmStringVariants(StringRef AsmString,
                                                 unsigned Variant);
+
+    // Is the specified operand in a generic instruction implicitly a pointer.
+    // This can be used on intructions that use typeN or ptypeN to identify
+    // operands that should be considered as pointers even though SelectionDAG
+    // didn't make a distinction between integer and pointers.
+    bool isOperandAPointer(unsigned i) const {
+      return isOperandImpl(i, "IsPointer");
+    }
+
+    /// Check if the operand is required to be an immediate.
+    bool isOperandImmArg(unsigned i) const {
+      return isOperandImpl(i, "IsImmediate");
+    }
+
+  private:
+    bool isOperandImpl(unsigned i, StringRef PropertyName) const;
   };
 
 
@@ -304,9 +345,9 @@ namespace llvm {
     struct ResultOperand {
     private:
       std::string Name;
-      Record *R;
+      Record *R = nullptr;
+      int64_t Imm = 0;
 
-      int64_t Imm;
     public:
       enum {
         K_Record,
@@ -314,7 +355,8 @@ namespace llvm {
         K_Reg
       } Kind;
 
-      ResultOperand(std::string N, Record *r) : Name(N), R(r), Kind(K_Record) {}
+      ResultOperand(std::string N, Record *r)
+          : Name(std::move(N)), R(r), Kind(K_Record) {}
       ResultOperand(int64_t I) : Imm(I), Kind(K_Imm) {}
       ResultOperand(Record *r) : R(r), Kind(K_Reg) {}
 
@@ -340,7 +382,7 @@ namespace llvm {
     /// of them are matched by the operand, the second value should be -1.
     std::vector<std::pair<unsigned, int> > ResultInstOperandIndex;
 
-    CodeGenInstAlias(Record *R, unsigned Variant, CodeGenTarget &T);
+    CodeGenInstAlias(Record *R, CodeGenTarget &T);
 
     bool tryAliasOpMatch(DagInit *Result, unsigned AliasOpNo,
                          Record *InstOpRec, bool hasSubOps, ArrayRef<SMLoc> Loc,

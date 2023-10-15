@@ -1,9 +1,8 @@
 //=== UndefBranchChecker.cpp -----------------------------------*- C++ -*--===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,11 +11,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/AST/StmtObjC.h"
+#include "clang/AST/Type.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
+#include <utility>
 
 using namespace clang;
 using namespace ento;
@@ -30,24 +32,22 @@ class UndefBranchChecker : public Checker<check::BranchCondition> {
     ProgramStateRef St;
     const LocationContext *LCtx;
 
-    FindUndefExpr(ProgramStateRef S, const LocationContext *L) 
-      : St(S), LCtx(L) {}
+    FindUndefExpr(ProgramStateRef S, const LocationContext *L)
+        : St(std::move(S)), LCtx(L) {}
 
     const Expr *FindExpr(const Expr *Ex) {
       if (!MatchesCriteria(Ex))
         return nullptr;
 
-      for (Stmt::const_child_iterator I = Ex->child_begin(), 
-                                      E = Ex->child_end();I!=E;++I)
-        if (const Expr *ExI = dyn_cast_or_null<Expr>(*I)) {
-          const Expr *E2 = FindExpr(ExI);
-          if (E2) return E2;
-        }
+      for (const Stmt *SubStmt : Ex->children())
+        if (const Expr *ExI = dyn_cast_or_null<Expr>(SubStmt))
+          if (const Expr *E2 = FindExpr(ExI))
+            return E2;
 
       return Ex;
     }
 
-    bool MatchesCriteria(const Expr *Ex) { 
+    bool MatchesCriteria(const Expr *Ex) {
       return St->getSVal(Ex, LCtx).isUndef();
     }
   };
@@ -56,15 +56,18 @@ public:
   void checkBranchCondition(const Stmt *Condition, CheckerContext &Ctx) const;
 };
 
-}
+} // namespace
 
 void UndefBranchChecker::checkBranchCondition(const Stmt *Condition,
                                               CheckerContext &Ctx) const {
-  SVal X = Ctx.getState()->getSVal(Condition, Ctx.getLocationContext());
+  // ObjCForCollection is a loop, but has no actual condition.
+  if (isa<ObjCForCollectionStmt>(Condition))
+    return;
+  SVal X = Ctx.getSVal(Condition);
   if (X.isUndef()) {
     // Generate a sink node, which implicitly marks both outgoing branches as
     // infeasible.
-    ExplodedNode *N = Ctx.generateSink();
+    ExplodedNode *N = Ctx.generateErrorNode();
     if (N) {
       if (!BT)
         BT.reset(new BuiltinBug(
@@ -98,15 +101,20 @@ void UndefBranchChecker::checkBranchCondition(const Stmt *Condition,
       Ex = FindIt.FindExpr(Ex);
 
       // Emit the bug report.
-      BugReport *R = new BugReport(*BT, BT->getDescription(), N);
-      bugreporter::trackNullOrUndefValue(N, Ex, *R);
+      auto R = std::make_unique<PathSensitiveBugReport>(
+          *BT, BT->getDescription(), N);
+      bugreporter::trackExpressionValue(N, Ex, *R);
       R->addRange(Ex->getSourceRange());
 
-      Ctx.emitReport(R);
+      Ctx.emitReport(std::move(R));
     }
   }
 }
 
 void ento::registerUndefBranchChecker(CheckerManager &mgr) {
   mgr.registerChecker<UndefBranchChecker>();
+}
+
+bool ento::shouldRegisterUndefBranchChecker(const CheckerManager &mgr) {
+  return true;
 }

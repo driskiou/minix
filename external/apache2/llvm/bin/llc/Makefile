@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.21 2014/08/10 17:34:19 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:46 joerg Exp $
 
 PROG_CXX=	llc
 NOMAN=		yes
@@ -10,46 +10,59 @@ NOMAN=		yes
 SRCS=	llc.cpp
 
 LLVM_LIBS+= \
+	Vectorize \
+	MIRParser \
 	AsmPrinter \
+	DebugInfoCodeView \
+	DebugInfoDWARF \
+	DebugInfoMSF \
 	IRReader \
 	AsmParser \
 	BitReader \
+	BitstreamReader \
 	AArch64CodeGen \
 	AArch64TargetInfo \
 	AArch64AsmParser \
 	AArch64MCTargetDesc \
-	AArch64AsmPrinter \
 	AArch64Utils \
+	AMDGPUCodeGen \
+	AMDGPUTargetInfo \
+	AMDGPUMCTargetDesc \
+	AMDGPUAsmParser \
+	AMDGPUUtils \
+	MIRParser \
 	ARMCodeGen \
 	ARMTargetInfo \
 	ARMMCTargetDesc \
 	ARMAsmParser \
-	ARMAsmPrinter \
+	ARMUtils \
 	MipsCodeGen \
 	MipsTargetInfo \
 	MipsAsmParser \
-	MipsAsmPrinter \
 	MipsMCTargetDesc \
 	PowerPCCodeGen \
 	PowerPCTargetInfo \
 	PowerPCMCTargetDesc \
 	PowerPCAsmParser \
-	PowerPCAsmPrinter \
 	SparcCodeGen \
 	SparcTargetInfo \
 	SparcMCTargetDesc \
 	SparcAsmParser \
-	SparcAsmPrinter \
 	X86CodeGen \
 	X86TargetInfo \
 	X86MCTargetDesc \
 	X86AsmParser \
-	X86AsmPrinter \
-	X86Utils \
+	Passes \
+	TransformsCFGuard \
+	ipo \
+	FrontendOpenMP \
+	GlobalISel \
 	MCDisassembler \
 	Object \
 	SelectionDAG \
 	CodeGen \
+	ProfileData \
+	Instrumentation \
 	ScalarOpts \
 	TransformsUtils \
 	Analysis \
@@ -57,7 +70,10 @@ LLVM_LIBS+= \
 	MCParser \
 	MC \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Support \
+	Demangle
 
 LDADD+=	-lz
 DPADD+=	${LIBZ}

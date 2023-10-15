@@ -1,11 +1,10 @@
-//===-- BrainF.cpp - BrainF compiler example ----------------------------===//
+//===-- BrainF.cpp - BrainF compiler example ------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // This class compiles the BrainF language into LLVM assembly.
 //
@@ -21,14 +20,27 @@
 // [         while(*h) {     Start loop
 // ]         }               End loop
 //
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 #include "BrainF.h"
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/Support/Casting.h"
+#include <cstdlib>
 #include <iostream>
+
 using namespace llvm;
 
 //Set the constants for naming
@@ -44,7 +56,7 @@ Module *BrainF::parse(std::istream *in1, int mem, CompileFlags cf,
   comflag  = cf;
 
   header(Context);
-  readloop(0, 0, 0, Context);
+  readloop(nullptr, nullptr, nullptr, Context);
   delete builder;
   return module;
 }
@@ -54,26 +66,24 @@ void BrainF::header(LLVMContext& C) {
 
   //Function prototypes
 
-  //declare void @llvm.memset.p0i8.i32(i8 *, i8, i32, i32, i1)
+  //declare void @llvm.memset.p0i8.i32(i8 *, i8, i32, i1)
   Type *Tys[] = { Type::getInt8PtrTy(C), Type::getInt32Ty(C) };
   Function *memset_func = Intrinsic::getDeclaration(module, Intrinsic::memset,
                                                     Tys);
 
   //declare i32 @getchar()
-  getchar_func = cast<Function>(module->
-    getOrInsertFunction("getchar", IntegerType::getInt32Ty(C), NULL));
+  getchar_func =
+      module->getOrInsertFunction("getchar", IntegerType::getInt32Ty(C));
 
   //declare i32 @putchar(i32)
-  putchar_func = cast<Function>(module->
-    getOrInsertFunction("putchar", IntegerType::getInt32Ty(C),
-                        IntegerType::getInt32Ty(C), NULL));
-
+  putchar_func = module->getOrInsertFunction(
+      "putchar", IntegerType::getInt32Ty(C), IntegerType::getInt32Ty(C));
 
   //Function header
 
   //define void @brainf()
-  brainf_func = cast<Function>(module->
-    getOrInsertFunction("brainf", Type::getVoidTy(C), NULL));
+  brainf_func = Function::Create(FunctionType::get(Type::getVoidTy(C), false),
+                                 Function::ExternalLinkage, "brainf", module);
 
   builder = new IRBuilder<>(BasicBlock::Create(C, label, brainf_func));
 
@@ -85,16 +95,15 @@ void BrainF::header(LLVMContext& C) {
   Constant* allocsize = ConstantExpr::getSizeOf(Int8Ty);
   allocsize = ConstantExpr::getTruncOrBitCast(allocsize, IntPtrTy);
   ptr_arr = CallInst::CreateMalloc(BB, IntPtrTy, Int8Ty, allocsize, val_mem, 
-                                   NULL, "arr");
+                                   nullptr, "arr");
   BB->getInstList().push_back(cast<Instruction>(ptr_arr));
 
-  //call void @llvm.memset.p0i8.i32(i8 *%arr, i8 0, i32 %d, i32 1, i1 0)
+  //call void @llvm.memset.p0i8.i32(i8 *%arr, i8 0, i32 %d, i1 0)
   {
     Value *memset_params[] = {
       ptr_arr,
       ConstantInt::get(C, APInt(8, 0)),
       val_mem,
-      ConstantInt::get(C, APInt(32, 1)),
       ConstantInt::get(C, APInt(1, 0))
     };
 
@@ -114,8 +123,6 @@ void BrainF::header(LLVMContext& C) {
                                ConstantInt::get(C, APInt(32, memtotal/2)),
                                headreg);
 
-
-
   //Function footer
 
   //brainf.end:
@@ -126,8 +133,6 @@ void BrainF::header(LLVMContext& C) {
 
   //ret void
   ReturnInst::Create(C, endbb);
-
-
 
   //Error block for array out of bounds
   if (comflag & flag_arraybounds)
@@ -146,9 +151,9 @@ void BrainF::header(LLVMContext& C) {
       "aberrormsg");
 
     //declare i32 @puts(i8 *)
-    Function *puts_func = cast<Function>(module->
-      getOrInsertFunction("puts", IntegerType::getInt32Ty(C),
-                      PointerType::getUnqual(IntegerType::getInt8Ty(C)), NULL));
+    FunctionCallee puts_func = module->getOrInsertFunction(
+        "puts", IntegerType::getInt32Ty(C),
+        PointerType::getUnqual(IntegerType::getInt8Ty(C)));
 
     //brainf.aberror:
     aberrorbb = BasicBlock::Create(C, label, brainf_func);
@@ -163,7 +168,7 @@ void BrainF::header(LLVMContext& C) {
       };
 
       Constant *msgptr = ConstantExpr::
-        getGetElementPtr(aberrormsg, gep_params);
+        getGetElementPtr(aberrormsg->getValueType(), aberrormsg, gep_params);
 
       Value *puts_params[] = {
         msgptr
@@ -201,7 +206,8 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
       case SYM_READ:
         {
           //%tape.%d = call i32 @getchar()
-          CallInst *getchar_call = builder->CreateCall(getchar_func, tapereg);
+          CallInst *getchar_call =
+              builder->CreateCall(getchar_func, {}, tapereg);
           getchar_call->setTailCall(false);
           Value *tape_0 = getchar_call;
 
@@ -217,7 +223,8 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
       case SYM_WRITE:
         {
           //%tape.%d = load i8 *%head.%d
-          LoadInst *tape_0 = builder->CreateLoad(curhead, tapereg);
+          LoadInst *tape_0 =
+              builder->CreateLoad(IntegerType::getInt8Ty(C), curhead, tapereg);
 
           //%tape.%d = sext i8 %tape.%d to i32
           Value *tape_1 = builder->
@@ -269,7 +276,8 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
       case SYM_CHANGE:
         {
           //%tape.%d = load i8 *%head.%d
-          LoadInst *tape_0 = builder->CreateLoad(curhead, tapereg);
+          LoadInst *tape_0 =
+              builder->CreateLoad(IntegerType::getInt8Ty(C), curhead, tapereg);
 
           //%tape.%d = add i8 %tape.%d, %d
           Value *tape_1 = builder->
@@ -330,7 +338,7 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
         switch(c) {
           case '-':
             direction = -1;
-            // Fall through
+            LLVM_FALLTHROUGH;
 
           case '+':
             if (cursym == SYM_CHANGE) {
@@ -351,7 +359,7 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
 
           case '<':
             direction = -1;
-            // Fall through
+            LLVM_FALLTHROUGH;
 
           case '>':
             if (cursym == SYM_MOVE) {
@@ -433,7 +441,8 @@ void BrainF::readloop(PHINode *phi, BasicBlock *oldbb, BasicBlock *testbb,
       Value *head_0 = phi;
 
       //%tape.%d = load i8 *%head.%d
-      LoadInst *tape_0 = new LoadInst(head_0, tapereg, testbb);
+      LoadInst *tape_0 = new LoadInst(IntegerType::getInt8Ty(C), head_0,
+                                      tapereg, testbb);
 
       //%test.%d = icmp eq i8 %tape.%d, 0
       ICmpInst *test_0 = new ICmpInst(*testbb, ICmpInst::ICMP_EQ, tape_0,

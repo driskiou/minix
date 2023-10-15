@@ -1,9 +1,8 @@
-//===-- ARMMachineFuctionInfo.h - ARM machine function info -----*- C++ -*-===//
+//===-- ARMMachineFunctionInfo.h - ARM machine function info ----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,12 +13,12 @@
 #ifndef LLVM_LIB_TARGET_ARM_ARMMACHINEFUNCTIONINFO_H
 #define LLVM_LIB_TARGET_ARM_ARMMACHINEFUNCTIONINFO_H
 
-#include "ARMSubtarget.h"
-#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetRegisterInfo.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/Support/ErrorHandling.h"
+#include <utility>
 
 namespace llvm {
 
@@ -30,42 +29,42 @@ class ARMFunctionInfo : public MachineFunctionInfo {
 
   /// isThumb - True if this function is compiled under Thumb mode.
   /// Used to initialized Align, so must precede it.
-  bool isThumb;
+  bool isThumb = false;
 
   /// hasThumb2 - True if the target architecture supports Thumb2. Do not use
   /// to determine if function is compiled under Thumb mode, for that use
   /// 'isThumb'.
-  bool hasThumb2;
+  bool hasThumb2 = false;
 
   /// StByValParamsPadding - For parameter that is split between
   /// GPRs and memory; while recovering GPRs part, when
   /// StackAlignment > 4, and GPRs-part-size mod StackAlignment != 0,
   /// we need to insert gap before parameter start address. It allows to
   /// "attach" GPR-part to the part that was passed via stack.
-  unsigned StByValParamsPadding;
+  unsigned StByValParamsPadding = 0;
 
   /// VarArgsRegSaveSize - Size of the register save area for vararg functions.
   ///
-  unsigned ArgRegsSaveSize;
+  unsigned ArgRegsSaveSize = 0;
 
   /// ReturnRegsCount - Number of registers used up in the return.
-  unsigned ReturnRegsCount;
+  unsigned ReturnRegsCount = 0;
 
   /// HasStackFrame - True if this function has a stack frame. Set by
-  /// processFunctionBeforeCalleeSavedScan().
-  bool HasStackFrame;
+  /// determineCalleeSaves().
+  bool HasStackFrame = false;
 
   /// RestoreSPFromFP - True if epilogue should restore SP from FP. Set by
   /// emitPrologue.
-  bool RestoreSPFromFP;
+  bool RestoreSPFromFP = false;
 
-  /// LRSpilledForFarJump - True if the LR register has been for spilled to
-  /// enable far jump.
-  bool LRSpilledForFarJump;
+  /// LRSpilled - True if the LR register has been for spilled for
+  /// any reason, so it's legal to emit an ARM::tBfar (i.e. "bl").
+  bool LRSpilled = false;
 
   /// FramePtrSpillOffset - If HasStackFrame, this records the frame pointer
   /// spill stack offset.
-  unsigned FramePtrSpillOffset;
+  unsigned FramePtrSpillOffset = 0;
 
   /// GPRCS1Offset, GPRCS2Offset, DPRCSOffset - Starting offset of callee saved
   /// register spills areas. For Mac OS X:
@@ -78,16 +77,17 @@ class ARMFunctionInfo : public MachineFunctionInfo {
   ///
   /// Also see AlignedDPRCSRegs below. Not all D-regs need to go in area 3.
   /// Some may be spilled after the stack has been realigned.
-  unsigned GPRCS1Offset;
-  unsigned GPRCS2Offset;
-  unsigned DPRCSOffset;
+  unsigned GPRCS1Offset = 0;
+  unsigned GPRCS2Offset = 0;
+  unsigned DPRCSOffset = 0;
 
   /// GPRCS1Size, GPRCS2Size, DPRCSSize - Sizes of callee saved register spills
   /// areas.
-  unsigned GPRCS1Size;
-  unsigned GPRCS2Size;
-  unsigned DPRCSAlignGapSize;
-  unsigned DPRCSSize;
+  unsigned FPCXTSaveSize = 0;
+  unsigned GPRCS1Size = 0;
+  unsigned GPRCS2Size = 0;
+  unsigned DPRCSAlignGapSize = 0;
+  unsigned DPRCSSize = 0;
 
   /// NumAlignedDPRCS2Regs - The number of callee-saved DPRs that are saved in
   /// the aligned portion of the stack frame.  This is always a contiguous
@@ -96,49 +96,48 @@ class ARMFunctionInfo : public MachineFunctionInfo {
   /// We do not keep track of the frame indices used for these registers - they
   /// behave like any other frame index in the aligned stack frame.  These
   /// registers also aren't included in DPRCSSize above.
-  unsigned NumAlignedDPRCS2Regs;
+  unsigned NumAlignedDPRCS2Regs = 0;
 
-  /// JumpTableUId - Unique id for jumptables.
-  ///
-  unsigned JumpTableUId;
-
-  unsigned PICLabelUId;
+  unsigned PICLabelUId = 0;
 
   /// VarArgsFrameIndex - FrameIndex for start of varargs area.
-  int VarArgsFrameIndex;
+  int VarArgsFrameIndex = 0;
 
   /// HasITBlocks - True if IT blocks have been inserted.
-  bool HasITBlocks;
+  bool HasITBlocks = false;
+
+  // Security Extensions
+  bool IsCmseNSEntry;
+  bool IsCmseNSCall;
 
   /// CPEClones - Track constant pool entries clones created by Constant Island
   /// pass.
   DenseMap<unsigned, unsigned> CPEClones;
 
-  /// GlobalBaseReg - keeps track of the virtual register initialized for
-  /// use as the global base register. This is used for PIC in some PIC
-  /// relocation models.
-  unsigned GlobalBaseReg;
-
   /// ArgumentStackSize - amount of bytes on stack consumed by the arguments
   /// being passed on the stack
-  unsigned ArgumentStackSize;
+  unsigned ArgumentStackSize = 0;
 
   /// CoalescedWeights - mapping of basic blocks to the rolling counter of
   /// coalesced weights.
   DenseMap<const MachineBasicBlock*, unsigned> CoalescedWeights;
 
+  /// True if this function has a subset of CSRs that is handled explicitly via
+  /// copies.
+  bool IsSplitCSR = false;
+
+  /// Globals that have had their storage promoted into the constant pool.
+  SmallPtrSet<const GlobalVariable*,2> PromotedGlobals;
+
+  /// The amount the literal pool has been increasedby due to promoted globals.
+  int PromotedGlobalsIncrease = 0;
+
+  /// True if r0 will be preserved by a call to this function (e.g. C++
+  /// con/destructors).
+  bool PreservesR0 = false;
+
 public:
-  ARMFunctionInfo() :
-    isThumb(false),
-    hasThumb2(false),
-    ArgRegsSaveSize(0), ReturnRegsCount(0), HasStackFrame(false),
-    RestoreSPFromFP(false),
-    LRSpilledForFarJump(false),
-    FramePtrSpillOffset(0), GPRCS1Offset(0), GPRCS2Offset(0), DPRCSOffset(0),
-    GPRCS1Size(0), GPRCS2Size(0), DPRCSAlignGapSize(0), DPRCSSize(0),
-    NumAlignedDPRCS2Regs(0),
-    JumpTableUId(0), PICLabelUId(0),
-    VarArgsFrameIndex(0), HasITBlocks(false), GlobalBaseReg(0) {}
+  ARMFunctionInfo() = default;
 
   explicit ARMFunctionInfo(MachineFunction &MF);
 
@@ -146,14 +145,13 @@ public:
   bool isThumb1OnlyFunction() const { return isThumb && !hasThumb2; }
   bool isThumb2Function() const { return isThumb && hasThumb2; }
 
+  bool isCmseNSEntryFunction() const { return IsCmseNSEntry; }
+  bool isCmseNSCallFunction() const { return IsCmseNSCall; }
+
   unsigned getStoredByValParamsPadding() const { return StByValParamsPadding; }
   void setStoredByValParamsPadding(unsigned p) { StByValParamsPadding = p; }
 
-  unsigned getArgRegsSaveSize(unsigned Align = 0) const {
-    if (!Align)
-      return ArgRegsSaveSize;
-    return (ArgRegsSaveSize + Align - 1) & ~(Align - 1);
-  }
+  unsigned getArgRegsSaveSize() const { return ArgRegsSaveSize; }
   void setArgRegsSaveSize(unsigned s) { ArgRegsSaveSize = s; }
 
   unsigned getReturnRegsCount() const { return ReturnRegsCount; }
@@ -165,8 +163,8 @@ public:
   bool shouldRestoreSPFromFP() const { return RestoreSPFromFP; }
   void setShouldRestoreSPFromFP(bool s) { RestoreSPFromFP = s; }
 
-  bool isLRSpilledForFarJump() const { return LRSpilledForFarJump; }
-  void setLRIsSpilledForFarJump(bool s) { LRSpilledForFarJump = s; }
+  bool isLRSpilled() const { return LRSpilled; }
+  void setLRIsSpilled(bool s) { LRSpilled = s; }
 
   unsigned getFramePtrSpillOffset() const { return FramePtrSpillOffset; }
   void setFramePtrSpillOffset(unsigned o) { FramePtrSpillOffset = o; }
@@ -182,11 +180,13 @@ public:
   void setGPRCalleeSavedArea2Offset(unsigned o) { GPRCS2Offset = o; }
   void setDPRCalleeSavedAreaOffset(unsigned o)  { DPRCSOffset = o; }
 
+  unsigned getFPCXTSaveAreaSize() const       { return FPCXTSaveSize; }
   unsigned getGPRCalleeSavedArea1Size() const { return GPRCS1Size; }
   unsigned getGPRCalleeSavedArea2Size() const { return GPRCS2Size; }
   unsigned getDPRCalleeSavedGapSize() const   { return DPRCSAlignGapSize; }
   unsigned getDPRCalleeSavedAreaSize()  const { return DPRCSSize; }
 
+  void setFPCXTSaveAreaSize(unsigned s)       { FPCXTSaveSize = s; }
   void setGPRCalleeSavedArea1Size(unsigned s) { GPRCS1Size = s; }
   void setGPRCalleeSavedArea2Size(unsigned s) { GPRCS2Size = s; }
   void setDPRCalleeSavedGapSize(unsigned s)   { DPRCSAlignGapSize = s; }
@@ -194,14 +194,6 @@ public:
 
   unsigned getArgumentStackSize() const { return ArgumentStackSize; }
   void setArgumentStackSize(unsigned size) { ArgumentStackSize = size; }
-
-  unsigned createJumpTableUId() {
-    return JumpTableUId++;
-  }
-
-  unsigned getNumJumpTables() const {
-    return JumpTableUId;
-  }
 
   void initPICLabelUId(unsigned UId) {
     PICLabelUId = UId;
@@ -221,8 +213,8 @@ public:
   bool hasITBlocks() const { return HasITBlocks; }
   void setHasITBlocks(bool h) { HasITBlocks = h; }
 
-  unsigned getGlobalBaseReg() const { return GlobalBaseReg; }
-  void setGlobalBaseReg(unsigned Reg) { GlobalBaseReg = Reg; }
+  bool isSplitCSR() const { return IsSplitCSR; }
+  void setIsSplitCSR(bool s) { IsSplitCSR = s; }
 
   void recordCPEClone(unsigned CPIdx, unsigned CPCloneIdx) {
     if (!CPEClones.insert(std::make_pair(CPCloneIdx, CPIdx)).second)
@@ -245,7 +237,30 @@ public:
     }
     return It;
   }
-};
-} // End llvm namespace
 
-#endif
+  /// Indicate to the backend that \c GV has had its storage changed to inside
+  /// a constant pool. This means it no longer needs to be emitted as a
+  /// global variable.
+  void markGlobalAsPromotedToConstantPool(const GlobalVariable *GV) {
+    PromotedGlobals.insert(GV);
+  }
+  SmallPtrSet<const GlobalVariable*, 2>& getGlobalsPromotedToConstantPool() {
+    return PromotedGlobals;
+  }
+  int getPromotedConstpoolIncrease() const {
+    return PromotedGlobalsIncrease;
+  }
+  void setPromotedConstpoolIncrease(int Sz) {
+    PromotedGlobalsIncrease = Sz;
+  }
+
+  DenseMap<unsigned, unsigned> EHPrologueRemappedRegs;
+  DenseMap<unsigned, unsigned> EHPrologueOffsetInRegs;
+
+  void setPreservesR0() { PreservesR0 = true; }
+  bool getPreservesR0() const { return PreservesR0; }
+};
+
+} // end namespace llvm
+
+#endif // LLVM_LIB_TARGET_ARM_ARMMACHINEFUNCTIONINFO_H

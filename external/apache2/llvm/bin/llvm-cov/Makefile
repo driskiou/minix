@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.4 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:47 joerg Exp $
 
 PROG_CXX=	llvm-cov
 NOMAN=		yes
@@ -10,19 +10,36 @@ NOMAN=		yes
 SRCS=	gcov.cpp \
 	llvm-cov.cpp \
 	CodeCoverage.cpp \
+	CoverageExporterJson.cpp \
+	CoverageExporterLcov.cpp \
 	CoverageFilters.cpp \
 	CoverageReport.cpp \
-	CoverageSummary.cpp \
 	CoverageSummaryInfo.cpp \
 	SourceCoverageView.cpp \
+	SourceCoverageViewHTML.cpp \
+	SourceCoverageViewText.cpp \
 	TestingSupport.cpp
 
 LLVM_LIBS+= \
+	ProfileDataCoverage \
 	ProfileData \
 	Object \
+	TextAPI \
+	MCParser \
+	MC \
+	BitReader \
+	BitstreamReader \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Support \
+	Demangle
 
 .include "${.PARSEDIR}/../../link.mk"
+
+LDADD+=	-lz
+.if !defined(HOSTPROG)
+DPADD+=	${LIBZ}
+.endif
 
 .include <bsd.prog.mk>

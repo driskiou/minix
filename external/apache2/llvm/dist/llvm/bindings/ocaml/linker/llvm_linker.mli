@@ -1,9 +1,8 @@
 (*===-- llvm_linker.mli - LLVM OCaml Interface -----------------*- OCaml -*-===*
  *
- *                     The LLVM Compiler Infrastructure
- *
- * This file is distributed under the University of Illinois Open Source
- * License. See LICENSE.TXT for details.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===----------------------------------------------------------------------===*)
 
@@ -14,13 +13,6 @@
 
 exception Error of string
 
-(** Linking mode. *)
-module Mode : sig
-  type t =
-  | DestroySource
-  | PreserveSource
-end
-
-(** [link_modules dst src mode] links [src] into [dst], raising [Error]
-    if the linking fails. *)
-val link_modules : Llvm.llmodule -> Llvm.llmodule -> Mode.t -> unit
+(** [link_modules' dst src] links [src] into [dst], raising [Error]
+    if the linking fails. The src module is destroyed. *)
+val link_modules' : Llvm.llmodule -> Llvm.llmodule -> unit

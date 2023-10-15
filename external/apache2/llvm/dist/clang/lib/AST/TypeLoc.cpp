@@ -1,9 +1,8 @@
-//===--- TypeLoc.cpp - Type Source Info Wrapper -----------------*- C++ -*-===//
+//===- TypeLoc.cpp - Type Source Info Wrapper -----------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,28 +11,44 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/TypeLoc.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/NestedNameSpecifier.h"
+#include "clang/AST/TemplateBase.h"
+#include "clang/AST/TemplateName.h"
 #include "clang/AST/TypeLocVisitor.h"
+#include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/Specifiers.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/MathExtras.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+
 using namespace clang;
+
+static const unsigned TypeLocMaxDataAlign = alignof(void *);
 
 //===----------------------------------------------------------------------===//
 // TypeLoc Implementation
 //===----------------------------------------------------------------------===//
 
 namespace {
-  class TypeLocRanger : public TypeLocVisitor<TypeLocRanger, SourceRange> {
-  public:
+
+class TypeLocRanger : public TypeLocVisitor<TypeLocRanger, SourceRange> {
+public:
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT) \
-    SourceRange Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
-      return TyLoc.getLocalSourceRange(); \
-    }
+  SourceRange Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
+    return TyLoc.getLocalSourceRange(); \
+  }
 #include "clang/AST/TypeLocNodes.def"
-  };
-}
+};
+
+} // namespace
 
 SourceRange TypeLoc::getLocalSourceRangeImpl(TypeLoc TL) {
   if (TL.isNull()) return SourceRange();
@@ -41,36 +56,40 @@ SourceRange TypeLoc::getLocalSourceRangeImpl(TypeLoc TL) {
 }
 
 namespace {
-  class TypeAligner : public TypeLocVisitor<TypeAligner, unsigned> {
-  public:
+
+class TypeAligner : public TypeLocVisitor<TypeAligner, unsigned> {
+public:
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT) \
-    unsigned Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
-      return TyLoc.getLocalDataAlignment(); \
-    }
+  unsigned Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
+    return TyLoc.getLocalDataAlignment(); \
+  }
 #include "clang/AST/TypeLocNodes.def"
-  };
-}
+};
 
-/// \brief Returns the alignment of the type source info data block.
+} // namespace
+
+/// Returns the alignment of the type source info data block.
 unsigned TypeLoc::getLocalAlignmentForType(QualType Ty) {
   if (Ty.isNull()) return 1;
   return TypeAligner().Visit(TypeLoc(Ty, nullptr));
 }
 
 namespace {
-  class TypeSizer : public TypeLocVisitor<TypeSizer, unsigned> {
-  public:
+
+class TypeSizer : public TypeLocVisitor<TypeSizer, unsigned> {
+public:
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT) \
-    unsigned Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
-      return TyLoc.getLocalDataSize(); \
-    }
+  unsigned Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
+    return TyLoc.getLocalDataSize(); \
+  }
 #include "clang/AST/TypeLocNodes.def"
-  };
-}
+};
 
-/// \brief Returns the size of the type source info data block.
+} // namespace
+
+/// Returns the size of the type source info data block.
 unsigned TypeLoc::getFullDataSizeForType(QualType Ty) {
   unsigned Total = 0;
   TypeLoc TyLoc(Ty, nullptr);
@@ -78,36 +97,38 @@ unsigned TypeLoc::getFullDataSizeForType(QualType Ty) {
   while (!TyLoc.isNull()) {
     unsigned Align = getLocalAlignmentForType(TyLoc.getType());
     MaxAlign = std::max(Align, MaxAlign);
-    Total = llvm::RoundUpToAlignment(Total, Align);
+    Total = llvm::alignTo(Total, Align);
     Total += TypeSizer().Visit(TyLoc);
     TyLoc = TyLoc.getNextTypeLoc();
   }
-  Total = llvm::RoundUpToAlignment(Total, MaxAlign);
+  Total = llvm::alignTo(Total, MaxAlign);
   return Total;
 }
 
 namespace {
-  class NextLoc : public TypeLocVisitor<NextLoc, TypeLoc> {
-  public:
+
+class NextLoc : public TypeLocVisitor<NextLoc, TypeLoc> {
+public:
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT) \
-    TypeLoc Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
-      return TyLoc.getNextTypeLoc(); \
-    }
+  TypeLoc Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
+    return TyLoc.getNextTypeLoc(); \
+  }
 #include "clang/AST/TypeLocNodes.def"
-  };
-}
+};
 
-/// \brief Get the next TypeLoc pointed by this TypeLoc, e.g for "int*" the
+} // namespace
+
+/// Get the next TypeLoc pointed by this TypeLoc, e.g for "int*" the
 /// TypeLoc is a PointerLoc and next TypeLoc is for "int".
 TypeLoc TypeLoc::getNextTypeLocImpl(TypeLoc TL) {
   return NextLoc().Visit(TL);
 }
 
-/// \brief Initializes a type location, and all of its children
+/// Initializes a type location, and all of its children
 /// recursively, as if the entire tree had been written in the
 /// given location.
-void TypeLoc::initializeImpl(ASTContext &Context, TypeLoc TL, 
+void TypeLoc::initializeImpl(ASTContext &Context, TypeLoc TL,
                              SourceLocation Loc) {
   while (true) {
     switch (TL.getTypeLocClass()) {
@@ -125,6 +146,48 @@ void TypeLoc::initializeImpl(ASTContext &Context, TypeLoc TL,
   }
 }
 
+namespace {
+
+class TypeLocCopier : public TypeLocVisitor<TypeLocCopier> {
+  TypeLoc Source;
+
+public:
+  TypeLocCopier(TypeLoc source) : Source(source) {}
+
+#define ABSTRACT_TYPELOC(CLASS, PARENT)
+#define TYPELOC(CLASS, PARENT)                          \
+  void Visit##CLASS##TypeLoc(CLASS##TypeLoc dest) {   \
+    dest.copyLocal(Source.castAs<CLASS##TypeLoc>());  \
+  }
+#include "clang/AST/TypeLocNodes.def"
+};
+
+} // namespace
+
+void TypeLoc::copy(TypeLoc other) {
+  assert(getFullDataSize() == other.getFullDataSize());
+
+  // If both data pointers are aligned to the maximum alignment, we
+  // can memcpy because getFullDataSize() accurately reflects the
+  // layout of the data.
+  if (reinterpret_cast<uintptr_t>(Data) ==
+          llvm::alignTo(reinterpret_cast<uintptr_t>(Data),
+                        TypeLocMaxDataAlign) &&
+      reinterpret_cast<uintptr_t>(other.Data) ==
+          llvm::alignTo(reinterpret_cast<uintptr_t>(other.Data),
+                        TypeLocMaxDataAlign)) {
+    memcpy(Data, other.Data, getFullDataSize());
+    return;
+  }
+
+  // Copy each of the pieces.
+  TypeLoc TL(getType(), Data);
+  do {
+    TypeLocCopier(other).Visit(TL);
+    other = other.getNextTypeLoc();
+  } while ((TL = TL.getNextTypeLoc()));
+}
+
 SourceLocation TypeLoc::getBeginLoc() const {
   TypeLoc Cur = *this;
   TypeLoc LeftMost = Cur;
@@ -139,7 +202,7 @@ SourceLocation TypeLoc::getBeginLoc() const {
         LeftMost = Cur;
         break;
       }
-      /* Fall through */
+      LLVM_FALLTHROUGH;
     case FunctionNoProto:
     case ConstantArray:
     case DependentSizedArray:
@@ -150,7 +213,7 @@ SourceLocation TypeLoc::getBeginLoc() const {
       Cur = Cur.getNextTypeLoc();
       continue;
     default:
-      if (!Cur.getLocalSourceRange().getBegin().isInvalid())
+      if (Cur.getLocalSourceRange().getBegin().isValid())
         LeftMost = Cur;
       Cur = Cur.getNextTypeLoc();
       if (Cur.isNull())
@@ -169,7 +232,7 @@ SourceLocation TypeLoc::getEndLoc() const {
     switch (Cur.getTypeLocClass()) {
     default:
       if (!Last)
-	Last = Cur;
+        Last = Cur;
       return Last.getLocalSourceRange().getEnd();
     case Paren:
     case ConstantArray:
@@ -192,7 +255,7 @@ SourceLocation TypeLoc::getEndLoc() const {
     case RValueReference:
     case PackExpansion:
       if (!Last)
-	Last = Cur;
+        Last = Cur;
       break;
     case Qualified:
     case Elaborated:
@@ -202,24 +265,24 @@ SourceLocation TypeLoc::getEndLoc() const {
   }
 }
 
-
 namespace {
-  struct TSTChecker : public TypeLocVisitor<TSTChecker, bool> {
-    // Overload resolution does the real work for us.
-    static bool isTypeSpec(TypeSpecTypeLoc _) { return true; }
-    static bool isTypeSpec(TypeLoc _) { return false; }
+
+struct TSTChecker : public TypeLocVisitor<TSTChecker, bool> {
+  // Overload resolution does the real work for us.
+  static bool isTypeSpec(TypeSpecTypeLoc _) { return true; }
+  static bool isTypeSpec(TypeLoc _) { return false; }
 
 #define ABSTRACT_TYPELOC(CLASS, PARENT)
 #define TYPELOC(CLASS, PARENT) \
-    bool Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
-      return isTypeSpec(TyLoc); \
-    }
+  bool Visit##CLASS##TypeLoc(CLASS##TypeLoc TyLoc) { \
+    return isTypeSpec(TyLoc); \
+  }
 #include "clang/AST/TypeLocNodes.def"
-  };
-}
+};
 
+} // namespace
 
-/// \brief Determines if the given type loc corresponds to a
+/// Determines if the given type loc corresponds to a
 /// TypeSpecTypeLoc.  Since there is not actually a TypeSpecType in
 /// the type hierarchy, this is made somewhat complicated.
 ///
@@ -230,6 +293,12 @@ namespace {
 bool TypeSpecTypeLoc::isKind(const TypeLoc &TL) {
   if (TL.getType().hasLocalQualifiers()) return false;
   return TSTChecker().Visit(TL);
+}
+
+bool TagTypeLoc::isDefinition() const {
+  TagDecl *D = getDecl();
+  return D->isCompleteDefinition() &&
+         (D->getIdentifier() == nullptr || D->getLocation() == getNameLoc());
 }
 
 // Reimplemented to account for GNU/C++ extension
@@ -255,6 +324,8 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::Char_U:
   case BuiltinType::Char_S:
     return TST_char;
+  case BuiltinType::Char8:
+    return TST_char8;
   case BuiltinType::Char16:
     return TST_char16;
   case BuiltinType::Char32:
@@ -278,9 +349,36 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::Float:
   case BuiltinType::Double:
   case BuiltinType::LongDouble:
+  case BuiltinType::Float16:
+  case BuiltinType::Float128:
+  case BuiltinType::ShortAccum:
+  case BuiltinType::Accum:
+  case BuiltinType::LongAccum:
+  case BuiltinType::UShortAccum:
+  case BuiltinType::UAccum:
+  case BuiltinType::ULongAccum:
+  case BuiltinType::ShortFract:
+  case BuiltinType::Fract:
+  case BuiltinType::LongFract:
+  case BuiltinType::UShortFract:
+  case BuiltinType::UFract:
+  case BuiltinType::ULongFract:
+  case BuiltinType::SatShortAccum:
+  case BuiltinType::SatAccum:
+  case BuiltinType::SatLongAccum:
+  case BuiltinType::SatUShortAccum:
+  case BuiltinType::SatUAccum:
+  case BuiltinType::SatULongAccum:
+  case BuiltinType::SatShortFract:
+  case BuiltinType::SatFract:
+  case BuiltinType::SatLongFract:
+  case BuiltinType::SatUShortFract:
+  case BuiltinType::SatUFract:
+  case BuiltinType::SatULongFract:
+  case BuiltinType::BFloat16:
     llvm_unreachable("Builtin type needs extra local data!");
     // Fall through, if the impossible happens.
-      
+
   case BuiltinType::NullPtr:
   case BuiltinType::Overload:
   case BuiltinType::Dependent:
@@ -291,15 +389,30 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
   case BuiltinType::ObjCId:
   case BuiltinType::ObjCClass:
   case BuiltinType::ObjCSel:
-  case BuiltinType::OCLImage1d:
-  case BuiltinType::OCLImage1dArray:
-  case BuiltinType::OCLImage1dBuffer:
-  case BuiltinType::OCLImage2d:
-  case BuiltinType::OCLImage2dArray:
-  case BuiltinType::OCLImage3d:
+#define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
+  case BuiltinType::Id:
+#include "clang/Basic/OpenCLImageTypes.def"
+#define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
+  case BuiltinType::Id:
+#include "clang/Basic/OpenCLExtensionTypes.def"
   case BuiltinType::OCLSampler:
   case BuiltinType::OCLEvent:
+  case BuiltinType::OCLClkEvent:
+  case BuiltinType::OCLQueue:
+  case BuiltinType::OCLReserveID:
+#define SVE_TYPE(Name, Id, SingletonId) \
+  case BuiltinType::Id:
+#include "clang/Basic/AArch64SVEACLETypes.def"
+#define PPC_VECTOR_TYPE(Name, Id, Size) \
+  case BuiltinType::Id:
+#include "clang/Basic/PPCTypes.def"
+#define RVV_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
+#include "clang/Basic/RISCVVTypes.def"
   case BuiltinType::BuiltinFn:
+  case BuiltinType::IncompleteMatrixIdx:
+  case BuiltinType::OMPArraySection:
+  case BuiltinType::OMPArrayShaping:
+  case BuiltinType::OMPIterator:
     return TST_unspecified;
   }
 
@@ -312,6 +425,78 @@ TypeLoc TypeLoc::IgnoreParensImpl(TypeLoc TL) {
   return TL;
 }
 
+SourceLocation TypeLoc::findNullabilityLoc() const {
+  if (auto ATL = getAs<AttributedTypeLoc>()) {
+    const Attr *A = ATL.getAttr();
+    if (A && (isa<TypeNullableAttr>(A) || isa<TypeNonNullAttr>(A) ||
+              isa<TypeNullUnspecifiedAttr>(A)))
+      return A->getLocation();
+  }
+
+  return {};
+}
+
+TypeLoc TypeLoc::findExplicitQualifierLoc() const {
+  // Qualified types.
+  if (auto qual = getAs<QualifiedTypeLoc>())
+    return qual;
+
+  TypeLoc loc = IgnoreParens();
+
+  // Attributed types.
+  if (auto attr = loc.getAs<AttributedTypeLoc>()) {
+    if (attr.isQualifier()) return attr;
+    return attr.getModifiedLoc().findExplicitQualifierLoc();
+  }
+
+  // C11 _Atomic types.
+  if (auto atomic = loc.getAs<AtomicTypeLoc>()) {
+    return atomic;
+  }
+
+  return {};
+}
+
+void ObjCTypeParamTypeLoc::initializeLocal(ASTContext &Context,
+                                           SourceLocation Loc) {
+  setNameLoc(Loc);
+  if (!getNumProtocols()) return;
+
+  setProtocolLAngleLoc(Loc);
+  setProtocolRAngleLoc(Loc);
+  for (unsigned i = 0, e = getNumProtocols(); i != e; ++i)
+    setProtocolLoc(i, Loc);
+}
+
+void ObjCObjectTypeLoc::initializeLocal(ASTContext &Context,
+                                        SourceLocation Loc) {
+  setHasBaseTypeAsWritten(true);
+  setTypeArgsLAngleLoc(Loc);
+  setTypeArgsRAngleLoc(Loc);
+  for (unsigned i = 0, e = getNumTypeArgs(); i != e; ++i) {
+    setTypeArgTInfo(i,
+                   Context.getTrivialTypeSourceInfo(
+                     getTypePtr()->getTypeArgsAsWritten()[i], Loc));
+  }
+  setProtocolLAngleLoc(Loc);
+  setProtocolRAngleLoc(Loc);
+  for (unsigned i = 0, e = getNumProtocols(); i != e; ++i)
+    setProtocolLoc(i, Loc);
+}
+
+SourceRange AttributedTypeLoc::getLocalSourceRange() const {
+  // Note that this does *not* include the range of the attribute
+  // enclosure, e.g.:
+  //    __attribute__((foo(bar)))
+  //    ^~~~~~~~~~~~~~~        ~~
+  // or
+  //    [[foo(bar)]]
+  //    ^~        ~~
+  // That enclosure doesn't necessarily belong to a single attribute
+  // anyway.
+  return getAttr() ? getAttr()->getRange() : SourceRange();
+}
+
 void TypeOfTypeLoc::initializeLocal(ASTContext &Context,
                                        SourceLocation Loc) {
   TypeofLikeTypeLoc<TypeOfTypeLoc, TypeOfType, TypeOfTypeLocInfo>
@@ -320,7 +505,16 @@ void TypeOfTypeLoc::initializeLocal(ASTContext &Context,
       getUnderlyingType(), Loc);
 }
 
-void ElaboratedTypeLoc::initializeLocal(ASTContext &Context, 
+void UnaryTransformTypeLoc::initializeLocal(ASTContext &Context,
+                                       SourceLocation Loc) {
+    setKWLoc(Loc);
+    setRParenLoc(Loc);
+    setLParenLoc(Loc);
+    this->setUnderlyingTInfo(
+        Context.getTrivialTypeSourceInfo(getTypePtr()->getBaseType(), Loc));
+}
+
+void ElaboratedTypeLoc::initializeLocal(ASTContext &Context,
                                         SourceLocation Loc) {
   setElaboratedKeywordLoc(Loc);
   NestedNameSpecifierLocBuilder Builder;
@@ -328,7 +522,7 @@ void ElaboratedTypeLoc::initializeLocal(ASTContext &Context,
   setQualifierLoc(Builder.getWithLocInContext(Context));
 }
 
-void DependentNameTypeLoc::initializeLocal(ASTContext &Context, 
+void DependentNameTypeLoc::initializeLocal(ASTContext &Context,
                                            SourceLocation Loc) {
   setElaboratedKeywordLoc(Loc);
   NestedNameSpecifierLocBuilder Builder;
@@ -357,14 +551,14 @@ DependentTemplateSpecializationTypeLoc::initializeLocal(ASTContext &Context,
                                                    getArgInfos(), Loc);
 }
 
-void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context, 
+void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context,
                                                       unsigned NumArgs,
                                                   const TemplateArgument *Args,
                                               TemplateArgumentLocInfo *ArgInfos,
                                                       SourceLocation Loc) {
   for (unsigned i = 0, e = NumArgs; i != e; ++i) {
     switch (Args[i].getKind()) {
-    case TemplateArgument::Null: 
+    case TemplateArgument::Null:
       llvm_unreachable("Impossible TemplateArgument");
 
     case TemplateArgument::Integral:
@@ -376,10 +570,10 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context,
     case TemplateArgument::Expression:
       ArgInfos[i] = TemplateArgumentLocInfo(Args[i].getAsExpr());
       break;
-      
+
     case TemplateArgument::Type:
       ArgInfos[i] = TemplateArgumentLocInfo(
-                          Context.getTrivialTypeSourceInfo(Args[i].getAsType(), 
+                          Context.getTrivialTypeSourceInfo(Args[i].getAsType(),
                                                            Loc));
       break;
 
@@ -393,7 +587,7 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context,
         Builder.MakeTrivial(Context, QTN->getQualifier(), Loc);
 
       ArgInfos[i] = TemplateArgumentLocInfo(
-          Builder.getWithLocInContext(Context), Loc,
+          Context, Builder.getWithLocInContext(Context), Loc,
           Args[i].getKind() == TemplateArgument::Template ? SourceLocation()
                                                           : Loc);
       break;
@@ -404,4 +598,98 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context,
       break;
     }
   }
+}
+
+DeclarationNameInfo AutoTypeLoc::getConceptNameInfo() const {
+  return DeclarationNameInfo(getNamedConcept()->getDeclName(),
+                             getLocalData()->ConceptNameLoc);
+}
+
+void AutoTypeLoc::initializeLocal(ASTContext &Context, SourceLocation Loc) {
+  setNestedNameSpecifierLoc(NestedNameSpecifierLoc());
+  setTemplateKWLoc(Loc);
+  setConceptNameLoc(Loc);
+  setFoundDecl(nullptr);
+  setRAngleLoc(Loc);
+  setLAngleLoc(Loc);
+  TemplateSpecializationTypeLoc::initializeArgLocs(Context, getNumArgs(),
+                                                   getTypePtr()->getArgs(),
+                                                   getArgInfos(), Loc);
+  setNameLoc(Loc);
+}
+
+
+namespace {
+
+  class GetContainedAutoTypeLocVisitor :
+    public TypeLocVisitor<GetContainedAutoTypeLocVisitor, TypeLoc> {
+  public:
+    using TypeLocVisitor<GetContainedAutoTypeLocVisitor, TypeLoc>::Visit;
+
+    TypeLoc VisitAutoTypeLoc(AutoTypeLoc TL) {
+      return TL;
+    }
+
+    // Only these types can contain the desired 'auto' type.
+
+    TypeLoc VisitElaboratedTypeLoc(ElaboratedTypeLoc T) {
+      return Visit(T.getNamedTypeLoc());
+    }
+
+    TypeLoc VisitQualifiedTypeLoc(QualifiedTypeLoc T) {
+      return Visit(T.getUnqualifiedLoc());
+    }
+
+    TypeLoc VisitPointerTypeLoc(PointerTypeLoc T) {
+      return Visit(T.getPointeeLoc());
+    }
+
+    TypeLoc VisitBlockPointerTypeLoc(BlockPointerTypeLoc T) {
+      return Visit(T.getPointeeLoc());
+    }
+
+    TypeLoc VisitReferenceTypeLoc(ReferenceTypeLoc T) {
+      return Visit(T.getPointeeLoc());
+    }
+
+    TypeLoc VisitMemberPointerTypeLoc(MemberPointerTypeLoc T) {
+      return Visit(T.getPointeeLoc());
+    }
+
+    TypeLoc VisitArrayTypeLoc(ArrayTypeLoc T) {
+      return Visit(T.getElementLoc());
+    }
+
+    TypeLoc VisitFunctionTypeLoc(FunctionTypeLoc T) {
+      return Visit(T.getReturnLoc());
+    }
+
+    TypeLoc VisitParenTypeLoc(ParenTypeLoc T) {
+      return Visit(T.getInnerLoc());
+    }
+
+    TypeLoc VisitAttributedTypeLoc(AttributedTypeLoc T) {
+      return Visit(T.getModifiedLoc());
+    }
+
+    TypeLoc VisitMacroQualifiedTypeLoc(MacroQualifiedTypeLoc T) {
+      return Visit(T.getInnerLoc());
+    }
+
+    TypeLoc VisitAdjustedTypeLoc(AdjustedTypeLoc T) {
+      return Visit(T.getOriginalLoc());
+    }
+
+    TypeLoc VisitPackExpansionTypeLoc(PackExpansionTypeLoc T) {
+      return Visit(T.getPatternLoc());
+    }
+  };
+
+} // namespace
+
+AutoTypeLoc TypeLoc::getContainedAutoTypeLoc() const {
+  TypeLoc Res = GetContainedAutoTypeLocVisitor().Visit(*this);
+  if (Res.isNull())
+    return AutoTypeLoc();
+  return Res.getAs<AutoTypeLoc>();
 }

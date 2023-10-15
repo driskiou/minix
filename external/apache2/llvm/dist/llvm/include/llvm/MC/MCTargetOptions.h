@@ -1,18 +1,35 @@
-//===- MCTargetOptions.h - MC Target Options -------------------*- C++ -*-===//
+//===- MCTargetOptions.h - MC Target Options --------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_MC_MCTARGETOPTIONS_H
 #define LLVM_MC_MCTARGETOPTIONS_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include <string>
+#include <vector>
 
 namespace llvm {
+
+enum class ExceptionHandling {
+  None,     ///< No exception support
+  DwarfCFI, ///< DWARF-like instruction based exceptions
+  SjLj,     ///< setjmp/longjmp based exceptions
+  ARM,      ///< ARM EHABI
+  WinEH,    ///< Windows Exception Handling
+  Wasm,     ///< WebAssembly Exception Handling
+  AIX,      ///< AIX Exception Handling
+};
+
+enum class DebugCompressionType {
+  None, ///< No compression
+  GNU,  ///< zlib-gnu style compression
+  Z,    ///< zlib style complession
+};
 
 class StringRef;
 
@@ -23,46 +40,48 @@ public:
     AsmInstrumentationAddress
   };
 
-  /// Enables AddressSanitizer instrumentation at machine level.
-  bool SanitizeAddress : 1;
-
   bool MCRelaxAll : 1;
   bool MCNoExecStack : 1;
   bool MCFatalWarnings : 1;
+  bool MCNoWarn : 1;
+  bool MCNoDeprecatedWarn : 1;
   bool MCSaveTempLabels : 1;
   bool MCUseDwarfDirectory : 1;
+  bool MCIncrementalLinkerCompatible : 1;
   bool ShowMCEncoding : 1;
   bool ShowMCInst : 1;
   bool AsmVerbose : 1;
-  int DwarfVersion;
+
+  /// Preserve Comments in Assembly.
+  bool PreserveAsmComments : 1;
+
+  bool Dwarf64 : 1;
+  int DwarfVersion = 0;
+
+  std::string ABIName;
+  std::string AssemblyLanguage;
+  std::string SplitDwarfFile;
+
+  const char *Argv0 = nullptr;
+  ArrayRef<const char *> CommandLineArgs;
+
+  /// Additional paths to search for `.include` directives when using the
+  /// integrated assembler.
+  std::vector<std::string> IASSearchPaths;
+
+  MCTargetOptions();
+
   /// getABIName - If this returns a non-empty string this represents the
   /// textual name of the ABI that we want the backend to use, e.g. o32, or
   /// aapcs-linux.
   StringRef getABIName() const;
-  std::string ABIName;
-  MCTargetOptions();
+
+  /// getAssemblyLanguage - If this returns a non-empty string this represents
+  /// the textual name of the assembly language that we will use for this
+  /// target, e.g. masm.
+  StringRef getAssemblyLanguage() const;
 };
-
-inline bool operator==(const MCTargetOptions &LHS, const MCTargetOptions &RHS) {
-#define ARE_EQUAL(X) LHS.X == RHS.X
-  return (ARE_EQUAL(SanitizeAddress) &&
-          ARE_EQUAL(MCRelaxAll) &&
-          ARE_EQUAL(MCNoExecStack) &&
-          ARE_EQUAL(MCFatalWarnings) &&
-          ARE_EQUAL(MCSaveTempLabels) &&
-          ARE_EQUAL(MCUseDwarfDirectory) &&
-          ARE_EQUAL(ShowMCEncoding) &&
-          ARE_EQUAL(ShowMCInst) &&
-          ARE_EQUAL(AsmVerbose) &&
-          ARE_EQUAL(DwarfVersion) &&
-	  ARE_EQUAL(ABIName));
-#undef ARE_EQUAL
-}
-
-inline bool operator!=(const MCTargetOptions &LHS, const MCTargetOptions &RHS) {
-  return !(LHS == RHS);
-}
 
 } // end namespace llvm
 
-#endif
+#endif // LLVM_MC_MCTARGETOPTIONS_H

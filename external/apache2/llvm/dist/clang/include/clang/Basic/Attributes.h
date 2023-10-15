@@ -1,9 +1,8 @@
 //===--- Attributes.h - Attributes header -----------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -11,7 +10,7 @@
 #define LLVM_CLANG_BASIC_ATTRIBUTES_H
 
 #include "clang/Basic/LangOptions.h"
-#include "llvm/ADT/Triple.h"
+#include "clang/Basic/TargetInfo.h"
 
 namespace clang {
 
@@ -22,16 +21,20 @@ enum class AttrSyntax {
   GNU,
   /// Is the identifier known as a __declspec-style attribute?
   Declspec,
+  /// Is the identifier known as a [] Microsoft-style attribute?
+  Microsoft,
   // Is the identifier known as a C++-style attribute?
   CXX,
+  // Is the identifier known as a C-style attribute?
+  C,
   // Is the identifier known as a pragma attribute?
   Pragma
 };
 
-/// \brief Return the version number associated with the attribute if we
+/// Return the version number associated with the attribute if we
 /// recognize and implement the attribute specified by the given information.
 int hasAttribute(AttrSyntax Syntax, const IdentifierInfo *Scope,
-                 const IdentifierInfo *Attr, const llvm::Triple &T,
+                 const IdentifierInfo *Attr, const TargetInfo &Target,
                  const LangOptions &LangOpts);
 
 } // end namespace clang

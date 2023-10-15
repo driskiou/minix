@@ -1,9 +1,8 @@
 //===-- MachineFunctionPrinterPass.cpp ------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,10 +10,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/SlotIndexes.h"
+#include "llvm/IR/PrintPasses.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -31,17 +32,20 @@ struct MachineFunctionPrinterPass : public MachineFunctionPass {
   const std::string Banner;
 
   MachineFunctionPrinterPass() : MachineFunctionPass(ID), OS(dbgs()) { }
-  MachineFunctionPrinterPass(raw_ostream &os, const std::string &banner) 
+  MachineFunctionPrinterPass(raw_ostream &os, const std::string &banner)
       : MachineFunctionPass(ID), OS(os), Banner(banner) {}
 
-  const char *getPassName() const override { return "MachineFunction Printer"; }
+  StringRef getPassName() const override { return "MachineFunction Printer"; }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesAll();
+    AU.addUsedIfAvailable<SlotIndexes>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override {
+    if (!isFunctionInPrintList(MF.getName()))
+      return false;
     OS << "# " << Banner << ":\n";
     MF.print(OS, getAnalysisIfAvailable<SlotIndexes>());
     return false;

@@ -1,9 +1,8 @@
 //==- CheckSizeofPointer.cpp - Check for sizeof on pointers ------*- C++ -*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,7 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugReporter.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
@@ -37,9 +36,9 @@ public:
 }
 
 void WalkAST::VisitChildren(Stmt *S) {
-  for (Stmt::child_iterator I = S->child_begin(), E = S->child_end(); I!=E; ++I)
-    if (Stmt *child = *I)
-      Visit(child);
+  for (Stmt *Child : S->children())
+    if (Child)
+      Visit(Child);
 }
 
 // CWE-467: Use of sizeof() on a Pointer Type
@@ -55,8 +54,8 @@ void WalkAST::VisitUnaryExprOrTypeTraitExpr(UnaryExprOrTypeTraitExpr *E) {
   QualType T = E->getTypeOfArgument();
   if (T->isPointerType()) {
 
-    // Many false positives have the form 'sizeof *p'. This is reasonable 
-    // because people know what they are doing when they intentionally 
+    // Many false positives have the form 'sizeof *p'. This is reasonable
+    // because people know what they are doing when they intentionally
     // dereference the pointer.
     Expr *ArgEx = E->getArgumentExpr();
     if (!isa<DeclRefExpr>(ArgEx->IgnoreParens()))
@@ -90,4 +89,8 @@ public:
 
 void ento::registerSizeofPointerChecker(CheckerManager &mgr) {
   mgr.registerChecker<SizeofPointerChecker>();
+}
+
+bool ento::shouldRegisterSizeofPointerChecker(const CheckerManager &mgr) {
+  return true;
 }

@@ -40,14 +40,14 @@ RTTI for this class hierarchy:
      double SideLength;
    public:
      Square(double S) : SideLength(S) {}
-     double computeArea() /* override */;
+     double computeArea() override;
    };
 
    class Circle : public Shape {
      double Radius;
    public:
      Circle(double R) : Radius(R) {}
-     double computeArea() /* override */;
+     double computeArea() override;
    };
 
 The most basic working setup for LLVM-style RTTI requires the following
@@ -135,7 +135,7 @@ steps:
        public:
       -  Square(double S) : SideLength(S) {}
       +  Square(double S) : Shape(SK_Square), SideLength(S) {}
-         double computeArea() /* override */;
+         double computeArea() override;
        };
 
        class Circle : public Shape {
@@ -143,7 +143,7 @@ steps:
        public:
       -  Circle(double R) : Radius(R) {}
       +  Circle(double R) : Shape(SK_Circle), Radius(R) {}
-         double computeArea() /* override */;
+         double computeArea() override;
        };
 
 #. Finally, you need to inform LLVM's RTTI templates how to dynamically
@@ -175,7 +175,7 @@ steps:
          double SideLength;
        public:
          Square(double S) : Shape(SK_Square), SideLength(S) {}
-         double computeArea() /* override */;
+         double computeArea() override;
       +
       +  static bool classof(const Shape *S) {
       +    return S->getKind() == SK_Square;
@@ -186,7 +186,7 @@ steps:
          double Radius;
        public:
          Circle(double R) : Shape(SK_Circle), Radius(R) {}
-         double computeArea() /* override */;
+         double computeArea() override;
       +
       +  static bool classof(const Shape *S) {
       +    return S->getKind() == SK_Circle;
@@ -377,12 +377,26 @@ contract for ``classof`` is "return ``true`` if the dynamic type of the
 argument is-a ``C``".  As long as your implementation fulfills this
 contract, you can tweak and optimize it as much as you want.
 
+For example, LLVM-style RTTI can work fine in the presence of
+multiple-inheritance by defining an appropriate ``classof``.
+An example of this in practice is
+`Decl <https://clang.llvm.org/doxygen/classclang_1_1Decl.html>`_ vs.
+`DeclContext <https://clang.llvm.org/doxygen/classclang_1_1DeclContext.html>`_
+inside Clang.
+The ``Decl`` hierarchy is done very similarly to the example setup
+demonstrated in this tutorial.
+The key part is how to then incorporate ``DeclContext``: all that is needed
+is in ``bool DeclContext::classof(const Decl *)``, which asks the question
+"Given a ``Decl``, how can I determine if it is-a ``DeclContext``?".
+It answers this with a simple switch over the set of ``Decl`` "kinds", and
+returning true for ones that are known to be ``DeclContext``'s.
+
 .. TODO::
 
    Touch on some of the more advanced features, like ``isa_impl`` and
    ``simplify_type``. However, those two need reference documentation in
    the form of doxygen comments as well. We need the doxygen so that we can
-   say "for full details, see http://llvm.org/doxygen/..."
+   say "for full details, see https://llvm.org/doxygen/..."
 
 Rules of Thumb
 ==============
@@ -398,3 +412,58 @@ Rules of Thumb
 #. For each class in the hierarchy that has children, implement a
    ``classof`` that checks a range of the first child's ``Kind`` and the
    last child's ``Kind``.
+
+RTTI for Open Class Hierarchies
+===============================
+
+Sometimes it is not possible to know all types in a hierarchy ahead of time.
+For example, in the shapes hierarchy described above the authors may have
+wanted their code to work for user defined shapes too. To support use cases
+that require open hierarchies LLVM provides the ``RTTIRoot`` and
+``RTTIExtends`` utilities.
+
+The ``RTTIRoot`` class describes an interface for performing RTTI checks. The
+``RTTIExtends`` class template provides an implementation of this interface
+for classes derived from ``RTTIRoot``. ``RTTIExtends`` uses the "`Curiously
+Recurring Template Idiom`_", taking the class being defined as its first
+template argument and the parent class as the second argument. Any class that
+uses ``RTTIExtends`` must define a ``static char ID`` member, the address of
+which will be used to identify the type.
+
+This open-hierarchy RTTI support should only be used if your use case requires
+it. Otherwise the standard LLVM RTTI system should be preferred.
+
+.. _`Curiously Recurring Template Idiom`:
+  https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern
+
+E.g.
+
+.. code-block:: c++
+
+   class Shape : public RTTIExtends<Shape, RTTIRoot> {
+   public:
+     static char ID;
+     virtual double computeArea() = 0;
+   };
+
+   class Square : public RTTIExtends<Square, Shape> {
+     double SideLength;
+   public:
+     static char ID;
+
+     Square(double S) : SideLength(S) {}
+     double computeArea() override;
+   };
+
+   class Circle : public RTTIExtends<Circle, Shape> {
+     double Radius;
+   public:
+     static char ID;
+
+     Circle(double R) : Radius(R) {}
+     double computeArea() override;
+   };
+
+   char Shape::ID = 0;
+   char Square::ID = 0;
+   char Circle::ID = 0;

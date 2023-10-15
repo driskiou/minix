@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.11 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:48 joerg Exp $
 
 PROG_CXX=	llvm-objdump
 NOMAN=		yes
@@ -10,51 +10,71 @@ NOMAN=		yes
 SRCS=	llvm-objdump.cpp \
 	COFFDump.cpp \
 	ELFDump.cpp \
-	MachODump.cpp
+	MachODump.cpp \
+	SourcePrinter.cpp \
+	WasmDump.cpp \
+	XCOFFDump.cpp
+
+TABLEGEN_SRC=	ObjdumpOpts.td OtoolOpts.td
+
+TABLEGEN_OUTPUT.ObjdumpOpts.td= \
+	ObjdumpOpts.inc|-gen-opt-parser-defs
+
+TABLEGEN_OUTPUT.OtoolOpts.td= \
+	OtoolOpts.inc|-gen-opt-parser-defs
+
+.include "${.PARSEDIR}/../../tablegen.mk"
 
 LLVM_LIBS+= \
 	AArch64Disassembler \
 	AArch64AsmParser \
 	AArch64MCTargetDesc \
-	AArch64AsmPrinter \
 	AArch64TargetInfo \
 	AArch64Utils \
+	AMDGPUDisassembler \
+	AMDGPUTargetInfo \
+	AMDGPUMCTargetDesc \
+	AMDGPUAsmParser \
+	AMDGPUUtils \
 	ARMDisassembler \
 	ARMAsmParser \
 	ARMMCTargetDesc \
-	ARMAsmPrinter \
 	ARMTargetInfo \
+	ARMUtils \
 	MipsDisassembler \
 	MipsAsmParser \
 	MipsMCTargetDesc \
-	MipsAsmPrinter \
 	MipsTargetInfo \
 	PowerPCDisassembler \
 	PowerPCAsmParser \
 	PowerPCMCTargetDesc \
-	PowerPCAsmPrinter \
 	PowerPCTargetInfo \
 	SparcDisassembler \
 	SparcAsmParser \
 	SparcMCTargetDesc \
-	SparcAsmPrinter \
 	SparcTargetInfo \
 	X86Disassembler \
 	X86AsmParser \
 	X86CodeGen \
 	X86MCTargetDesc \
-	X86AsmPrinter \
 	X86TargetInfo \
-	X86Utils \
 	CodeGen \
 	MCDisassembler \
-	DebugInfo \
+	DebugInfoDWARF \
+	DebugInfoSymbolize \
+	DebugInfoPDB \
 	Object \
+	TextAPI \
 	BitReader \
+	BitstreamReader \
 	MCParser \
 	MC \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Option \
+	Support \
+	Demangle
 
 LDADD+=	-lz
 DPADD+=	${LIBZ}

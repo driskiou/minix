@@ -1,9 +1,8 @@
 //=== NoReturnFunctionChecker.cpp -------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,9 +11,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
-#include "SelectorExtras.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/Attr.h"
+#include "clang/Analysis/SelectorExtras.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
@@ -66,6 +65,7 @@ void NoReturnFunctionChecker::checkPostCall(const CallEvent &CE,
             .Case("assfail", true)
             .Case("db_error", true)
             .Case("__assert", true)
+            .Case("__assert2", true)
             // For the purpose of static analysis, we do not care that
             //  this MSVC function will return if the user decides to continue.
             .Case("_wassert", true)
@@ -81,7 +81,7 @@ void NoReturnFunctionChecker::checkPostCall(const CallEvent &CE,
   }
 
   if (BuildSinks)
-    C.generateSink();
+    C.generateSink(C.getState(), C.getPredecessor());
 }
 
 void NoReturnFunctionChecker::checkPostObjCMessage(const ObjCMethodCall &Msg,
@@ -90,7 +90,7 @@ void NoReturnFunctionChecker::checkPostObjCMessage(const ObjCMethodCall &Msg,
   if (const ObjCMethodDecl *MD = Msg.getDecl()) {
     MD = MD->getCanonicalDecl();
     if (MD->hasAttr<AnalyzerNoReturnAttr>()) {
-      C.generateSink();
+      C.generateSink(C.getState(), C.getPredecessor());
       return;
     }
   }
@@ -122,23 +122,27 @@ void NoReturnFunctionChecker::checkPostObjCMessage(const ObjCMethodCall &Msg,
   case 4:
     lazyInitKeywordSelector(HandleFailureInFunctionSel, C.getASTContext(),
                             "handleFailureInFunction", "file", "lineNumber",
-                            "description", nullptr);
+                            "description");
     if (Sel != HandleFailureInFunctionSel)
       return;
     break;
   case 5:
     lazyInitKeywordSelector(HandleFailureInMethodSel, C.getASTContext(),
                             "handleFailureInMethod", "object", "file",
-                            "lineNumber", "description", nullptr);
+                            "lineNumber", "description");
     if (Sel != HandleFailureInMethodSel)
       return;
     break;
   }
 
   // If we got here, it's one of the messages we care about.
-  C.generateSink();
+  C.generateSink(C.getState(), C.getPredecessor());
 }
 
 void ento::registerNoReturnFunctionChecker(CheckerManager &mgr) {
   mgr.registerChecker<NoReturnFunctionChecker>();
+}
+
+bool ento::shouldRegisterNoReturnFunctionChecker(const CheckerManager &mgr) {
+  return true;
 }

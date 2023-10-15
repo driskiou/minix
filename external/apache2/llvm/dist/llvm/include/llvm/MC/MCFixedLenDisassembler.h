@@ -1,9 +1,8 @@
 //===-- llvm/MC/MCFixedLenDisassembler.h - Decoder driver -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // Fixed length disassembler decoder state machine driver.
@@ -22,6 +21,8 @@ enum DecoderOps {
                         //                uleb128 Val, uint16_t NumToSkip)
   OPC_CheckPredicate,   // OPC_CheckPredicate(uleb128 PIdx, uint16_t NumToSkip)
   OPC_Decode,           // OPC_Decode(uleb128 Opcode, uleb128 DIdx)
+  OPC_TryDecode,        // OPC_TryDecode(uleb128 Opcode, uleb128 DIdx,
+                        //               uint16_t NumToSkip)
   OPC_SoftFail,         // OPC_SoftFail(uleb128 PMask, uleb128 NMask)
   OPC_Fail              // OPC_Fail()
 };

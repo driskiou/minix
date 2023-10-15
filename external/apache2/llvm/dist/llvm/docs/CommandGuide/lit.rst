@@ -1,6 +1,8 @@
 lit - LLVM Integrated Tester
 ============================
 
+.. program:: lit
+
 SYNOPSIS
 --------
 
@@ -18,7 +20,7 @@ user interface as possible.
 command line.  Tests can be either individual test files or directories to
 search for tests (see :ref:`test-discovery`).
 
-Each specified test will be executed (potentially in parallel) and once all
+Each specified test will be executed (potentially concurrently) and once all
 tests have been run :program:`lit` will print summary information on the number
 of tests which passed or failed (see :ref:`test-status-results`).  The
 :program:`lit` program will execute with a non-zero exit code if any tests
@@ -36,6 +38,11 @@ Finally, :program:`lit` also supports additional options for only running a
 subset of the options specified on the command line, see
 :ref:`selection-options` for more information.
 
+:program:`lit` parses options from the environment variable ``LIT_OPTS`` after
+parsing options from the command line.  ``LIT_OPTS`` is primarily useful for
+supplementing or overriding the command-line options supplied to :program:`lit`
+by ``check`` targets defined by a project's build system.
+
 Users interested in the :program:`lit` architecture or designing a
 :program:`lit` testing implementation should see :ref:`lit-infrastructure`.
 
@@ -46,7 +53,7 @@ GENERAL OPTIONS
 
  Show the :program:`lit` help message.
 
-.. option:: -j N, --threads=N
+.. option:: -j N, --workers=N
 
  Run ``N`` tests in parallel.  By default, this is automatically chosen to
  match the number of detected available CPUs.
@@ -56,7 +63,7 @@ GENERAL OPTIONS
  Search for :file:`{NAME}.cfg` and :file:`{NAME}.site.cfg` when searching for
  test suites, instead of :file:`lit.cfg` and :file:`lit.site.cfg`.
 
-.. option:: --param NAME, --param NAME=VALUE
+.. option:: -D NAME[=VALUE], --param NAME[=VALUE]
 
  Add a user defined parameter ``NAME`` with the given ``VALUE`` (or the empty
  string if not given).  The meaning and use of these parameters is test suite
@@ -74,11 +81,28 @@ OUTPUT OPTIONS
 .. option:: -s, --succinct
 
  Show less output, for example don't show information on tests that pass.
+ Also show a progress bar, unless ``--no-progress-bar`` is specified.
 
 .. option:: -v, --verbose
 
  Show more information on test failures, for example the entire test output
  instead of just the test result.
+
+.. option:: -vv, --echo-all-commands
+
+ Echo all commands to stdout, as they are being executed.
+ This can be valuable for debugging test failures, as the last echoed command
+ will be the one which has failed.
+ :program:`lit` normally inserts a no-op command (``:`` in the case of bash)
+ with argument ``'RUN: at line N'`` before each command pipeline, and this
+ option also causes those no-op commands to be echoed to stdout to help you
+ locate the source line of the failed command.
+ This option implies ``--verbose``.
+
+.. option:: -a, --show-all
+
+ Show more information about all tests, for example the entire test
+ commandline and output.
 
 .. option:: --no-progress-bar
 
@@ -127,13 +151,38 @@ EXECUTION OPTIONS
 
  Track the wall time individual tests take to execute and includes the results
  in the summary output.  This is useful for determining which tests in a test
- suite take the most time to execute.  Note that this option is most useful
- with ``-j 1``.
+ suite take the most time to execute.
+
+.. option:: --ignore-fail
+
+ Exit with status zero even if some tests fail.
+
+.. option:: --no-indirectly-run-check
+
+ Do not error if a test would not be run if the user had specified the
+ containing directory instead of naming the test directly.
 
 .. _selection-options:
 
 SELECTION OPTIONS
 -----------------
+
+By default, `lit` will run failing tests first, then run tests in descending
+execution time order to optimize concurrency.
+
+The timing data is stored in the `test_exec_root` in a file named
+`.lit_test_times.txt`. If this file does not exist, then `lit` checks the
+`test_source_root` for the file to optionally accelerate clean builds.
+
+.. option:: --shuffle
+
+ Run the tests in a random order, not failing/slowest first.
+
+.. option:: --max-failures N
+
+ Stop execution after the given number ``N`` of failures.
+ An integer argument should be passed on the command line
+ prior to execution.
 
 .. option:: --max-tests=N
 
@@ -142,10 +191,53 @@ SELECTION OPTIONS
 .. option:: --max-time=N
 
  Spend at most ``N`` seconds (approximately) running tests and then terminate.
+ Note that this is not an alias for :option:`--timeout`; the two are
+ different kinds of maximums.
 
-.. option:: --shuffle
+.. option:: --num-shards=M
 
- Run the tests in a random order.
+ Divide the set of selected tests into ``M`` equal-sized subsets or
+ "shards", and run only one of them.  Must be used with the
+ ``--run-shard=N`` option, which selects the shard to run. The environment
+ variable ``LIT_NUM_SHARDS`` can also be used in place of this
+ option. These two options provide a coarse mechanism for partitioning large
+ testsuites, for parallel execution on separate machines (say in a large
+ testing farm).
+
+.. option:: --run-shard=N
+
+ Select which shard to run, assuming the ``--num-shards=M`` option was
+ provided. The two options must be used together, and the value of ``N``
+ must be in the range ``1..M``. The environment variable
+ ``LIT_RUN_SHARD`` can also be used in place of this option.
+
+.. option:: --timeout=N
+
+ Spend at most ``N`` seconds (approximately) running each individual test.
+ ``0`` means no time limit, and ``0`` is the default. Note that this is not an
+ alias for :option:`--max-time`; the two are different kinds of maximums.
+
+.. option:: --filter=REGEXP
+
+  Run only those tests whose name matches the regular expression specified in
+  ``REGEXP``. The environment variable ``LIT_FILTER`` can be also used in place
+  of this option, which is especially useful in environments where the call
+  to ``lit`` is issued indirectly.
+
+.. option:: --filter-out=REGEXP
+
+  Filter out those tests whose name matches the regular expression specified in
+  ``REGEXP``. The environment variable ``LIT_FILTER_OUT`` can be also used in
+  place of this option, which is especially useful in environments where the
+  call to ``lit`` is issued indirectly.
+
+.. option:: --xfail=LIST
+
+  Treat those tests whose name is in the semicolon separated list ``LIST`` as
+  ``XFAIL``. This can be helpful when one does not want to modify the test
+  suite. The environment variable ``LIT_XFAIL`` can be also used in place of
+  this option, which is especially useful in environments where the call to
+  ``lit`` is issued indirectly.
 
 ADDITIONAL OPTIONS
 ------------------
@@ -161,7 +253,7 @@ ADDITIONAL OPTIONS
 
 .. option:: --show-tests
 
- List all of the the discovered tests and exit.
+ List all of the discovered tests and exit.
 
 EXIT STATUS
 -----------
@@ -204,11 +296,16 @@ convenient and flexible support for out-of-tree builds.
 TEST STATUS RESULTS
 -------------------
 
-Each test ultimately produces one of the following six results:
+Each test ultimately produces one of the following eight results:
 
 **PASS**
 
  The test succeeded.
+
+**FLAKYPASS**
+
+ The test succeeded after being re-run more than once. This only applies to
+ tests containing an ``ALLOW_RETRIES:`` annotation.
 
 **XFAIL**
 
@@ -235,6 +332,11 @@ Each test ultimately produces one of the following six results:
 
  The test is not supported in this environment.  This is used by test formats
  which can report unsupported tests.
+
+**TIMEOUT**
+
+ The test was run, but it timed out before it was able to complete. This is
+ considered a failure.
 
 Depending on the test format tests may produce additional information about
 their status (generally only for failures).  See the :ref:`output-options`
@@ -300,6 +402,11 @@ executed, two important global variables are predefined:
  **environment** A dictionary representing the environment to use when executing
  tests in the suite.
 
+ **standalone_tests** When true, mark a directory with tests expected to be run
+ standalone. Test discovery is disabled for that directory and
+ *--no-indirectly-run-check* is in effect. *lit.suffixes* and *lit.excludes*
+ must be empty when this variable is true.
+
  **suffixes** For **lit** test formats which scan directories for tests, this
  variable is a list of suffixes to identify test files.  Used by: *ShTest*.
 
@@ -318,6 +425,9 @@ executed, two important global variables are predefined:
  **pipefail** Normally a test using a shell pipe fails if any of the commands
  on the pipe fail. If this is not desired, setting this variable to false
  makes the test fail only if the last command in the pipe fails.
+
+ **available_features** A set of features that can be used in `XFAIL`,
+ `REQUIRES`, and `UNSUPPORTED` directives.
 
 TEST DISCOVERY
 ~~~~~~~~~~~~~~
@@ -341,7 +451,7 @@ LOCAL CONFIGURATION FILES
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When :program:`lit` loads a subdirectory in a test suite, it instantiates a
-local test configuration by cloning the configuration for the parent direction
+local test configuration by cloning the configuration for the parent directory
 --- the root of this configuration chain will always be a test suite.  Once the
 test configuration is cloned :program:`lit` checks for a *lit.local.cfg* file
 in the subdirectory.  If present, this file will be loaded and can be used to
@@ -349,6 +459,61 @@ specialize the configuration for each individual directory.  This facility can
 be used to define subdirectories of optional tests, or to change other
 configuration parameters --- for example, to change the test format, or the
 suffixes which identify test files.
+
+SUBSTITUTIONS
+~~~~~~~~~~~~~
+
+:program:`lit` allows patterns to be substituted inside RUN commands. It also
+provides the following base set of substitutions, which are defined in
+TestRunner.py:
+
+ ======================= ==============
+  Macro                   Substitution
+ ======================= ==============
+ %s                      source path (path to the file currently being run)
+ %S                      source dir (directory of the file currently being run)
+ %p                      same as %S
+ %{pathsep}              path separator
+ %t                      temporary file name unique to the test
+ %basename_t             The last path component of %t but without the ``.tmp`` extension
+ %T                      parent directory of %t (not unique, deprecated, do not use)
+ %%                      %
+ %/s                     %s but ``\`` is replaced by ``/``
+ %/S                     %S but ``\`` is replaced by ``/``
+ %/p                     %p but ``\`` is replaced by ``/``
+ %/t                     %t but ``\`` is replaced by ``/``
+ %/T                     %T but ``\`` is replaced by ``/``
+ %{/s:regex_replacement} %/s but escaped for use in the replacement of a ``s@@@`` command in sed
+ %{/S:regex_replacement} %/S but escaped for use in the replacement of a ``s@@@`` command in sed
+ %{/p:regex_replacement} %/p but escaped for use in the replacement of a ``s@@@`` command in sed
+ %{/t:regex_replacement} %/t but escaped for use in the replacement of a ``s@@@`` command in sed
+ %{/T:regex_replacement} %/T but escaped for use in the replacement of a ``s@@@`` command in sed
+ %:s                     On Windows, %/s but a ``:`` is removed if its the second character.
+                         Otherwise, %s but with a single leading ``/`` removed.
+ %:S                     On Windows, %/S but a ``:`` is removed if its the second character.
+                         Otherwise, %S but with a single leading ``/`` removed.
+ %:p                     On Windows, %/p but a ``:`` is removed if its the second character.
+                         Otherwise, %p but with a single leading ``/`` removed.
+ %:t                     On Windows, %/t but a ``:`` is removed if its the second character.
+                         Otherwise, %t but with a single leading ``/`` removed.
+ %:T                     On Windows, %/T but a ``:`` is removed if its the second character.
+                         Otherwise, %T but with a single leading ``/`` removed.
+ ======================= ==============
+
+Other substitutions are provided that are variations on this base set and
+further substitution patterns can be defined by each test module. See the
+modules :ref:`local-configuration-files`.
+
+By default, substitutions are expanded exactly once, so that if e.g. a
+substitution ``%build`` is defined in top of another substitution ``%cxx``,
+``%build`` will expand to ``%cxx`` textually, not to what ``%cxx`` expands to.
+However, if the ``recursiveExpansionLimit`` property of the ``TestingConfig``
+is set to a non-negative integer, substitutions will be expanded recursively
+until that limit is reached. It is an error if the limit is reached and
+expanding substitutions again would yield a different result.
+
+More detailed information on substitutions can be found in the
+:doc:`../TestingGuide`.
 
 TEST RUN OUTPUT FORMAT
 ~~~~~~~~~~~~~~~~~~~~~~

@@ -1,30 +1,20 @@
-//==-- MCRelocationInfo.cpp ------------------------------------------------==//
+//===-- MCRelocationInfo.cpp ----------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/MC/MCRelocationInfo.h"
+#include "llvm/MC/MCDisassembler/MCRelocationInfo.h"
 #include "llvm-c/Disassembler.h"
-#include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/TargetRegistry.h"
 
 using namespace llvm;
 
-MCRelocationInfo::MCRelocationInfo(MCContext &Ctx)
-  : Ctx(Ctx) {
-}
+MCRelocationInfo::MCRelocationInfo(MCContext &Ctx) : Ctx(Ctx) {}
 
-MCRelocationInfo::~MCRelocationInfo() {
-}
-
-const MCExpr *
-MCRelocationInfo::createExprForRelocation(object::RelocationRef Rel) {
-  return nullptr;
-}
+MCRelocationInfo::~MCRelocationInfo() = default;
 
 const MCExpr *
 MCRelocationInfo::createExprForCAPIVariantKind(const MCExpr *SubExpr,
@@ -34,6 +24,7 @@ MCRelocationInfo::createExprForCAPIVariantKind(const MCExpr *SubExpr,
   return SubExpr;
 }
 
-MCRelocationInfo *llvm::createMCRelocationInfo(StringRef TT, MCContext &Ctx) {
+MCRelocationInfo *llvm::createMCRelocationInfo(const Triple &TT,
+                                               MCContext &Ctx) {
   return new MCRelocationInfo(Ctx);
 }

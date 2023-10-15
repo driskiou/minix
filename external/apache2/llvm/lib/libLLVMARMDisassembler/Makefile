@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.2 2011/09/01 12:24:35 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:04 joerg Exp $
 
 LIB=	LLVMARMDisassembler
 

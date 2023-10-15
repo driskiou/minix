@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.15 2015/01/29 20:41:37 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:57 joerg Exp $
 
 LIB=	clangSema
 
@@ -7,24 +7,27 @@ LIB=	clangSema
 .PATH: ${CLANG_SRCDIR}/lib/Sema
 
 SRCS+=	AnalysisBasedWarnings.cpp \
-	AttributeList.cpp \
 	CodeCompleteConsumer.cpp \
 	DeclSpec.cpp \
 	DelayedDiagnostic.cpp \
 	IdentifierResolver.cpp \
 	JumpDiagnostics.cpp \
 	MultiplexExternalSemaSource.cpp \
+	ParsedAttr.cpp \
 	Scope.cpp \
 	ScopeInfo.cpp \
 	Sema.cpp \
 	SemaAccess.cpp \
 	SemaAttr.cpp \
+	SemaAvailability.cpp \
 	SemaCUDA.cpp \
 	SemaCXXScopeSpec.cpp \
 	SemaCast.cpp \
 	SemaChecking.cpp \
 	SemaCodeComplete.cpp \
+	SemaConcept.cpp \
 	SemaConsumer.cpp \
+	SemaCoroutine.cpp \
 	SemaDecl.cpp \
 	SemaDeclAttr.cpp \
 	SemaDeclCXX.cpp \
@@ -38,13 +41,15 @@ SRCS+=	AnalysisBasedWarnings.cpp \
 	SemaInit.cpp \
 	SemaLambda.cpp \
 	SemaLookup.cpp \
+	SemaModule.cpp \
 	SemaObjCProperty.cpp \
 	SemaOpenMP.cpp \
 	SemaOverload.cpp \
 	SemaPseudoObject.cpp \
-	SemaStmt.cpp \
 	SemaStmtAsm.cpp \
 	SemaStmtAttr.cpp \
+	SemaStmt.cpp \
+	SemaSYCL.cpp \
 	SemaTemplate.cpp \
 	SemaTemplateDeduction.cpp \
 	SemaTemplateInstantiate.cpp \
@@ -52,6 +57,12 @@ SRCS+=	AnalysisBasedWarnings.cpp \
 	SemaTemplateVariadic.cpp \
 	SemaType.cpp \
 	TypeLocBuilder.cpp
+
+CLANG_TABLEGEN_SRC=		OpenCLBuiltins.td
+CLANG_TABLEGEN_OUTPUT= \
+	OpenCLBuiltins.inc|-gen-clang-opencl-builtins
+
+.include "${.PARSEDIR}/../../tablegen.mk"
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>

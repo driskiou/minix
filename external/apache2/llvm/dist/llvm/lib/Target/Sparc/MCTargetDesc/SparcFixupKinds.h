@@ -1,9 +1,8 @@
 //===-- SparcFixupKinds.h - Sparc Specific Fixup Entries --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,6 +29,9 @@ namespace llvm {
       fixup_sparc_br16_2,
       fixup_sparc_br16_14,
 
+      /// fixup_sparc_13 - 13-bit fixup
+      fixup_sparc_13,
+
       /// fixup_sparc_hi22  - 22-bit fixup corresponding to %hi(foo)
       /// for sethi
       fixup_sparc_hi22,
@@ -52,6 +54,9 @@ namespace llvm {
       /// fixup_sparc_hm  -  10-bit fixup corresponding to %hm(foo)
       fixup_sparc_hm,
 
+      /// fixup_sparc_lm  -  22-bit fixup corresponding to %lm(foo)
+      fixup_sparc_lm,
+
       /// fixup_sparc_pc22 - 22-bit fixup corresponding to %pc22(foo)
       fixup_sparc_pc22,
 
@@ -63,6 +68,9 @@ namespace llvm {
 
       /// fixup_sparc_got10 - 10-bit fixup corresponding to %got10(foo)
       fixup_sparc_got10,
+
+      /// fixup_sparc_got13 - 13-bit fixup corresponding to %got13(foo)
+      fixup_sparc_got13,
 
       /// fixup_sparc_wplt30
       fixup_sparc_wplt30,

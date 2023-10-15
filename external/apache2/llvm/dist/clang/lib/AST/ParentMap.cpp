@@ -1,9 +1,8 @@
 //===--- ParentMap.cpp - Mappings from Stmts to their Parents ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +14,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/StmtObjC.h"
 #include "llvm/ADT/DenseMap.h"
 
 using namespace clang;
@@ -28,6 +28,8 @@ enum OpaqueValueMode {
 
 static void BuildParentMap(MapTy& M, Stmt* S,
                            OpaqueValueMode OVMode = OV_Transparent) {
+  if (!S)
+    return;
 
   switch (S->getStmtClass()) {
   case Stmt::PseudoObjectExprClass: {
@@ -36,8 +38,8 @@ static void BuildParentMap(MapTy& M, Stmt* S,
 
     // If we are rebuilding the map, clear out any existing state.
     if (M[POE->getSyntacticForm()])
-      for (Stmt::child_range I = S->children(); I; ++I)
-        M[*I] = nullptr;
+      for (Stmt *SubStmt : S->children())
+        M[SubStmt] = nullptr;
 
     M[POE->getSyntacticForm()] = S;
     BuildParentMap(M, POE->getSyntacticForm(), OV_Transparent);
@@ -81,11 +83,23 @@ static void BuildParentMap(MapTy& M, Stmt* S,
     }
     break;
   }
+  case Stmt::CapturedStmtClass:
+    for (Stmt *SubStmt : S->children()) {
+      if (SubStmt) {
+        M[SubStmt] = S;
+        BuildParentMap(M, SubStmt, OVMode);
+      }
+    }
+    if (Stmt *SubStmt = cast<CapturedStmt>(S)->getCapturedStmt()) {
+      M[SubStmt] = S;
+      BuildParentMap(M, SubStmt, OVMode);
+    }
+    break;
   default:
-    for (Stmt::child_range I = S->children(); I; ++I) {
-      if (*I) {
-        M[*I] = S;
-        BuildParentMap(M, *I, OVMode);
+    for (Stmt *SubStmt : S->children()) {
+      if (SubStmt) {
+        M[SubStmt] = S;
+        BuildParentMap(M, SubStmt, OVMode);
       }
     }
     break;
@@ -134,7 +148,7 @@ Stmt *ParentMap::getParentIgnoreParenCasts(Stmt *S) const {
   }
   while (S && (isa<ParenExpr>(S) || isa<CastExpr>(S)));
 
-  return S;  
+  return S;
 }
 
 Stmt *ParentMap::getParentIgnoreParenImpCasts(Stmt *S) const {
@@ -160,7 +174,7 @@ bool ParentMap::isConsumedExpr(Expr* E) const {
 
   // Ignore parents that don't guarantee consumption.
   while (P && (isa<ParenExpr>(P) || isa<CastExpr>(P) ||
-               isa<ExprWithCleanups>(P))) {
+               isa<FullExpr>(P))) {
     DirectChild = P;
     P = getParent(P);
   }
@@ -191,6 +205,8 @@ bool ParentMap::isConsumedExpr(Expr* E) const {
       return DirectChild == cast<IndirectGotoStmt>(P)->getTarget();
     case Stmt::SwitchStmtClass:
       return DirectChild == cast<SwitchStmt>(P)->getCond();
+    case Stmt::ObjCForCollectionStmtClass:
+      return DirectChild == cast<ObjCForCollectionStmt>(P)->getCollection();
     case Stmt::ReturnStmtClass:
       return true;
   }

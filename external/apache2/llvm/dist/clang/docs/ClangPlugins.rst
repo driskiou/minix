@@ -43,32 +43,106 @@ register a plugin in a library, use ``FrontendPluginRegistry::Add<>``:
 
   static FrontendPluginRegistry::Add<MyPlugin> X("my-plugin-name", "my plugin description");
 
+Defining pragmas
+================
+
+Plugins can also define pragmas by declaring a ``PragmaHandler`` and
+registering it using ``PragmaHandlerRegistry::Add<>``:
+
+.. code-block:: c++
+
+  // Define a pragma handler for #pragma example_pragma
+  class ExamplePragmaHandler : public PragmaHandler {
+  public:
+    ExamplePragmaHandler() : PragmaHandler("example_pragma") { }
+    void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                      Token &PragmaTok) {
+      // Handle the pragma
+    }
+  };
+
+  static PragmaHandlerRegistry::Add<ExamplePragmaHandler> Y("example_pragma","example pragma description");
+
+Defining attributes
+===================
+
+Plugins can define attributes by declaring a ``ParsedAttrInfo`` and registering
+it using ``ParsedAttrInfoRegister::Add<>``:
+
+.. code-block:: c++
+
+  class ExampleAttrInfo : public ParsedAttrInfo {
+  public:
+    ExampleAttrInfo() {
+      Spellings.push_back({ParsedAttr::AS_GNU,"example"});
+    }
+    AttrHandling handleDeclAttribute(Sema &S, Decl *D,
+                                     const ParsedAttr &Attr) const override {
+      // Handle the attribute
+      return AttributeApplied;
+    }
+  };
+
+  static ParsedAttrInfoRegistry::Add<ExampleAttrInfo> Z("example_attr","example attribute description");
+
+The members of ``ParsedAttrInfo`` that a plugin attribute must define are:
+
+ * ``Spellings``, which must be populated with every `Spelling
+   </doxygen/structclang_1_1ParsedAttrInfo_1_1Spelling.html>`_ of the
+   attribute, each of which consists of an attribute syntax and how the
+   attribute name is spelled for that syntax. If the syntax allows a scope then
+   the spelling must be "scope::attr" if a scope is present or "::attr" if not.
+ * ``handleDeclAttribute``, which is the function that applies the attribute to
+   a declaration. It is responsible for checking that the attribute's arguments
+   are valid, and typically applies the attribute by adding an ``Attr`` to the
+   ``Decl``. It returns either ``AttributeApplied``, to indicate that the
+   attribute was successfully applied, or ``AttributeNotApplied`` if it wasn't.
+
+The members of ``ParsedAttrInfo`` that may need to be defined, depending on the
+attribute, are:
+
+ * ``NumArgs`` and ``OptArgs``, which set the number of required and optional
+   arguments to the attribute.
+ * ``diagAppertainsToDecl``, which checks if the attribute has been used on the
+   right kind of declaration and issues a diagnostic if not.
+ * ``diagLangOpts``, which checks if the attribute is permitted for the current
+   language mode and issues a diagnostic if not.
+ * ``existsInTarget``, which checks if the attribute is permitted for the given
+   target.
+
+To see a working example of an attribute plugin, see `the Attribute.cpp example
+<https://github.com/llvm/llvm-project/blob/main/clang/examples/Attribute/Attribute.cpp>`_.
+
 Putting it all together
 =======================
 
 Let's look at an example plugin that prints top-level function names.  This
 example is checked into the clang repository; please take a look at
 the `latest version of PrintFunctionNames.cpp
-<http://llvm.org/viewvc/llvm-project/cfe/trunk/examples/PrintFunctionNames/PrintFunctionNames.cpp?view=markup>`_.
+<https://github.com/llvm/llvm-project/blob/main/clang/examples/PrintFunctionNames/PrintFunctionNames.cpp>`_.
 
 Running the plugin
 ==================
 
+
+Using the cc1 command line
+--------------------------
+
 To run a plugin, the dynamic library containing the plugin registry must be
-loaded via the :option:`-load` command line option. This will load all plugins
+loaded via the `-load` command line option. This will load all plugins
 that are registered, and you can select the plugins to run by specifying the
-:option:`-plugin` option. Additional parameters for the plugins can be passed with
-:option:`-plugin-arg-<plugin-name>`.
+`-plugin` option. Additional parameters for the plugins can be passed with
+`-plugin-arg-<plugin-name>`.
 
 Note that those options must reach clang's cc1 process. There are two
 ways to do so:
 
-* Directly call the parsing process by using the :option:`-cc1` option; this
+* Directly call the parsing process by using the `-cc1` option; this
   has the downside of not configuring the default header search paths, so
   you'll need to specify the full system path configuration on the command
   line.
 * Use clang as usual, but prefix all arguments to the cc1 process with
-  :option:`-Xclang`.
+  `-Xclang`.
 
 For example, to run the ``print-function-names`` plugin over a source file in
 clang, first build the plugin, and then call clang with the plugin from the
@@ -86,5 +160,21 @@ source tree:
             -plugin -Xclang print-fns
 
 Also see the print-function-name plugin example's
-`README <http://llvm.org/viewvc/llvm-project/cfe/trunk/examples/PrintFunctionNames/README.txt?view=markup>`_
+`README <https://github.com/llvm/llvm-project/blob/main/clang/examples/PrintFunctionNames/README.txt>`_
 
+
+Using the clang command line
+----------------------------
+
+Using `-fplugin=plugin` on the clang command line passes the plugin
+through as an argument to `-load` on the cc1 command line. If the plugin
+class implements the ``getActionType`` method then the plugin is run
+automatically. For example, to run the plugin automatically after the main AST
+action (i.e. the same as using `-add-plugin`):
+
+.. code-block:: c++
+
+  // Automatically run the plugin after the main AST action
+  PluginASTAction::ActionType getActionType() override {
+    return AddAfterMainAction;
+  }

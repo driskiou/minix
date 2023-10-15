@@ -1,18 +1,38 @@
-add_subdirectory(diagtool)
-add_subdirectory(driver)
-add_subdirectory(clang-format)
-add_subdirectory(clang-format-vs)
+create_subdirectory_options(CLANG TOOL)
 
-add_subdirectory(c-index-test)
-add_subdirectory(libclang)
+add_clang_subdirectory(diagtool)
+add_clang_subdirectory(driver)
+add_clang_subdirectory(apinotes-test)
+add_clang_subdirectory(clang-diff)
+add_clang_subdirectory(clang-format)
+add_clang_subdirectory(clang-format-vs)
+add_clang_subdirectory(clang-fuzzer)
+add_clang_subdirectory(clang-import-test)
+add_clang_subdirectory(clang-offload-bundler)
+add_clang_subdirectory(clang-offload-wrapper)
+add_clang_subdirectory(clang-scan-deps)
+add_clang_subdirectory(clang-repl)
+
+add_clang_subdirectory(c-index-test)
+
+add_clang_subdirectory(clang-rename)
+add_clang_subdirectory(clang-refactor)
+# For MinGW we only enable shared library if LLVM_LINK_LLVM_DYLIB=ON.
+# Without that option resulting library is too close to 2^16 DLL exports limit.
+if(UNIX OR (MINGW AND LLVM_LINK_LLVM_DYLIB))
+  add_clang_subdirectory(clang-shlib)
+endif()
 
 if(CLANG_ENABLE_ARCMT)
-  add_subdirectory(arcmt-test)
-  add_subdirectory(c-arcmt-test)
+  add_clang_subdirectory(arcmt-test)
+  add_clang_subdirectory(c-arcmt-test)
 endif()
 
 if(CLANG_ENABLE_STATIC_ANALYZER)
-  add_subdirectory(clang-check)
+  add_clang_subdirectory(clang-check)
+  add_clang_subdirectory(clang-extdef-mapping)
+  add_clang_subdirectory(scan-build)
+  add_clang_subdirectory(scan-view)
 endif()
 
 # We support checking out the clang-tools-extra repository into the 'extra'
@@ -21,3 +41,8 @@ endif()
 # to keep the primary Clang repository small and focused.
 # It also may be included by LLVM_EXTERNAL_CLANG_TOOLS_EXTRA_SOURCE_DIR.
 add_llvm_external_project(clang-tools-extra extra)
+
+# libclang may require clang-tidy in clang-tools-extra.
+add_clang_subdirectory(libclang)
+
+add_clang_subdirectory(amdgpu-arch)

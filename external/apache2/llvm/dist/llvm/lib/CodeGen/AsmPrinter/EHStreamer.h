@@ -1,9 +1,8 @@
-//===-- EHStreamer.h - Exception Handling Directive Streamer ---*- C++ -*--===//
+//===- EHStreamer.h - Exception Handling Directive Streamer -----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,21 +13,21 @@
 #ifndef LLVM_LIB_CODEGEN_ASMPRINTER_EHSTREAMER_H
 #define LLVM_LIB_CODEGEN_ASMPRINTER_EHSTREAMER_H
 
-#include "AsmPrinterHandler.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/CodeGen/AsmPrinterHandler.h"
+#include "llvm/Support/Compiler.h"
 
 namespace llvm {
-struct LandingPadInfo;
-class MachineModuleInfo;
-class MachineInstr;
-class MachineFunction;
-class AsmPrinter;
 
-template <typename T>
-class SmallVectorImpl;
+class AsmPrinter;
+struct LandingPadInfo;
+class MachineInstr;
+class MachineModuleInfo;
+class MCSymbol;
+template <typename T> class SmallVectorImpl;
 
 /// Emits exception handling directives.
-class EHStreamer : public AsmPrinterHandler {
+class LLVM_LIBRARY_VISIBILITY EHStreamer : public AsmPrinterHandler {
 protected:
   /// Target of directive emission.
   AsmPrinter *Asm;
@@ -44,11 +43,12 @@ protected:
   struct PadRange {
     // The index of the landing pad.
     unsigned PadIndex;
+
     // The index of the begin and end labels in the landing pad's label lists.
     unsigned RangeIndex;
   };
 
-  typedef DenseMap<MCSymbol *, PadRange> RangeMapType;
+  using RangeMapType = DenseMap<MCSymbol *, PadRange>;
 
   /// Structure describing an entry in the actions table.
   struct ActionEntry {
@@ -60,34 +60,59 @@ protected:
   /// Structure describing an entry in the call-site table.
   struct CallSiteEntry {
     // The 'try-range' is BeginLabel .. EndLabel.
-    MCSymbol *BeginLabel; // zero indicates the start of the function.
-    MCSymbol *EndLabel;   // zero indicates the end of the function.
+    MCSymbol *BeginLabel; // Null indicates the start of the function.
+    MCSymbol *EndLabel;   // Null indicates the end of the function.
 
-    // The landing pad starts at PadLabel.
-    MCSymbol *PadLabel;   // zero indicates that there is no landing pad.
+    // LPad contains the landing pad start labels.
+    const LandingPadInfo *LPad; // Null indicates that there is no landing pad.
+
     unsigned Action;
+  };
+
+  /// Structure describing a contiguous range of call-sites which reside
+  /// in the same procedure fragment. With -fbasic-block-sections, there will
+  /// be one call site range per basic block section. Otherwise, we will have
+  /// one call site range containing all the call sites in the function.
+  struct CallSiteRange {
+    // Symbol marking the beginning of the precedure fragment.
+    MCSymbol *FragmentBeginLabel = nullptr;
+    // Symbol marking the end of the procedure fragment.
+    MCSymbol *FragmentEndLabel = nullptr;
+    // LSDA symbol for this call-site range.
+    MCSymbol *ExceptionLabel = nullptr;
+    // Index of the first call-site entry in the call-site table which
+    // belongs to this range.
+    size_t CallSiteBeginIdx = 0;
+    // Index just after the last call-site entry in the call-site table which
+    // belongs to this range.
+    size_t CallSiteEndIdx = 0;
+    // Whether this is the call-site range containing all the landing pads.
+    bool IsLPRange = false;
   };
 
   /// Compute the actions table and gather the first action index for each
   /// landing pad site.
-  unsigned computeActionsTable(const SmallVectorImpl<const LandingPadInfo*>&LPs,
-                               SmallVectorImpl<ActionEntry> &Actions,
-                               SmallVectorImpl<unsigned> &FirstActions);
+  void computeActionsTable(
+      const SmallVectorImpl<const LandingPadInfo *> &LandingPads,
+      SmallVectorImpl<ActionEntry> &Actions,
+      SmallVectorImpl<unsigned> &FirstActions);
 
-  /// Return `true' if this is a call to a function marked `nounwind'. Return
-  /// `false' otherwise.
-  bool callToNoUnwindFunction(const MachineInstr *MI);
+  void computePadMap(const SmallVectorImpl<const LandingPadInfo *> &LandingPads,
+                     RangeMapType &PadMap);
 
-  /// Compute the call-site table.  The entry for an invoke has a try-range
-  /// containing the call, a non-zero landing pad and an appropriate action.
-  /// The entry for an ordinary call has a try-range containing the call and
-  /// zero for the landing pad and the action.  Calls marked 'nounwind' have
-  /// no entry and must not be contained in the try-range of any entry - they
-  /// form gaps in the table.  Entries must be ordered by try-range address.
-
-  void computeCallSiteTable(SmallVectorImpl<CallSiteEntry> &CallSites,
-                            const SmallVectorImpl<const LandingPadInfo *> &LPs,
-                            const SmallVectorImpl<unsigned> &FirstActions);
+  /// Compute the call-site table and the call-site ranges. The entry for an
+  /// invoke has a try-range containing the call, a non-zero landing pad and an
+  /// appropriate action. The entry for an ordinary call has a try-range
+  /// containing the call and zero for the landing pad and the action.  Calls
+  /// marked 'nounwind' have no entry and must not be contained in the try-range
+  /// of any entry - they form gaps in the table.  Entries must be ordered by
+  /// try-range address. CallSiteRanges vector is only populated for Itanium
+  /// exception handling.
+  virtual void computeCallSiteTable(
+      SmallVectorImpl<CallSiteEntry> &CallSites,
+      SmallVectorImpl<CallSiteRange> &CallSiteRanges,
+      const SmallVectorImpl<const LandingPadInfo *> &LandingPads,
+      const SmallVectorImpl<unsigned> &FirstActions);
 
   /// Emit landing pads and actions.
   ///
@@ -108,30 +133,33 @@ protected:
   ///     found the frame is unwound and handling continues.
   ///  3. Type id table contains references to all the C++ typeinfo for all
   ///     catches in the function.  This tables is reversed indexed base 1.
-  void emitExceptionTable();
+  ///
+  /// Returns the starting symbol of an exception table.
+  MCSymbol *emitExceptionTable();
 
-  virtual void emitTypeInfos(unsigned TTypeEncoding);
+  virtual void emitTypeInfos(unsigned TTypeEncoding, MCSymbol *TTBaseLabel);
+
+  // Helpers for identifying what kind of clause an EH typeid or selector
+  // corresponds to. Negative selectors are for filter clauses, the zero
+  // selector is for cleanups, and positive selectors are for catch clauses.
+  static bool isFilterEHSelector(int Selector) { return Selector < 0; }
+  static bool isCleanupEHSelector(int Selector) { return Selector == 0; }
+  static bool isCatchEHSelector(int Selector) { return Selector > 0; }
 
 public:
   EHStreamer(AsmPrinter *A);
-  virtual ~EHStreamer();
-
-  /// Emit all exception information that should come after the content.
-  void endModule() override;
-
-  /// Gather pre-function exception information.  Assumes being emitted
-  /// immediately after the function entry point.
-  void beginFunction(const MachineFunction *MF) override;
-
-  /// Gather and emit post-function exception information.
-  void endFunction(const MachineFunction *) override;
+  ~EHStreamer() override;
 
   // Unused.
   void setSymbolSize(const MCSymbol *Sym, uint64_t Size) override {}
   void beginInstruction(const MachineInstr *MI) override {}
   void endInstruction() override {}
+
+  /// Return `true' if this is a call to a function marked `nounwind'. Return
+  /// `false' otherwise.
+  static bool callToNoUnwindFunction(const MachineInstr *MI);
 };
-}
 
-#endif
+} // end namespace llvm
 
+#endif // LLVM_LIB_CODEGEN_ASMPRINTER_EHSTREAMER_H

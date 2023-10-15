@@ -1,9 +1,8 @@
 //===- CTagsEmitter.cpp - Generate ctags-compatible index ------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -24,8 +23,6 @@ using namespace llvm;
 
 #define DEBUG_TYPE "ctags-emitter"
 
-namespace llvm { extern SourceMgr SrcMgr; }
-
 namespace {
 
 class Tag {
@@ -39,7 +36,7 @@ public:
   void emit(raw_ostream &OS) const {
     const MemoryBuffer *CurMB =
         SrcMgr.getMemoryBuffer(SrcMgr.FindBufferContainingLoc(Loc));
-    const char *BufferName = CurMB->getBufferIdentifier();
+    auto BufferName = CurMB->getBufferIdentifier();
     std::pair<unsigned, unsigned> LineAndColumn = SrcMgr.getLineAndColumn(Loc);
     OS << *Id << "\t" << BufferName << "\t" << LineAndColumn.first << "\n";
   }
@@ -61,11 +58,7 @@ private:
 
 SMLoc CTagsEmitter::locate(const Record *R) {
   ArrayRef<SMLoc> Locs = R->getLoc();
-  if (Locs.empty()) {
-    SMLoc NullLoc;
-    return NullLoc;
-  }
-  return Locs.front();
+  return !Locs.empty() ? Locs.front() : SMLoc();
 }
 
 void CTagsEmitter::run(raw_ostream &OS) {
@@ -79,12 +72,11 @@ void CTagsEmitter::run(raw_ostream &OS) {
   for (const auto &D : Defs)
     Tags.push_back(Tag(D.first, locate(D.second.get())));
   // Emit tags.
-  std::sort(Tags.begin(), Tags.end());
+  llvm::sort(Tags);
   OS << "!_TAG_FILE_FORMAT\t1\t/original ctags format/\n";
   OS << "!_TAG_FILE_SORTED\t1\t/0=unsorted, 1=sorted, 2=foldcase/\n";
-  for (std::vector<Tag>::const_iterator I = Tags.begin(), E = Tags.end();
-       I != E; ++I)
-    I->emit(OS);
+  for (const Tag &T : Tags)
+    T.emit(OS);
 }
 
 namespace llvm {

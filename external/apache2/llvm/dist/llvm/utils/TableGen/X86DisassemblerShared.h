@@ -1,19 +1,18 @@
 //===- X86DisassemblerShared.h - Emitter shared header ----------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_UTILS_TABLEGEN_X86DISASSEMBLERSHARED_H
 #define LLVM_UTILS_TABLEGEN_X86DISASSEMBLERSHARED_H
 
-#include <string.h>
+#include <cstring>
 #include <string>
 
-#include "../../lib/Target/X86/Disassembler/X86DisassemblerDecoderCommon.h"
+#include "llvm/Support/X86DisassemblerDecoderCommon.h"
 
 struct InstructionSpecifier {
   llvm::X86Disassembler::OperandSpecifier
@@ -49,6 +48,10 @@ struct OpcodeDecision {
 /// entries in this table, rather than 2^(ATTR_max).
 struct ContextDecision {
   OpcodeDecision opcodeDecisions[llvm::X86Disassembler::IC_max];
+
+  ContextDecision() {
+    memset(opcodeDecisions, 0, sizeof(opcodeDecisions));
+  }
 };
 
 #endif

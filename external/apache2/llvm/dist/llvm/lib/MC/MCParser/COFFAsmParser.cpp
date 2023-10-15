@@ -1,25 +1,32 @@
 //===- COFFAsmParser.cpp - COFF Assembly Parser ---------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/MC/MCParser/MCAsmParserExtension.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/BinaryFormat/COFF.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCDirectives.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCParser/MCAsmLexer.h"
+#include "llvm/MC/MCParser/MCAsmParserExtension.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCStreamer.h"
-#include "llvm/MC/MCTargetAsmParser.h"
-#include "llvm/Support/COFF.h"
+#include "llvm/MC/SectionKind.h"
+#include "llvm/Support/SMLoc.h"
+#include <cassert>
+#include <cstdint>
+#include <limits>
+#include <utility>
+
 using namespace llvm;
 
 namespace {
@@ -41,7 +48,8 @@ class COFFAsmParser : public MCAsmParserExtension {
                           COFF::COMDATType Type);
 
   bool ParseSectionName(StringRef &SectionName);
-  bool ParseSectionFlags(StringRef FlagsString, unsigned* Flags);
+  bool ParseSectionFlags(StringRef SectionName, StringRef FlagsString,
+                         unsigned *Flags);
 
   void Initialize(MCAsmParser &Parser) override {
     // Call the base implementation.
@@ -56,14 +64,21 @@ class COFFAsmParser : public MCAsmParserExtension {
     addDirectiveHandler<&COFFAsmParser::ParseDirectiveType>(".type");
     addDirectiveHandler<&COFFAsmParser::ParseDirectiveEndef>(".endef");
     addDirectiveHandler<&COFFAsmParser::ParseDirectiveSecRel32>(".secrel32");
+    addDirectiveHandler<&COFFAsmParser::ParseDirectiveSymIdx>(".symidx");
+    addDirectiveHandler<&COFFAsmParser::ParseDirectiveSafeSEH>(".safeseh");
     addDirectiveHandler<&COFFAsmParser::ParseDirectiveSecIdx>(".secidx");
     addDirectiveHandler<&COFFAsmParser::ParseDirectiveLinkOnce>(".linkonce");
+    addDirectiveHandler<&COFFAsmParser::ParseDirectiveRVA>(".rva");
+    addDirectiveHandler<&COFFAsmParser::ParseDirectiveSymbolAttribute>(".weak");
+    addDirectiveHandler<&COFFAsmParser::ParseDirectiveCGProfile>(".cg_profile");
 
     // Win64 EH directives.
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveStartProc>(
                                                                    ".seh_proc");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveEndProc>(
                                                                 ".seh_endproc");
+    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveEndFuncletOrFunc>(
+                                                                ".seh_endfunclet");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveStartChained>(
                                                            ".seh_startchained");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveEndChained>(
@@ -72,21 +87,10 @@ class COFFAsmParser : public MCAsmParserExtension {
                                                                 ".seh_handler");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveHandlerData>(
                                                             ".seh_handlerdata");
-    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectivePushReg>(
-                                                                ".seh_pushreg");
-    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveSetFrame>(
-                                                               ".seh_setframe");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveAllocStack>(
                                                              ".seh_stackalloc");
-    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveSaveReg>(
-                                                                ".seh_savereg");
-    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveSaveXMM>(
-                                                                ".seh_savexmm");
-    addDirectiveHandler<&COFFAsmParser::ParseSEHDirectivePushFrame>(
-                                                              ".seh_pushframe");
     addDirectiveHandler<&COFFAsmParser::ParseSEHDirectiveEndProlog>(
                                                             ".seh_endprologue");
-    addDirectiveHandler<&COFFAsmParser::ParseDirectiveSymbolAttribute>(".weak");
   }
 
   bool ParseSectionDirectiveText(StringRef, SMLoc) {
@@ -96,13 +100,14 @@ class COFFAsmParser : public MCAsmParserExtension {
                             | COFF::IMAGE_SCN_MEM_READ,
                               SectionKind::getText());
   }
+
   bool ParseSectionDirectiveData(StringRef, SMLoc) {
-    return ParseSectionSwitch(".data",
-                              COFF::IMAGE_SCN_CNT_INITIALIZED_DATA
-                            | COFF::IMAGE_SCN_MEM_READ
-                            | COFF::IMAGE_SCN_MEM_WRITE,
-                              SectionKind::getDataRel());
+    return ParseSectionSwitch(".data", COFF::IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                           COFF::IMAGE_SCN_MEM_READ |
+                                           COFF::IMAGE_SCN_MEM_WRITE,
+                              SectionKind::getData());
   }
+
   bool ParseSectionDirectiveBSS(StringRef, SMLoc) {
     return ParseSectionSwitch(".bss",
                               COFF::IMAGE_SCN_CNT_UNINITIALIZED_DATA
@@ -118,32 +123,32 @@ class COFFAsmParser : public MCAsmParserExtension {
   bool ParseDirectiveEndef(StringRef, SMLoc);
   bool ParseDirectiveSecRel32(StringRef, SMLoc);
   bool ParseDirectiveSecIdx(StringRef, SMLoc);
+  bool ParseDirectiveSafeSEH(StringRef, SMLoc);
+  bool ParseDirectiveSymIdx(StringRef, SMLoc);
   bool parseCOMDATType(COFF::COMDATType &Type);
   bool ParseDirectiveLinkOnce(StringRef, SMLoc);
+  bool ParseDirectiveRVA(StringRef, SMLoc);
+  bool ParseDirectiveCGProfile(StringRef, SMLoc);
 
   // Win64 EH directives.
   bool ParseSEHDirectiveStartProc(StringRef, SMLoc);
   bool ParseSEHDirectiveEndProc(StringRef, SMLoc);
+  bool ParseSEHDirectiveEndFuncletOrFunc(StringRef, SMLoc);
   bool ParseSEHDirectiveStartChained(StringRef, SMLoc);
   bool ParseSEHDirectiveEndChained(StringRef, SMLoc);
   bool ParseSEHDirectiveHandler(StringRef, SMLoc);
   bool ParseSEHDirectiveHandlerData(StringRef, SMLoc);
-  bool ParseSEHDirectivePushReg(StringRef, SMLoc);
-  bool ParseSEHDirectiveSetFrame(StringRef, SMLoc);
   bool ParseSEHDirectiveAllocStack(StringRef, SMLoc);
-  bool ParseSEHDirectiveSaveReg(StringRef, SMLoc);
-  bool ParseSEHDirectiveSaveXMM(StringRef, SMLoc);
-  bool ParseSEHDirectivePushFrame(StringRef, SMLoc);
   bool ParseSEHDirectiveEndProlog(StringRef, SMLoc);
 
   bool ParseAtUnwindOrAtExcept(bool &unwind, bool &except);
-  bool ParseSEHRegisterNumber(unsigned &RegNo);
   bool ParseDirectiveSymbolAttribute(StringRef Directive, SMLoc);
+
 public:
-  COFFAsmParser() {}
+  COFFAsmParser() = default;
 };
 
-} // end annonomous namespace.
+} // end anonymous namespace.
 
 static SectionKind computeSectionKind(unsigned Flags) {
   if (Flags & COFF::IMAGE_SCN_MEM_EXECUTE)
@@ -151,20 +156,22 @@ static SectionKind computeSectionKind(unsigned Flags) {
   if (Flags & COFF::IMAGE_SCN_MEM_READ &&
       (Flags & COFF::IMAGE_SCN_MEM_WRITE) == 0)
     return SectionKind::getReadOnly();
-  return SectionKind::getDataRel();
+  return SectionKind::getData();
 }
 
-bool COFFAsmParser::ParseSectionFlags(StringRef FlagsString, unsigned* Flags) {
+bool COFFAsmParser::ParseSectionFlags(StringRef SectionName,
+                                      StringRef FlagsString, unsigned *Flags) {
   enum {
-    None      = 0,
-    Alloc     = 1 << 0,
-    Code      = 1 << 1,
-    Load      = 1 << 2,
-    InitData  = 1 << 3,
-    Shared    = 1 << 4,
-    NoLoad    = 1 << 5,
-    NoRead    = 1 << 6,
-    NoWrite  =  1 << 7
+    None        = 0,
+    Alloc       = 1 << 0,
+    Code        = 1 << 1,
+    Load        = 1 << 2,
+    InitData    = 1 << 3,
+    Shared      = 1 << 4,
+    NoLoad      = 1 << 5,
+    NoRead      = 1 << 6,
+    NoWrite     = 1 << 7,
+    Discardable = 1 << 8,
   };
 
   bool ReadOnlyRemoved = false;
@@ -195,6 +202,10 @@ bool COFFAsmParser::ParseSectionFlags(StringRef FlagsString, unsigned* Flags) {
     case 'n': // section is not loaded
       SecFlags |= NoLoad;
       SecFlags &= ~Load;
+      break;
+
+    case 'D': // discardable
+      SecFlags |= Discardable;
       break;
 
     case 'r': // read-only
@@ -248,6 +259,9 @@ bool COFFAsmParser::ParseSectionFlags(StringRef FlagsString, unsigned* Flags) {
     *Flags |= COFF::IMAGE_SCN_CNT_UNINITIALIZED_DATA;
   if (SecFlags & NoLoad)
     *Flags |= COFF::IMAGE_SCN_LNK_REMOVE;
+  if ((SecFlags & Discardable) ||
+      MCSectionCOFF::isImplicitlyDiscardable(SectionName))
+    *Flags |= COFF::IMAGE_SCN_MEM_DISCARDABLE;
   if ((SecFlags & NoRead) == 0)
     *Flags |= COFF::IMAGE_SCN_MEM_READ;
   if ((SecFlags & NoWrite) == 0)
@@ -266,15 +280,15 @@ bool COFFAsmParser::ParseDirectiveSymbolAttribute(StringRef Directive, SMLoc) {
     .Default(MCSA_Invalid);
   assert(Attr != MCSA_Invalid && "unexpected symbol attribute directive!");
   if (getLexer().isNot(AsmToken::EndOfStatement)) {
-    for (;;) {
+    while (true) {
       StringRef Name;
 
       if (getParser().parseIdentifier(Name))
         return TokError("expected identifier in directive");
 
-      MCSymbol *Sym = getContext().GetOrCreateSymbol(Name);
+      MCSymbol *Sym = getContext().getOrCreateSymbol(Name);
 
-      getStreamer().EmitSymbolAttribute(Sym, Attr);
+      getStreamer().emitSymbolAttribute(Sym, Attr);
 
       if (getLexer().is(AsmToken::EndOfStatement))
         break;
@@ -287,6 +301,10 @@ bool COFFAsmParser::ParseDirectiveSymbolAttribute(StringRef Directive, SMLoc) {
 
   Lex();
   return false;
+}
+
+bool COFFAsmParser::ParseDirectiveCGProfile(StringRef S, SMLoc Loc) {
+  return MCAsmParserExtension::ParseDirectiveCGProfile(S, Loc);
 }
 
 bool COFFAsmParser::ParseSectionSwitch(StringRef Section,
@@ -311,7 +329,7 @@ bool COFFAsmParser::ParseSectionSwitch(StringRef Section,
 }
 
 bool COFFAsmParser::ParseSectionName(StringRef &SectionName) {
-  if (!getLexer().is(AsmToken::Identifier))
+  if (!getLexer().is(AsmToken::Identifier) && !getLexer().is(AsmToken::String))
     return true;
 
   SectionName = getTok().getIdentifier();
@@ -325,7 +343,8 @@ bool COFFAsmParser::ParseSectionName(StringRef &SectionName) {
 //   a: Ignored.
 //   b: BSS section (uninitialized data)
 //   d: data section (initialized data)
-//   n: Discardable section
+//   n: "noload" section (removed by linker)
+//   D: Discardable section
 //   r: Readable section
 //   s: Shared section
 //   w: Writable section
@@ -352,14 +371,14 @@ bool COFFAsmParser::ParseDirectiveSection(StringRef, SMLoc) {
     StringRef FlagsStr = getTok().getStringContents();
     Lex();
 
-    if (ParseSectionFlags(FlagsStr, &Flags))
+    if (ParseSectionFlags(SectionName, FlagsStr, &Flags))
       return true;
   }
 
   COFF::COMDATType Type = (COFF::COMDATType)0;
   StringRef COMDATSymName;
   if (getLexer().is(AsmToken::Comma)) {
-    Type = COFF::IMAGE_COMDAT_SELECT_ANY;;
+    Type = COFF::IMAGE_COMDAT_SELECT_ANY;
     Lex();
 
     Flags |= COFF::IMAGE_SCN_LNK_COMDAT;
@@ -384,7 +403,7 @@ bool COFFAsmParser::ParseDirectiveSection(StringRef, SMLoc) {
 
   SectionKind Kind = computeSectionKind(Flags);
   if (Kind.isText()) {
-    const Triple &T = getContext().getObjectFileInfo()->getTargetTriple();
+    const Triple &T = getContext().getTargetTriple();
     if (T.getArch() == Triple::arm || T.getArch() == Triple::thumb)
       Flags |= COFF::IMAGE_SCN_MEM_16BIT;
   }
@@ -398,7 +417,7 @@ bool COFFAsmParser::ParseDirectiveDef(StringRef, SMLoc) {
   if (getParser().parseIdentifier(SymbolName))
     return TokError("expected identifier in directive");
 
-  MCSymbol *Sym = getContext().GetOrCreateSymbol(SymbolName);
+  MCSymbol *Sym = getContext().getOrCreateSymbol(SymbolName);
 
   getStreamer().BeginCOFFSymbolDef(Sym);
 
@@ -443,13 +462,73 @@ bool COFFAsmParser::ParseDirectiveSecRel32(StringRef, SMLoc) {
   if (getParser().parseIdentifier(SymbolID))
     return TokError("expected identifier in directive");
 
+  int64_t Offset = 0;
+  SMLoc OffsetLoc;
+  if (getLexer().is(AsmToken::Plus)) {
+    OffsetLoc = getLexer().getLoc();
+    if (getParser().parseAbsoluteExpression(Offset))
+      return true;
+  }
+
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in directive");
 
-  MCSymbol *Symbol = getContext().GetOrCreateSymbol(SymbolID);
+  if (Offset < 0 || Offset > std::numeric_limits<uint32_t>::max())
+    return Error(
+        OffsetLoc,
+        "invalid '.secrel32' directive offset, can't be less "
+        "than zero or greater than std::numeric_limits<uint32_t>::max()");
+
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
 
   Lex();
-  getStreamer().EmitCOFFSecRel32(Symbol);
+  getStreamer().EmitCOFFSecRel32(Symbol, Offset);
+  return false;
+}
+
+bool COFFAsmParser::ParseDirectiveRVA(StringRef, SMLoc) {
+  auto parseOp = [&]() -> bool {
+    StringRef SymbolID;
+    if (getParser().parseIdentifier(SymbolID))
+      return TokError("expected identifier in directive");
+
+    int64_t Offset = 0;
+    SMLoc OffsetLoc;
+    if (getLexer().is(AsmToken::Plus) || getLexer().is(AsmToken::Minus)) {
+      OffsetLoc = getLexer().getLoc();
+      if (getParser().parseAbsoluteExpression(Offset))
+        return true;
+    }
+
+    if (Offset < std::numeric_limits<int32_t>::min() ||
+        Offset > std::numeric_limits<int32_t>::max())
+      return Error(OffsetLoc, "invalid '.rva' directive offset, can't be less "
+                              "than -2147483648 or greater than "
+                              "2147483647");
+
+    MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
+
+    getStreamer().EmitCOFFImgRel32(Symbol, Offset);
+    return false;
+  };
+
+  if (getParser().parseMany(parseOp))
+    return addErrorSuffix(" in directive");
+  return false;
+}
+
+bool COFFAsmParser::ParseDirectiveSafeSEH(StringRef, SMLoc) {
+  StringRef SymbolID;
+  if (getParser().parseIdentifier(SymbolID))
+    return TokError("expected identifier in directive");
+
+  if (getLexer().isNot(AsmToken::EndOfStatement))
+    return TokError("unexpected token in directive");
+
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
+
+  Lex();
+  getStreamer().EmitCOFFSafeSEH(Symbol);
   return false;
 }
 
@@ -461,10 +540,25 @@ bool COFFAsmParser::ParseDirectiveSecIdx(StringRef, SMLoc) {
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in directive");
 
-  MCSymbol *Symbol = getContext().GetOrCreateSymbol(SymbolID);
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
 
   Lex();
   getStreamer().EmitCOFFSectionIndex(Symbol);
+  return false;
+}
+
+bool COFFAsmParser::ParseDirectiveSymIdx(StringRef, SMLoc) {
+  StringRef SymbolID;
+  if (getParser().parseIdentifier(SymbolID))
+    return TokError("expected identifier in directive");
+
+  if (getLexer().isNot(AsmToken::EndOfStatement))
+    return TokError("unexpected token in directive");
+
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
+
+  Lex();
+  getStreamer().EmitCOFFSymbolIndex(Symbol);
   return false;
 }
 
@@ -498,15 +592,15 @@ bool COFFAsmParser::ParseDirectiveLinkOnce(StringRef, SMLoc Loc) {
     if (parseCOMDATType(Type))
       return true;
 
-  const MCSectionCOFF *Current = static_cast<const MCSectionCOFF*>(
-                                       getStreamer().getCurrentSection().first);
+  const MCSectionCOFF *Current =
+      static_cast<const MCSectionCOFF *>(getStreamer().getCurrentSectionOnly());
 
   if (Type == COFF::IMAGE_COMDAT_SELECT_ASSOCIATIVE)
     return Error(Loc, "cannot make section associative with .linkonce");
 
   if (Current->getCharacteristics() & COFF::IMAGE_SCN_LNK_COMDAT)
-    return Error(Loc, Twine("section '") + Current->getSectionName() +
-                                                       "' is already linkonce");
+    return Error(Loc, Twine("section '") + Current->getName() +
+                          "' is already linkonce");
 
   Current->setSelection(Type);
 
@@ -516,7 +610,7 @@ bool COFFAsmParser::ParseDirectiveLinkOnce(StringRef, SMLoc Loc) {
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveStartProc(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveStartProc(StringRef, SMLoc Loc) {
   StringRef SymbolID;
   if (getParser().parseIdentifier(SymbolID))
     return true;
@@ -524,32 +618,38 @@ bool COFFAsmParser::ParseSEHDirectiveStartProc(StringRef, SMLoc) {
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in directive");
 
-  MCSymbol *Symbol = getContext().GetOrCreateSymbol(SymbolID);
+  MCSymbol *Symbol = getContext().getOrCreateSymbol(SymbolID);
 
   Lex();
-  getStreamer().EmitWinCFIStartProc(Symbol);
+  getStreamer().EmitWinCFIStartProc(Symbol, Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveEndProc(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveEndProc(StringRef, SMLoc Loc) {
   Lex();
-  getStreamer().EmitWinCFIEndProc();
+  getStreamer().EmitWinCFIEndProc(Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveStartChained(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveEndFuncletOrFunc(StringRef, SMLoc Loc) {
   Lex();
-  getStreamer().EmitWinCFIStartChained();
+  getStreamer().EmitWinCFIFuncletOrFuncEnd(Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveEndChained(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveStartChained(StringRef, SMLoc Loc) {
   Lex();
-  getStreamer().EmitWinCFIEndChained();
+  getStreamer().EmitWinCFIStartChained(Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveHandler(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveEndChained(StringRef, SMLoc Loc) {
+  Lex();
+  getStreamer().EmitWinCFIEndChained(Loc);
+  return false;
+}
+
+bool COFFAsmParser::ParseSEHDirectiveHandler(StringRef, SMLoc Loc) {
   StringRef SymbolID;
   if (getParser().parseIdentifier(SymbolID))
     return true;
@@ -568,149 +668,35 @@ bool COFFAsmParser::ParseSEHDirectiveHandler(StringRef, SMLoc) {
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in directive");
 
-  MCSymbol *handler = getContext().GetOrCreateSymbol(SymbolID);
+  MCSymbol *handler = getContext().getOrCreateSymbol(SymbolID);
 
   Lex();
-  getStreamer().EmitWinEHHandler(handler, unwind, except);
+  getStreamer().EmitWinEHHandler(handler, unwind, except, Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveHandlerData(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveHandlerData(StringRef, SMLoc Loc) {
   Lex();
   getStreamer().EmitWinEHHandlerData();
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectivePushReg(StringRef, SMLoc L) {
-  unsigned Reg = 0;
-  if (ParseSEHRegisterNumber(Reg))
-    return true;
-
-  if (getLexer().isNot(AsmToken::EndOfStatement))
-    return TokError("unexpected token in directive");
-
-  Lex();
-  getStreamer().EmitWinCFIPushReg(Reg);
-  return false;
-}
-
-bool COFFAsmParser::ParseSEHDirectiveSetFrame(StringRef, SMLoc L) {
-  unsigned Reg = 0;
-  int64_t Off;
-  if (ParseSEHRegisterNumber(Reg))
-    return true;
-  if (getLexer().isNot(AsmToken::Comma))
-    return TokError("you must specify a stack pointer offset");
-
-  Lex();
-  SMLoc startLoc = getLexer().getLoc();
-  if (getParser().parseAbsoluteExpression(Off))
-    return true;
-
-  if (Off & 0x0F)
-    return Error(startLoc, "offset is not a multiple of 16");
-
-  if (getLexer().isNot(AsmToken::EndOfStatement))
-    return TokError("unexpected token in directive");
-
-  Lex();
-  getStreamer().EmitWinCFISetFrame(Reg, Off);
-  return false;
-}
-
-bool COFFAsmParser::ParseSEHDirectiveAllocStack(StringRef, SMLoc) {
+bool COFFAsmParser::ParseSEHDirectiveAllocStack(StringRef, SMLoc Loc) {
   int64_t Size;
-  SMLoc startLoc = getLexer().getLoc();
   if (getParser().parseAbsoluteExpression(Size))
     return true;
 
-  if (Size & 7)
-    return Error(startLoc, "size is not a multiple of 8");
-
   if (getLexer().isNot(AsmToken::EndOfStatement))
     return TokError("unexpected token in directive");
 
   Lex();
-  getStreamer().EmitWinCFIAllocStack(Size);
+  getStreamer().EmitWinCFIAllocStack(Size, Loc);
   return false;
 }
 
-bool COFFAsmParser::ParseSEHDirectiveSaveReg(StringRef, SMLoc L) {
-  unsigned Reg = 0;
-  int64_t Off;
-  if (ParseSEHRegisterNumber(Reg))
-    return true;
-  if (getLexer().isNot(AsmToken::Comma))
-    return TokError("you must specify an offset on the stack");
-
+bool COFFAsmParser::ParseSEHDirectiveEndProlog(StringRef, SMLoc Loc) {
   Lex();
-  SMLoc startLoc = getLexer().getLoc();
-  if (getParser().parseAbsoluteExpression(Off))
-    return true;
-
-  if (Off & 7)
-    return Error(startLoc, "size is not a multiple of 8");
-
-  if (getLexer().isNot(AsmToken::EndOfStatement))
-    return TokError("unexpected token in directive");
-
-  Lex();
-  // FIXME: Err on %xmm* registers
-  getStreamer().EmitWinCFISaveReg(Reg, Off);
-  return false;
-}
-
-// FIXME: This method is inherently x86-specific. It should really be in the
-// x86 backend.
-bool COFFAsmParser::ParseSEHDirectiveSaveXMM(StringRef, SMLoc L) {
-  unsigned Reg = 0;
-  int64_t Off;
-  if (ParseSEHRegisterNumber(Reg))
-    return true;
-  if (getLexer().isNot(AsmToken::Comma))
-    return TokError("you must specify an offset on the stack");
-
-  Lex();
-  SMLoc startLoc = getLexer().getLoc();
-  if (getParser().parseAbsoluteExpression(Off))
-    return true;
-
-  if (getLexer().isNot(AsmToken::EndOfStatement))
-    return TokError("unexpected token in directive");
-
-  if (Off & 0x0F)
-    return Error(startLoc, "offset is not a multiple of 16");
-
-  Lex();
-  // FIXME: Err on non-%xmm* registers
-  getStreamer().EmitWinCFISaveXMM(Reg, Off);
-  return false;
-}
-
-bool COFFAsmParser::ParseSEHDirectivePushFrame(StringRef, SMLoc) {
-  bool Code = false;
-  StringRef CodeID;
-  if (getLexer().is(AsmToken::At)) {
-    SMLoc startLoc = getLexer().getLoc();
-    Lex();
-    if (!getParser().parseIdentifier(CodeID)) {
-      if (CodeID != "code")
-        return Error(startLoc, "expected @code");
-      Code = true;
-    }
-  }
-
-  if (getLexer().isNot(AsmToken::EndOfStatement))
-    return TokError("unexpected token in directive");
-
-  Lex();
-  getStreamer().EmitWinCFIPushFrame(Code);
-  return false;
-}
-
-bool COFFAsmParser::ParseSEHDirectiveEndProlog(StringRef, SMLoc) {
-  Lex();
-  getStreamer().EmitWinCFIEndProlog();
+  getStreamer().EmitWinCFIEndProlog(Loc);
   return false;
 }
 
@@ -731,50 +717,10 @@ bool COFFAsmParser::ParseAtUnwindOrAtExcept(bool &unwind, bool &except) {
   return false;
 }
 
-bool COFFAsmParser::ParseSEHRegisterNumber(unsigned &RegNo) {
-  SMLoc startLoc = getLexer().getLoc();
-  if (getLexer().is(AsmToken::Percent)) {
-    const MCRegisterInfo *MRI = getContext().getRegisterInfo();
-    SMLoc endLoc;
-    unsigned LLVMRegNo;
-    if (getParser().getTargetParser().ParseRegister(LLVMRegNo,startLoc,endLoc))
-      return true;
-
-#if 0
-    // FIXME: TargetAsmInfo::getCalleeSavedRegs() commits a serious layering
-    // violation so this validation code is disabled.
-
-    // Check that this is a non-volatile register.
-    const unsigned *NVRegs = TAI.getCalleeSavedRegs();
-    unsigned i;
-    for (i = 0; NVRegs[i] != 0; ++i)
-      if (NVRegs[i] == LLVMRegNo)
-        break;
-    if (NVRegs[i] == 0)
-      return Error(startLoc, "expected non-volatile register");
-#endif
-
-    int SEHRegNo = MRI->getSEHRegNum(LLVMRegNo);
-    if (SEHRegNo < 0)
-      return Error(startLoc,"register can't be represented in SEH unwind info");
-    RegNo = SEHRegNo;
-  }
-  else {
-    int64_t n;
-    if (getParser().parseAbsoluteExpression(n))
-      return true;
-    if (n > 15)
-      return Error(startLoc, "register number is too high");
-    RegNo = n;
-  }
-
-  return false;
-}
-
 namespace llvm {
 
 MCAsmParserExtension *createCOFFAsmParser() {
   return new COFFAsmParser;
 }
 
-}
+} // end namespace llvm

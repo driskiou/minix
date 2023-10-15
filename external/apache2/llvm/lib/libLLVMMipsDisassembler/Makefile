@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2012/04/29 19:19:05 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:09 joerg Exp $
 
 LIB=	LLVMMipsDisassembler
 

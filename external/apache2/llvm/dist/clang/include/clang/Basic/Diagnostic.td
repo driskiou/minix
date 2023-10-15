@@ -1,9 +1,8 @@
 //===--- Diagnostic.td - C Language Family Diagnostic Handling ------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,6 +10,8 @@
 //  and diagnostic control.
 //
 //===----------------------------------------------------------------------===//
+
+// See the Internals Manual, section The Diagnostics Subsystem for an overview.
 
 // Define the diagnostic severities.
 class Severity<string N> {
@@ -37,6 +38,16 @@ def SFINAE_Suppress            : SFINAEResponse;
 def SFINAE_Report              : SFINAEResponse;
 def SFINAE_AccessControl       : SFINAEResponse;
 
+// Textual substitutions which may be performed on the text of diagnostics
+class TextSubstitution<string Text> {
+  string Substitution = Text;
+  // TODO: These are only here to allow substitutions to be declared inline with
+  // diagnostics
+  string Component = "";
+  string CategoryName = "";
+  bit Deferrable = 0;
+}
+
 // Diagnostic Categories.  These can be applied to groups or individual
 // diagnostics to specify a category.
 class DiagCategory<string Name> {
@@ -48,10 +59,13 @@ class DiagGroup<string Name, list<DiagGroup> subgroups = []> {
   string GroupName = Name;
   list<DiagGroup> SubGroups = subgroups;
   string CategoryName = "";
+  code Documentation = [{}];
 }
 class InGroup<DiagGroup G> { DiagGroup Group = G; }
 //class IsGroup<string Name> { DiagGroup Group = DiagGroup<Name>; }
 
+// This defines documentation for diagnostic groups.
+include "DiagnosticDocs.td"
 
 // This defines all of the named diagnostic categories.
 include "DiagnosticCategories.td"
@@ -70,6 +84,7 @@ class Diagnostic<string text, DiagClass DC, Severity defaultmapping> {
   bit            AccessControl = 0;
   bit            WarningNoWerror = 0;
   bit            ShowInSystemHeader = 0;
+  bit            Deferrable = 0;
   Severity       DefaultSeverity = defaultmapping;
   DiagGroup      Group;
   string         CategoryName = "";
@@ -93,14 +108,32 @@ class SuppressInSystemHeader {
   bit ShowInSystemHeader = 0;
 }
 
+class Deferrable {
+  bit Deferrable = 1;
+}
+
+class NonDeferrable {
+  bit Deferrable = 0;
+}
+
 // FIXME: ExtWarn and Extension should also be SFINAEFailure by default.
 class Error<string str>     : Diagnostic<str, CLASS_ERROR, SEV_Error>, SFINAEFailure {
   bit ShowInSystemHeader = 1;
 }
+// Warnings default to on (but can be default-off'd with DefaultIgnore).
+// This is used for warnings about questionable code; warnings about
+// accepted language extensions should use Extension or ExtWarn below instead.
 class Warning<string str>   : Diagnostic<str, CLASS_WARNING, SEV_Warning>;
+// Remarks can be turned on with -R flags and provide commentary, e.g. on
+// optimizer decisions.
 class Remark<string str>    : Diagnostic<str, CLASS_REMARK, SEV_Ignored>;
+// Extensions are warnings about accepted language extensions.
+// Extension warnings are default-off but enabled by -pedantic.
 class Extension<string str> : Diagnostic<str, CLASS_EXTENSION, SEV_Ignored>;
+// ExtWarns are warnings about accepted language extensions.
+// ExtWarn warnings are default-on.
 class ExtWarn<string str>   : Diagnostic<str, CLASS_EXTENSION, SEV_Warning>;
+// Notes can provide supplementary information on errors, warnings, and remarks.
 class Note<string str>      : Diagnostic<str, CLASS_NOTE, SEV_Fatal/*ignored*/>;
 
 
@@ -118,10 +151,12 @@ include "DiagnosticASTKinds.td"
 include "DiagnosticAnalysisKinds.td"
 include "DiagnosticCommentKinds.td"
 include "DiagnosticCommonKinds.td"
+include "DiagnosticCrossTUKinds.td"
 include "DiagnosticDriverKinds.td"
 include "DiagnosticFrontendKinds.td"
 include "DiagnosticLexKinds.td"
 include "DiagnosticParseKinds.td"
+include "DiagnosticRefactoringKinds.td"
 include "DiagnosticSemaKinds.td"
 include "DiagnosticSerializationKinds.td"
 

@@ -19,7 +19,7 @@ indicating that two pointers always point to the same object, might point to the
 same object, or are known to never point to the same object.
 
 The LLVM `AliasAnalysis
-<http://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__ class is the
+<https://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__ class is the
 primary interface used by clients and implementations of alias analyses in the
 LLVM system.  This class is the common interface between clients of alias
 analysis information and the implementations providing it, and is designed to
@@ -31,13 +31,12 @@ well together.
 
 This document contains information necessary to successfully implement this
 interface, use it, and to test both sides.  It also explains some of the finer
-points about what exactly results mean.  If you feel that something is unclear
-or should be added, please `let me know <mailto:sabre@nondot.org>`_.
+points about what exactly results mean.  
 
 ``AliasAnalysis`` Class Overview
 ================================
 
-The `AliasAnalysis <http://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__
+The `AliasAnalysis <https://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__
 class defines the interface that the various alias analysis implementations
 should support.  This class exports two important enums: ``AliasResult`` and
 ``ModRefResult`` which represent the result of an alias query or a mod/ref
@@ -78,11 +77,11 @@ possible) C code:
     C[1] = A[9-i];        /* One byte store */
   }
 
-In this case, the ``basicaa`` pass will disambiguate the stores to ``C[0]`` and
+In this case, the ``basic-aa`` pass will disambiguate the stores to ``C[0]`` and
 ``C[1]`` because they are accesses to two distinct locations one byte apart, and
 the accesses are each one byte.  In this case, the Loop Invariant Code Motion
 (LICM) pass can use store motion to remove the stores from the loop.  In
-constrast, the following code:
+contrast, the following code:
 
 .. code-block:: c++
 
@@ -133,11 +132,12 @@ The ``MayAlias`` response is used whenever the two pointers might refer to the
 same object.
 
 The ``PartialAlias`` response is used when the two memory objects are known to
-be overlapping in some way, but do not start at the same address.
+be overlapping in some way, regardless whether they start at the same address
+or not.
 
 The ``MustAlias`` response may only be returned if the two memory objects are
 guaranteed to always start at exactly the same location. A ``MustAlias``
-response implies that the pointers compare equal.
+response does not imply that the pointers compare equal.
 
 The ``getModRefInfo`` methods
 -----------------------------
@@ -190,7 +190,7 @@ this property are side-effect free, only depending on their input arguments and
 the state of memory when they are called.  This property allows calls to these
 functions to be eliminated and moved around, as long as there is no store
 instruction that changes the contents of memory.  Note that all functions that
-satisfy the ``doesNotAccessMemory`` method also satisfies ``onlyReadsMemory``.
+satisfy the ``doesNotAccessMemory`` method also satisfy ``onlyReadsMemory``.
 
 Writing a new ``AliasAnalysis`` Implementation
 ==============================================
@@ -264,7 +264,7 @@ Interfaces which may be specified
 ---------------------------------
 
 All of the `AliasAnalysis
-<http://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__ virtual methods
+<https://llvm.org/doxygen/classllvm_1_1AliasAnalysis.html>`__ virtual methods
 default to providing :ref:`chaining <aliasanalysis-chaining>` to another alias
 analysis implementation, which ends up returning conservatively correct
 information (returning "May" Alias and "Mod/Ref" for alias and mod/ref queries
@@ -276,9 +276,8 @@ implementing, you just override the interfaces you can improve.
 ``AliasAnalysis`` chaining behavior
 -----------------------------------
 
-With only one special exception (the :ref:`-no-aa <aliasanalysis-no-aa>` pass)
-every alias analysis pass chains to another alias analysis implementation (for
-example, the user can specify "``-basicaa -ds-aa -licm``" to get the maximum
+Every alias analysis pass chains to another alias analysis implementation (for
+example, the user can specify "``-basic-aa -ds-aa -licm``" to get the maximum
 benefit from both alias analyses).  The alias analysis class automatically
 takes care of most of this for methods that you don't override.  For methods
 that you do override, in code paths that return a conservative MayAlias or
@@ -286,8 +285,8 @@ Mod/Ref result, simply return whatever the superclass computes.  For example:
 
 .. code-block:: c++
 
-  AliasAnalysis::AliasResult alias(const Value *V1, unsigned V1Size,
-                                   const Value *V2, unsigned V2Size) {
+  AliasResult alias(const Value *V1, unsigned V1Size,
+                    const Value *V2, unsigned V2Size) {
     if (...)
       return NoAlias;
     ...
@@ -389,12 +388,6 @@ in its ``getAnalysisUsage`` that it does so. Some passes attempt to use
 ``AU.addPreserved<AliasAnalysis>``, however this doesn't actually have any
 effect.
 
-``AliasAnalysisCounter`` (``-count-aa``) and ``AliasDebugger`` (``-debug-aa``)
-are implemented as ``ModulePass`` classes, so if your alias analysis uses
-``FunctionPass``, it won't be able to use these utilities. If you try to use
-them, the pass manager will silently route alias analysis queries directly to
-``BasicAliasAnalysis`` instead.
-
 Similarly, the ``opt -p`` option introduces ``ModulePass`` passes between each
 pass, which prevents the use of ``FunctionPass`` alias analysis passes.
 
@@ -409,17 +402,10 @@ before it appears in an alias query. However, popular clients such as ``GVN``
 don't support this, and are known to trigger errors when run with the
 ``AliasAnalysisDebugger``.
 
-Due to several of the above limitations, the most obvious use for the
-``AliasAnalysisCounter`` utility, collecting stats on all alias queries in a
-compilation, doesn't work, even if the ``AliasAnalysis`` implementations don't
-use ``FunctionPass``.  There's no way to set a default, much less a default
-sequence, and there's no way to preserve it.
-
 The ``AliasSetTracker`` class (which is used by ``LICM``) makes a
-non-deterministic number of alias queries. This can cause stats collected by
-``AliasAnalysisCounter`` to have fluctuations among identical runs, for
-example. Another consequence is that debugging techniques involving pausing
-execution after a predetermined number of queries can be unreliable.
+non-deterministic number of alias queries. This can cause debugging techniques
+involving pausing execution after a predetermined number of queries to be
+unreliable.
 
 Many alias queries can be reformulated in terms of other alias queries. When
 multiple ``AliasAnalysis`` queries are chained together, it would make sense to
@@ -448,7 +434,7 @@ Using the ``AliasSetTracker`` class
 
 Many transformations need information about alias **sets** that are active in
 some scope, rather than information about pairwise aliasing.  The
-`AliasSetTracker <http://llvm.org/doxygen/classllvm_1_1AliasSetTracker.html>`__
+`AliasSetTracker <https://llvm.org/doxygen/classllvm_1_1AliasSetTracker.html>`__
 class is used to efficiently build these Alias Sets from the pairwise alias
 analysis information provided by the ``AliasAnalysis`` interface.
 
@@ -515,23 +501,13 @@ Available ``AliasAnalysis`` implementations
 -------------------------------------------
 
 This section lists the various implementations of the ``AliasAnalysis``
-interface.  With the exception of the :ref:`-no-aa <aliasanalysis-no-aa>`
-implementation, all of these :ref:`chain <aliasanalysis-chaining>` to other
+interface. All of these :ref:`chain <aliasanalysis-chaining>` to other
 alias analysis implementations.
 
-.. _aliasanalysis-no-aa:
+The ``-basic-aa`` pass
+^^^^^^^^^^^^^^^^^^^^^^
 
-The ``-no-aa`` pass
-^^^^^^^^^^^^^^^^^^^
-
-The ``-no-aa`` pass is just like what it sounds: an alias analysis that never
-returns any useful information.  This pass can be useful if you think that alias
-analysis is doing something wrong and are trying to narrow down a problem.
-
-The ``-basicaa`` pass
-^^^^^^^^^^^^^^^^^^^^^
-
-The ``-basicaa`` pass is an aggressive local analysis that *knows* many
+The ``-basic-aa`` pass is an aggressive local analysis that *knows* many
 important facts:
 
 * Distinct globals, stack allocations, and heap allocations can never alias.
@@ -635,7 +611,7 @@ transformations:
 * It uses mod/ref information to hoist function calls out of loops that do not
   write to memory and are loop-invariant.
 
-* If uses alias information to promote memory objects that are loaded and stored
+* It uses alias information to promote memory objects that are loaded and stored
   to in loops to live in a register instead.  It can do this if there are no may
   aliases to the loaded/stored memory location.
 
@@ -677,21 +653,6 @@ you're using the ``AliasSetTracker`` class.  To use it, use something like:
 
   % opt -ds-aa -print-alias-sets -disable-output
 
-The ``-count-aa`` pass
-^^^^^^^^^^^^^^^^^^^^^^
-
-The ``-count-aa`` pass is useful to see how many queries a particular pass is
-making and what responses are returned by the alias analysis.  As an example:
-
-.. code-block:: bash
-
-  % opt -basicaa -count-aa -ds-aa -count-aa -licm
-
-will print out how many queries (and what responses are returned) by the
-``-licm`` pass (of the ``-ds-aa`` pass) and how many queries are made of the
-``-basicaa`` pass by the ``-ds-aa`` pass.  This can be useful when debugging a
-transformation or an alias analysis implementation.
-
 The ``-aa-eval`` pass
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -703,6 +664,12 @@ algorithm will have a lower number of may aliases).
 
 Memory Dependence Analysis
 ==========================
+
+.. note::
+
+  We are currently in the process of migrating things from
+  ``MemoryDependenceAnalysis`` to :doc:`MemorySSA`. Please try to use
+  that instead.
 
 If you're just looking to be a client of alias analysis information, consider
 using the Memory Dependence Analysis interface instead.  MemDep is a lazy,

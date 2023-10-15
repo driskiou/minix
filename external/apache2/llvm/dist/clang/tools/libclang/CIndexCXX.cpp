@@ -1,9 +1,8 @@
 //===- CIndexCXX.cpp - Clang-C Source Indexing Library --------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,8 +18,6 @@
 
 using namespace clang;
 using namespace clang::cxcursor;
-
-extern "C" {
 
 unsigned clang_isVirtualBase(CXCursor C) {
   if (C.kind != CXCursor_CXXBaseSpecifier)
@@ -123,5 +120,3 @@ CXCursor clang_getSpecializedCursorTemplate(CXCursor C) {
   
   return MakeCXCursor(Template, getCursorTU(C));
 }
-  
-} // end extern "C"

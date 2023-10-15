@@ -1,9 +1,8 @@
 //===-- llvm/ADT/SetOperations.h - Generic Set Operations -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -39,7 +38,7 @@ bool set_union(S1Ty &S1, const S2Ty &S2) {
 template <class S1Ty, class S2Ty>
 void set_intersect(S1Ty &S1, const S2Ty &S2) {
    for (typename S1Ty::iterator I = S1.begin(); I != S1.end();) {
-     const typename S1Ty::key_type &E = *I;
+     const auto &E = *I;
      ++I;
      if (!S2.count(E)) S1.erase(E);   // Erase element if not in S2
    }
@@ -64,6 +63,27 @@ void set_subtract(S1Ty &S1, const S2Ty &S2) {
   for (typename S2Ty::const_iterator SI = S2.begin(), SE = S2.end();
        SI != SE; ++SI)
     S1.erase(*SI);
+}
+
+/// set_is_subset(A, B) - Return true iff A in B
+///
+template <class S1Ty, class S2Ty>
+bool set_is_subset(const S1Ty &S1, const S2Ty &S2) {
+  if (S1.size() > S2.size())
+    return false;
+  for (const auto It : S1)
+    if (!S2.count(It))
+      return false;
+  return true;
+}
+
+/// set_is_strict_subset(A, B) - Return true iff A in B and and A != B
+///
+template <class S1Ty, class S2Ty>
+bool set_is_strict_subset(const S1Ty &S1, const S2Ty &S2) {
+  if (S1.size() >= S2.size())
+    return false;
+  return set_is_subset(S1, S2);
 }
 
 } // End llvm namespace

@@ -1,13 +1,12 @@
 //===-- ARMUnwindOpAsm.h - ARM Unwind Opcodes Assembler ---------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares the unwind opcode assmebler for ARM exception handling
+// This file declares the unwind opcode assembler for ARM exception handling
 // table.
 //
 //===----------------------------------------------------------------------===//
@@ -16,8 +15,8 @@
 #define LLVM_LIB_TARGET_ARM_MCTARGETDESC_ARMUNWINDOPASM_H
 
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/ARMEHABI.h"
-#include "llvm/Support/DataTypes.h"
+#include <cstddef>
+#include <cstdint>
 
 namespace llvm {
 
@@ -25,13 +24,12 @@ class MCSymbol;
 
 class UnwindOpcodeAssembler {
 private:
-  llvm::SmallVector<uint8_t, 32> Ops;
-  llvm::SmallVector<unsigned, 8> OpBegins;
-  bool HasPersonality;
+  SmallVector<uint8_t, 32> Ops;
+  SmallVector<unsigned, 8> OpBegins;
+  bool HasPersonality = false;
 
 public:
-  UnwindOpcodeAssembler()
-      : HasPersonality(0) {
+  UnwindOpcodeAssembler() {
     OpBegins.push_back(0);
   }
 
@@ -40,12 +38,12 @@ public:
     Ops.clear();
     OpBegins.clear();
     OpBegins.push_back(0);
-    HasPersonality = 0;
+    HasPersonality = false;
   }
 
   /// Set the personality
   void setPersonality(const MCSymbol *Per) {
-    HasPersonality = 1;
+    HasPersonality = true;
   }
 
   /// Emit unwind opcodes for .save directives
@@ -66,7 +64,7 @@ public:
     OpBegins.push_back(OpBegins.back() + Opcodes.size());
   }
 
-  /// Finalize the unwind opcode sequence for EmitBytes()
+  /// Finalize the unwind opcode sequence for emitBytes()
   void Finalize(unsigned &PersonalityIndex,
                 SmallVectorImpl<uint8_t> &Result);
 
@@ -82,12 +80,12 @@ private:
     OpBegins.push_back(OpBegins.back() + 2);
   }
 
-  void EmitBytes(const uint8_t *Opcode, size_t Size) {
+  void emitBytes(const uint8_t *Opcode, size_t Size) {
     Ops.insert(Ops.end(), Opcode, Opcode + Size);
     OpBegins.push_back(OpBegins.back() + Size);
   }
 };
 
-} // namespace llvm
+} // end namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_ARM_MCTARGETDESC_ARMUNWINDOPASM_H

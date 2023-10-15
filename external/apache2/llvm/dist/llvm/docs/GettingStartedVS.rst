@@ -12,26 +12,20 @@ Welcome to LLVM on Windows! This document only covers LLVM on Windows using
 Visual Studio, not mingw or cygwin. In order to get started, you first need to
 know some basic information.
 
-There are many different projects that compose LLVM. The first is the LLVM
-suite. This contains all of the tools, libraries, and header files needed to
-use LLVM. It contains an assembler, disassembler,
-bitcode analyzer and bitcode optimizer. It also contains a test suite that can
-be used to test the LLVM tools.
+There are many different projects that compose LLVM. The first piece is the
+LLVM suite. This contains all of the tools, libraries, and header files needed
+to use LLVM. It contains an assembler, disassembler, bitcode analyzer and
+bitcode optimizer. It also contains basic regression tests that can be used to
+test the LLVM tools and the Clang front end.
 
-Another useful project on Windows is `Clang <http://clang.llvm.org/>`_.
-Clang is a C family ([Objective]C/C++) compiler. Clang mostly works on
-Windows, but does not currently understand all of the Microsoft extensions
-to C and C++. Because of this, clang cannot parse the C++ standard library
-included with Visual Studio, nor parts of the Windows Platform SDK. However,
-most standard C programs do compile. Clang can be used to emit bitcode,
-directly emit object files or even linked executables using Visual Studio's
-``link.exe``.
+The second piece is the `Clang <https://clang.llvm.org/>`_ front end.  This
+component compiles C, C++, Objective C, and Objective C++ code into LLVM
+bitcode. Clang typically uses LLVM libraries to optimize the bitcode and emit
+machine code. LLVM fully supports the COFF object file format, which is
+compatible with all other existing Windows toolchains.
 
-The large LLVM test suite cannot be run on the Visual Studio port at this
-time.
-
-Most of the tools build and work.  ``bugpoint`` does build, but does
-not work.
+The last major part of LLVM, the execution Test Suite, does not run on Windows,
+and this document does not discuss it.
 
 Additional information about the LLVM directory structure and tool chain
 can be found on the main :doc:`GettingStarted` page.
@@ -45,24 +39,38 @@ and software you will need.
 
 Hardware
 --------
-Any system that can adequately run Visual Studio 2012 is fine. The LLVM
+Any system that can adequately run Visual Studio 2017 is fine. The LLVM
 source tree and object files, libraries and executables will consume
 approximately 3GB.
 
 Software
 --------
-You will need Visual Studio 2012 or higher.
+You will need Visual Studio 2017 or higher, with the latest Update installed.
 
 You will also need the `CMake <http://www.cmake.org/>`_ build system since it
 generates the project files you will use to build with.
 
 If you would like to run the LLVM tests you will need `Python
-<http://www.python.org/>`_. Version 2.7 and newer are known to work. You will
+<http://www.python.org/>`_. Version 3.6 and newer are known to work. You will
 need `GnuWin32 <http://gnuwin32.sourceforge.net/>`_ tools, too.
 
 Do not install the LLVM directory tree into a path containing spaces (e.g.
 ``C:\Documents and Settings\...``) as the configure step will fail.
 
+To simplify the installation procedure, you can also use 
+`Chocolatey <https://chocolatey.org/>`_ as package manager. After the
+`installation <https://chocolatey.org/install>`_ of Chocolatey, run these
+commands in an admin shell to install the required tools:
+
+.. code-block:: bat
+
+   choco install -y ninja git cmake gnuwin python3
+   pip3 install psutil
+
+There is also a Windows 
+`Dockerfile <https://github.com/llvm/llvm-zorg/blob/main/buildbot/google/docker/windows-base-vscode2019/Dockerfile>`_ 
+with the entire build tool chain. This can be used to test the build with a
+tool chain different from your host installation or to create build servers. 
 
 Getting Started
 ===============
@@ -80,10 +88,12 @@ Here's the short story for getting up and running quickly with LLVM:
          (*or use WinZip*)
       3. ``cd llvm``
 
-   * With anonymous Subversion access:
+   * With git access:
+
+     *Note:* some regression tests require Unix-style line ending (``\n``).
 
       1. ``cd <where-you-want-llvm-to-live>``
-      2. ``svn co http://llvm.org/svn/llvm-project/llvm/trunk llvm``
+      2. ``git clone https://github.com/llvm/llvm-project.git llvm``
       3. ``cd llvm``
 
 5. Use `CMake <http://www.cmake.org/>`_ to generate up-to-date project files:
@@ -97,11 +107,19 @@ Here's the short story for getting up and running quickly with LLVM:
      using LLVM.  Another important option is ``LLVM_TARGETS_TO_BUILD``,
      which controls the LLVM target architectures that are included on the
      build.
+   * If CMake complains that it cannot find the compiler, make sure that
+     you have the Visual Studio C++ Tools installed, not just Visual Studio
+     itself (trying to create a C++ project in Visual Studio will generally
+     download the C++ tools if they haven't already been).
    * See the :doc:`LLVM CMake guide <CMake>` for detailed information about
      how to configure the LLVM build.
    * CMake generates project files for all build types. To select a specific
-     build type, use the Configuration manager from the VS IDE or the 
+     build type, use the Configuration manager from the VS IDE or the
      ``/property:Configuration`` command line option when using MSBuild.
+   * By default, the Visual Studio project files generated by CMake use the
+     32-bit toolset. If you are developing on a 64-bit version of Windows and
+     want to use the 64-bit toolset, pass the ``-Thost=x64`` flag when
+     generating the Visual Studio solution. This requires CMake 3.8.0 or later.
 
 6. Start Visual Studio
 
@@ -229,6 +247,6 @@ things... there are many more interesting and complicated things that you can
 do that aren't documented here (but we'll gladly accept a patch if you want to
 write something up!).  For more information about LLVM, check out:
 
-* `LLVM homepage <http://llvm.org/>`_
-* `LLVM doxygen tree <http://llvm.org/doxygen/>`_
+* `LLVM homepage <https://llvm.org/>`_
+* `LLVM doxygen tree <https://llvm.org/doxygen/>`_
 

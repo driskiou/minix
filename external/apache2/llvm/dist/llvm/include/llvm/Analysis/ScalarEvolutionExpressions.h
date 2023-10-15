@@ -1,9 +1,8 @@
 //===- llvm/Analysis/ScalarEvolutionExpressions.h - SCEV Exprs --*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,72 +13,128 @@
 #ifndef LLVM_ANALYSIS_SCALAREVOLUTIONEXPRESSIONS_H
 #define LLVM_ANALYSIS_SCALAREVOLUTIONEXPRESSIONS_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Value.h"
+#include "llvm/IR/ValueHandle.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <cassert>
+#include <cstddef>
 
 namespace llvm {
-  class ConstantInt;
-  class ConstantRange;
-  class DominatorTree;
 
-  enum SCEVTypes {
+class APInt;
+class Constant;
+class ConstantRange;
+class Loop;
+class Type;
+
+  enum SCEVTypes : unsigned short {
     // These should be ordered in terms of increasing complexity to make the
     // folders simpler.
     scConstant, scTruncate, scZeroExtend, scSignExtend, scAddExpr, scMulExpr,
-    scUDivExpr, scAddRecExpr, scUMaxExpr, scSMaxExpr,
-    scUnknown, scCouldNotCompute
+    scUDivExpr, scAddRecExpr, scUMaxExpr, scSMaxExpr, scUMinExpr, scSMinExpr,
+    scPtrToInt, scUnknown, scCouldNotCompute
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVConstant - This class represents a constant integer value.
-  ///
+  /// This class represents a constant integer value.
   class SCEVConstant : public SCEV {
     friend class ScalarEvolution;
 
     ConstantInt *V;
+
     SCEVConstant(const FoldingSetNodeIDRef ID, ConstantInt *v) :
-      SCEV(ID, scConstant), V(v) {}
+      SCEV(ID, scConstant, 1), V(v) {}
+
   public:
     ConstantInt *getValue() const { return V; }
+    const APInt &getAPInt() const { return getValue()->getValue(); }
 
     Type *getType() const { return V->getType(); }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scConstant;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVCastExpr - This is the base class for unary cast operator classes.
-  ///
+  inline unsigned short computeExpressionSize(ArrayRef<const SCEV *> Args) {
+    APInt Size(16, 1);
+    for (auto *Arg : Args)
+      Size = Size.uadd_sat(APInt(16, Arg->getExpressionSize()));
+    return (unsigned short)Size.getZExtValue();
+  }
+
+  /// This is the base class for unary cast operator classes.
   class SCEVCastExpr : public SCEV {
   protected:
-    const SCEV *Op;
+    std::array<const SCEV *, 1> Operands;
     Type *Ty;
 
-    SCEVCastExpr(const FoldingSetNodeIDRef ID,
-                 unsigned SCEVTy, const SCEV *op, Type *ty);
+    SCEVCastExpr(const FoldingSetNodeIDRef ID, SCEVTypes SCEVTy, const SCEV *op,
+                 Type *ty);
 
   public:
-    const SCEV *getOperand() const { return Op; }
+    const SCEV *getOperand() const { return Operands[0]; }
+    const SCEV *getOperand(unsigned i) const {
+      assert(i == 0 && "Operand index out of range!");
+      return Operands[0];
+    }
+    using op_iterator = std::array<const SCEV *, 1>::const_iterator;
+    using op_range = iterator_range<op_iterator>;
+
+    op_range operands() const {
+      return make_range(Operands.begin(), Operands.end());
+    }
+    size_t getNumOperands() const { return 1; }
     Type *getType() const { return Ty; }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scPtrToInt || S->getSCEVType() == scTruncate ||
+             S->getSCEVType() == scZeroExtend ||
+             S->getSCEVType() == scSignExtend;
+    }
+  };
+
+  /// This class represents a cast from a pointer to a pointer-sized integer
+  /// value.
+  class SCEVPtrToIntExpr : public SCEVCastExpr {
+    friend class ScalarEvolution;
+
+    SCEVPtrToIntExpr(const FoldingSetNodeIDRef ID, const SCEV *Op, Type *ITy);
+
+  public:
+    /// Methods for support type inquiry through isa, cast, and dyn_cast:
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scPtrToInt;
+    }
+  };
+
+  /// This is the base class for unary integral cast operator classes.
+  class SCEVIntegralCastExpr : public SCEVCastExpr {
+  protected:
+    SCEVIntegralCastExpr(const FoldingSetNodeIDRef ID, SCEVTypes SCEVTy,
+                         const SCEV *op, Type *ty);
+
+  public:
+    /// Methods for support type inquiry through isa, cast, and dyn_cast:
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scTruncate ||
              S->getSCEVType() == scZeroExtend ||
              S->getSCEVType() == scSignExtend;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVTruncateExpr - This class represents a truncation of an integer value
-  /// to a smaller integer value.
-  ///
-  class SCEVTruncateExpr : public SCEVCastExpr {
+  /// This class represents a truncation of an integer value to a
+  /// smaller integer value.
+  class SCEVTruncateExpr : public SCEVIntegralCastExpr {
     friend class ScalarEvolution;
 
     SCEVTruncateExpr(const FoldingSetNodeIDRef ID,
@@ -87,16 +142,14 @@ namespace llvm {
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scTruncate;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVZeroExtendExpr - This class represents a zero extension of a small
-  /// integer value to a larger integer value.
-  ///
-  class SCEVZeroExtendExpr : public SCEVCastExpr {
+  /// This class represents a zero extension of a small integer value
+  /// to a larger integer value.
+  class SCEVZeroExtendExpr : public SCEVIntegralCastExpr {
     friend class ScalarEvolution;
 
     SCEVZeroExtendExpr(const FoldingSetNodeIDRef ID,
@@ -104,16 +157,14 @@ namespace llvm {
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scZeroExtend;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVSignExtendExpr - This class represents a sign extension of a small
-  /// integer value to a larger integer value.
-  ///
-  class SCEVSignExtendExpr : public SCEVCastExpr {
+  /// This class represents a sign extension of a small integer value
+  /// to a larger integer value.
+  class SCEVSignExtendExpr : public SCEVIntegralCastExpr {
     friend class ScalarEvolution;
 
     SCEVSignExtendExpr(const FoldingSetNodeIDRef ID,
@@ -121,16 +172,13 @@ namespace llvm {
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scSignExtend;
     }
   };
 
-
-  //===--------------------------------------------------------------------===//
-  /// SCEVNAryExpr - This node is a base class providing common
-  /// functionality for n'ary operators.
-  ///
+  /// This node is a base class providing common functionality for
+  /// n'ary operators.
   class SCEVNAryExpr : public SCEV {
   protected:
     // Since SCEVs are immutable, ScalarEvolution allocates operand
@@ -140,19 +188,22 @@ namespace llvm {
     const SCEV *const *Operands;
     size_t NumOperands;
 
-    SCEVNAryExpr(const FoldingSetNodeIDRef ID,
-                 enum SCEVTypes T, const SCEV *const *O, size_t N)
-      : SCEV(ID, T), Operands(O), NumOperands(N) {}
+    SCEVNAryExpr(const FoldingSetNodeIDRef ID, enum SCEVTypes T,
+                 const SCEV *const *O, size_t N)
+        : SCEV(ID, T, computeExpressionSize(makeArrayRef(O, N))), Operands(O),
+          NumOperands(N) {}
 
   public:
     size_t getNumOperands() const { return NumOperands; }
+
     const SCEV *getOperand(unsigned i) const {
       assert(i < NumOperands && "Operand index out of range!");
       return Operands[i];
     }
 
-    typedef const SCEV *const *op_iterator;
-    typedef iterator_range<op_iterator> op_range;
+    using op_iterator = const SCEV *const *;
+    using op_range = iterator_range<op_iterator>;
+
     op_iterator op_begin() const { return Operands; }
     op_iterator op_end() const { return Operands + NumOperands; }
     op_range operands() const {
@@ -165,20 +216,28 @@ namespace llvm {
       return (NoWrapFlags)(SubclassData & Mask);
     }
 
+    bool hasNoUnsignedWrap() const {
+      return getNoWrapFlags(FlagNUW) != FlagAnyWrap;
+    }
+
+    bool hasNoSignedWrap() const {
+      return getNoWrapFlags(FlagNSW) != FlagAnyWrap;
+    }
+
+    bool hasNoSelfWrap() const {
+      return getNoWrapFlags(FlagNW) != FlagAnyWrap;
+    }
+
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
-      return S->getSCEVType() == scAddExpr ||
-             S->getSCEVType() == scMulExpr ||
-             S->getSCEVType() == scSMaxExpr ||
-             S->getSCEVType() == scUMaxExpr ||
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scAddExpr || S->getSCEVType() == scMulExpr ||
+             S->getSCEVType() == scSMaxExpr || S->getSCEVType() == scUMaxExpr ||
+             S->getSCEVType() == scSMinExpr || S->getSCEVType() == scUMinExpr ||
              S->getSCEVType() == scAddRecExpr;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVCommutativeExpr - This node is the base class for n'ary commutative
-  /// operators.
-  ///
+  /// This node is the base class for n'ary commutative operators.
   class SCEVCommutativeExpr : public SCEVNAryExpr {
   protected:
     SCEVCommutativeExpr(const FoldingSetNodeIDRef ID,
@@ -187,11 +246,10 @@ namespace llvm {
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
-      return S->getSCEVType() == scAddExpr ||
-             S->getSCEVType() == scMulExpr ||
-             S->getSCEVType() == scSMaxExpr ||
-             S->getSCEVType() == scUMaxExpr;
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scAddExpr || S->getSCEVType() == scMulExpr ||
+             S->getSCEVType() == scSMaxExpr || S->getSCEVType() == scUMaxExpr ||
+             S->getSCEVType() == scSMinExpr || S->getSCEVType() == scUMinExpr;
     }
 
     /// Set flags for a non-recurrence without clearing previously set flags.
@@ -200,65 +258,73 @@ namespace llvm {
     }
   };
 
-
-  //===--------------------------------------------------------------------===//
-  /// SCEVAddExpr - This node represents an addition of some number of SCEVs.
-  ///
+  /// This node represents an addition of some number of SCEVs.
   class SCEVAddExpr : public SCEVCommutativeExpr {
     friend class ScalarEvolution;
 
-    SCEVAddExpr(const FoldingSetNodeIDRef ID,
-                const SCEV *const *O, size_t N)
-      : SCEVCommutativeExpr(ID, scAddExpr, O, N) {
+    Type *Ty;
+
+    SCEVAddExpr(const FoldingSetNodeIDRef ID, const SCEV *const *O, size_t N)
+        : SCEVCommutativeExpr(ID, scAddExpr, O, N) {
+      auto *FirstPointerTypedOp = find_if(operands(), [](const SCEV *Op) {
+        return Op->getType()->isPointerTy();
+      });
+      if (FirstPointerTypedOp != operands().end())
+        Ty = (*FirstPointerTypedOp)->getType();
+      else
+        Ty = getOperand(0)->getType();
     }
 
   public:
-    Type *getType() const {
-      // Use the type of the last operand, which is likely to be a pointer
-      // type, if there is one. This doesn't usually matter, but it can help
-      // reduce casts when the expressions are expanded.
-      return getOperand(getNumOperands() - 1)->getType();
-    }
+    Type *getType() const { return Ty; }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scAddExpr;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVMulExpr - This node represents multiplication of some number of SCEVs.
-  ///
+  /// This node represents multiplication of some number of SCEVs.
   class SCEVMulExpr : public SCEVCommutativeExpr {
     friend class ScalarEvolution;
 
     SCEVMulExpr(const FoldingSetNodeIDRef ID,
                 const SCEV *const *O, size_t N)
-      : SCEVCommutativeExpr(ID, scMulExpr, O, N) {
-    }
+      : SCEVCommutativeExpr(ID, scMulExpr, O, N) {}
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scMulExpr;
     }
   };
 
-
-  //===--------------------------------------------------------------------===//
-  /// SCEVUDivExpr - This class represents a binary unsigned division operation.
-  ///
+  /// This class represents a binary unsigned division operation.
   class SCEVUDivExpr : public SCEV {
     friend class ScalarEvolution;
 
-    const SCEV *LHS;
-    const SCEV *RHS;
+    std::array<const SCEV *, 2> Operands;
+
     SCEVUDivExpr(const FoldingSetNodeIDRef ID, const SCEV *lhs, const SCEV *rhs)
-      : SCEV(ID, scUDivExpr), LHS(lhs), RHS(rhs) {}
+        : SCEV(ID, scUDivExpr, computeExpressionSize({lhs, rhs})) {
+        Operands[0] = lhs;
+        Operands[1] = rhs;
+      }
 
   public:
-    const SCEV *getLHS() const { return LHS; }
-    const SCEV *getRHS() const { return RHS; }
+    const SCEV *getLHS() const { return Operands[0]; }
+    const SCEV *getRHS() const { return Operands[1]; }
+    size_t getNumOperands() const { return 2; }
+    const SCEV *getOperand(unsigned i) const {
+      assert((i == 0 || i == 1) && "Operand index out of range!");
+      return i == 0 ? getLHS() : getRHS();
+    }
+
+    using op_iterator = std::array<const SCEV *, 2>::const_iterator;
+    using op_range = iterator_range<op_iterator>;
+    op_range operands() const {
+      return make_range(Operands.begin(), Operands.end());
+    }
 
     Type *getType() const {
       // In most cases the types of LHS and RHS will be the same, but in some
@@ -270,18 +336,16 @@ namespace llvm {
     }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scUDivExpr;
     }
   };
 
-
-  //===--------------------------------------------------------------------===//
-  /// SCEVAddRecExpr - This node represents a polynomial recurrence on the trip
-  /// count of the specified loop.  This is the primary focus of the
-  /// ScalarEvolution framework; all the other SCEV subclasses are mostly just
-  /// supporting infrastructure to allow SCEVAddRecExpr expressions to be
-  /// created and analyzed.
+  /// This node represents a polynomial recurrence on the trip count
+  /// of the specified loop.  This is the primary focus of the
+  /// ScalarEvolution framework; all the other SCEV subclasses are
+  /// mostly just supporting infrastructure to allow SCEVAddRecExpr
+  /// expressions to be created and analyzed.
   ///
   /// All operands of an AddRec are required to be loop invariant.
   ///
@@ -298,10 +362,10 @@ namespace llvm {
     const SCEV *getStart() const { return Operands[0]; }
     const Loop *getLoop() const { return L; }
 
-    /// getStepRecurrence - This method constructs and returns the recurrence
-    /// indicating how much this expression steps by.  If this is a polynomial
-    /// of degree N, it returns a chrec of degree N-1.
-    /// We cannot determine whether the step recurrence has self-wraparound.
+    /// Constructs and returns the recurrence indicating how much this
+    /// expression steps by.  If this is a polynomial of degree N, it
+    /// returns a chrec of degree N-1.  We cannot determine whether
+    /// the step recurrence has self-wraparound.
     const SCEV *getStepRecurrence(ScalarEvolution &SE) const {
       if (isAffine()) return getOperand(1);
       return SE.getAddRecExpr(SmallVector<const SCEV *, 3>(op_begin()+1,
@@ -309,17 +373,17 @@ namespace llvm {
                               getLoop(), FlagAnyWrap);
     }
 
-    /// isAffine - Return true if this represents an expression
-    /// A + B*x where A and B are loop invariant values.
+    /// Return true if this represents an expression A + B*x where A
+    /// and B are loop invariant values.
     bool isAffine() const {
       // We know that the start value is invariant.  This expression is thus
       // affine iff the step is also invariant.
       return getNumOperands() == 2;
     }
 
-    /// isQuadratic - Return true if this represents an expression
-    /// A + B*x + C*x^2 where A, B and C are loop invariant values.
-    /// This corresponds to an addrec of the form {L,+,M,+,N}
+    /// Return true if this represents an expression A + B*x + C*x^2
+    /// where A, B and C are loop invariant values.  This corresponds
+    /// to an addrec of the form {L,+,M,+,N}
     bool isQuadratic() const {
       return getNumOperands() == 3;
     }
@@ -333,204 +397,181 @@ namespace llvm {
       SubclassData |= Flags;
     }
 
-    /// evaluateAtIteration - Return the value of this chain of recurrences at
-    /// the specified iteration number.
+    /// Return the value of this chain of recurrences at the specified
+    /// iteration number.
     const SCEV *evaluateAtIteration(const SCEV *It, ScalarEvolution &SE) const;
 
-    /// getNumIterationsInRange - Return the number of iterations of this loop
-    /// that produce values in the specified constant range.  Another way of
-    /// looking at this is that it returns the first iteration number where the
-    /// value is not in the condition, thus computing the exit count.  If the
-    /// iteration count can't be computed, an instance of SCEVCouldNotCompute is
-    /// returned.
-    const SCEV *getNumIterationsInRange(ConstantRange Range,
-                                       ScalarEvolution &SE) const;
+    /// Return the number of iterations of this loop that produce
+    /// values in the specified constant range.  Another way of
+    /// looking at this is that it returns the first iteration number
+    /// where the value is not in the condition, thus computing the
+    /// exit count.  If the iteration count can't be computed, an
+    /// instance of SCEVCouldNotCompute is returned.
+    const SCEV *getNumIterationsInRange(const ConstantRange &Range,
+                                        ScalarEvolution &SE) const;
 
-    /// getPostIncExpr - Return an expression representing the value of
-    /// this expression one iteration of the loop ahead.
-    const SCEVAddRecExpr *getPostIncExpr(ScalarEvolution &SE) const {
-      return cast<SCEVAddRecExpr>(SE.getAddExpr(this, getStepRecurrence(SE)));
-    }
+    /// Return an expression representing the value of this expression
+    /// one iteration of the loop ahead.
+    const SCEVAddRecExpr *getPostIncExpr(ScalarEvolution &SE) const;
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scAddRecExpr;
     }
-
-    /// Collect parametric terms occurring in step expressions.
-    void collectParametricTerms(ScalarEvolution &SE,
-                                SmallVectorImpl<const SCEV *> &Terms) const;
-
-    /// Return in Subscripts the access functions for each dimension in Sizes.
-    void computeAccessFunctions(ScalarEvolution &SE,
-                                SmallVectorImpl<const SCEV *> &Subscripts,
-                                SmallVectorImpl<const SCEV *> &Sizes) const;
-
-    /// Split this SCEVAddRecExpr into two vectors of SCEVs representing the
-    /// subscripts and sizes of an array access.
-    ///
-    /// The delinearization is a 3 step process: the first two steps compute the
-    /// sizes of each subscript and the third step computes the access functions
-    /// for the delinearized array:
-    ///
-    /// 1. Find the terms in the step functions
-    /// 2. Compute the array size
-    /// 3. Compute the access function: divide the SCEV by the array size
-    ///    starting with the innermost dimensions found in step 2. The Quotient
-    ///    is the SCEV to be divided in the next step of the recursion. The
-    ///    Remainder is the subscript of the innermost dimension. Loop over all
-    ///    array dimensions computed in step 2.
-    ///
-    /// To compute a uniform array size for several memory accesses to the same
-    /// object, one can collect in step 1 all the step terms for all the memory
-    /// accesses, and compute in step 2 a unique array shape. This guarantees
-    /// that the array shape will be the same across all memory accesses.
-    ///
-    /// FIXME: We could derive the result of steps 1 and 2 from a description of
-    /// the array shape given in metadata.
-    ///
-    /// Example:
-    ///
-    /// A[][n][m]
-    ///
-    /// for i
-    ///   for j
-    ///     for k
-    ///       A[j+k][2i][5i] =
-    ///
-    /// The initial SCEV:
-    ///
-    /// A[{{{0,+,2*m+5}_i, +, n*m}_j, +, n*m}_k]
-    ///
-    /// 1. Find the different terms in the step functions:
-    /// -> [2*m, 5, n*m, n*m]
-    ///
-    /// 2. Compute the array size: sort and unique them
-    /// -> [n*m, 2*m, 5]
-    /// find the GCD of all the terms = 1
-    /// divide by the GCD and erase constant terms
-    /// -> [n*m, 2*m]
-    /// GCD = m
-    /// divide by GCD -> [n, 2]
-    /// remove constant terms
-    /// -> [n]
-    /// size of the array is A[unknown][n][m]
-    ///
-    /// 3. Compute the access function
-    /// a. Divide {{{0,+,2*m+5}_i, +, n*m}_j, +, n*m}_k by the innermost size m
-    /// Quotient: {{{0,+,2}_i, +, n}_j, +, n}_k
-    /// Remainder: {{{0,+,5}_i, +, 0}_j, +, 0}_k
-    /// The remainder is the subscript of the innermost array dimension: [5i].
-    ///
-    /// b. Divide Quotient: {{{0,+,2}_i, +, n}_j, +, n}_k by next outer size n
-    /// Quotient: {{{0,+,0}_i, +, 1}_j, +, 1}_k
-    /// Remainder: {{{0,+,2}_i, +, 0}_j, +, 0}_k
-    /// The Remainder is the subscript of the next array dimension: [2i].
-    ///
-    /// The subscript of the outermost dimension is the Quotient: [j+k].
-    ///
-    /// Overall, we have: A[][n][m], and the access function: A[j+k][2i][5i].
-    void delinearize(ScalarEvolution &SE,
-                     SmallVectorImpl<const SCEV *> &Subscripts,
-                     SmallVectorImpl<const SCEV *> &Sizes,
-                     const SCEV *ElementSize) const;
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVSMaxExpr - This class represents a signed maximum selection.
-  ///
-  class SCEVSMaxExpr : public SCEVCommutativeExpr {
+  /// This node is the base class min/max selections.
+  class SCEVMinMaxExpr : public SCEVCommutativeExpr {
     friend class ScalarEvolution;
 
-    SCEVSMaxExpr(const FoldingSetNodeIDRef ID,
-                 const SCEV *const *O, size_t N)
-      : SCEVCommutativeExpr(ID, scSMaxExpr, O, N) {
-      // Max never overflows.
+    static bool isMinMaxType(enum SCEVTypes T) {
+      return T == scSMaxExpr || T == scUMaxExpr || T == scSMinExpr ||
+             T == scUMinExpr;
+    }
+
+  protected:
+    /// Note: Constructing subclasses via this constructor is allowed
+    SCEVMinMaxExpr(const FoldingSetNodeIDRef ID, enum SCEVTypes T,
+                   const SCEV *const *O, size_t N)
+        : SCEVCommutativeExpr(ID, T, O, N) {
+      assert(isMinMaxType(T));
+      // Min and max never overflow
       setNoWrapFlags((NoWrapFlags)(FlagNUW | FlagNSW));
     }
 
   public:
+    static bool classof(const SCEV *S) {
+      return isMinMaxType(S->getSCEVType());
+    }
+
+    static enum SCEVTypes negate(enum SCEVTypes T) {
+      switch (T) {
+      case scSMaxExpr:
+        return scSMinExpr;
+      case scSMinExpr:
+        return scSMaxExpr;
+      case scUMaxExpr:
+        return scUMinExpr;
+      case scUMinExpr:
+        return scUMaxExpr;
+      default:
+        llvm_unreachable("Not a min or max SCEV type!");
+      }
+    }
+  };
+
+  /// This class represents a signed maximum selection.
+  class SCEVSMaxExpr : public SCEVMinMaxExpr {
+    friend class ScalarEvolution;
+
+    SCEVSMaxExpr(const FoldingSetNodeIDRef ID, const SCEV *const *O, size_t N)
+        : SCEVMinMaxExpr(ID, scSMaxExpr, O, N) {}
+
+  public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scSMaxExpr;
     }
   };
 
-
-  //===--------------------------------------------------------------------===//
-  /// SCEVUMaxExpr - This class represents an unsigned maximum selection.
-  ///
-  class SCEVUMaxExpr : public SCEVCommutativeExpr {
+  /// This class represents an unsigned maximum selection.
+  class SCEVUMaxExpr : public SCEVMinMaxExpr {
     friend class ScalarEvolution;
 
-    SCEVUMaxExpr(const FoldingSetNodeIDRef ID,
-                 const SCEV *const *O, size_t N)
-      : SCEVCommutativeExpr(ID, scUMaxExpr, O, N) {
-      // Max never overflows.
-      setNoWrapFlags((NoWrapFlags)(FlagNUW | FlagNSW));
-    }
+    SCEVUMaxExpr(const FoldingSetNodeIDRef ID, const SCEV *const *O, size_t N)
+        : SCEVMinMaxExpr(ID, scUMaxExpr, O, N) {}
 
   public:
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scUMaxExpr;
     }
   };
 
-  //===--------------------------------------------------------------------===//
-  /// SCEVUnknown - This means that we are dealing with an entirely unknown SCEV
-  /// value, and only represent it as its LLVM Value.  This is the "bottom"
-  /// value for the analysis.
-  ///
-  class SCEVUnknown : public SCEV, private CallbackVH {
+  /// This class represents a signed minimum selection.
+  class SCEVSMinExpr : public SCEVMinMaxExpr {
     friend class ScalarEvolution;
+
+    SCEVSMinExpr(const FoldingSetNodeIDRef ID, const SCEV *const *O, size_t N)
+        : SCEVMinMaxExpr(ID, scSMinExpr, O, N) {}
+
+  public:
+    /// Methods for support type inquiry through isa, cast, and dyn_cast:
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scSMinExpr;
+    }
+  };
+
+  /// This class represents an unsigned minimum selection.
+  class SCEVUMinExpr : public SCEVMinMaxExpr {
+    friend class ScalarEvolution;
+
+    SCEVUMinExpr(const FoldingSetNodeIDRef ID, const SCEV *const *O, size_t N)
+        : SCEVMinMaxExpr(ID, scUMinExpr, O, N) {}
+
+  public:
+    /// Methods for support type inquiry through isa, cast, and dyn_cast:
+    static bool classof(const SCEV *S) {
+      return S->getSCEVType() == scUMinExpr;
+    }
+  };
+
+  /// This means that we are dealing with an entirely unknown SCEV
+  /// value, and only represent it as its LLVM Value.  This is the
+  /// "bottom" value for the analysis.
+  class SCEVUnknown final : public SCEV, private CallbackVH {
+    friend class ScalarEvolution;
+
+    /// The parent ScalarEvolution value. This is used to update the
+    /// parent's maps when the value associated with a SCEVUnknown is
+    /// deleted or RAUW'd.
+    ScalarEvolution *SE;
+
+    /// The next pointer in the linked list of all SCEVUnknown
+    /// instances owned by a ScalarEvolution.
+    SCEVUnknown *Next;
+
+    SCEVUnknown(const FoldingSetNodeIDRef ID, Value *V,
+                ScalarEvolution *se, SCEVUnknown *next) :
+      SCEV(ID, scUnknown, 1), CallbackVH(V), SE(se), Next(next) {}
 
     // Implement CallbackVH.
     void deleted() override;
     void allUsesReplacedWith(Value *New) override;
 
-    /// SE - The parent ScalarEvolution value. This is used to update
-    /// the parent's maps when the value associated with a SCEVUnknown
-    /// is deleted or RAUW'd.
-    ScalarEvolution *SE;
-
-    /// Next - The next pointer in the linked list of all
-    /// SCEVUnknown instances owned by a ScalarEvolution.
-    SCEVUnknown *Next;
-
-    SCEVUnknown(const FoldingSetNodeIDRef ID, Value *V,
-                ScalarEvolution *se, SCEVUnknown *next) :
-      SCEV(ID, scUnknown), CallbackVH(V), SE(se), Next(next) {}
-
   public:
     Value *getValue() const { return getValPtr(); }
 
-    /// isSizeOf, isAlignOf, isOffsetOf - Test whether this is a special
-    /// constant representing a type size, alignment, or field offset in
-    /// a target-independent manner, and hasn't happened to have been
-    /// folded with other operations into something unrecognizable. This
-    /// is mainly only useful for pretty-printing and other situations
-    /// where it isn't absolutely required for these to succeed.
+    /// @{
+    /// Test whether this is a special constant representing a type
+    /// size, alignment, or field offset in a target-independent
+    /// manner, and hasn't happened to have been folded with other
+    /// operations into something unrecognizable. This is mainly only
+    /// useful for pretty-printing and other situations where it isn't
+    /// absolutely required for these to succeed.
     bool isSizeOf(Type *&AllocTy) const;
     bool isAlignOf(Type *&AllocTy) const;
     bool isOffsetOf(Type *&STy, Constant *&FieldNo) const;
+    /// @}
 
     Type *getType() const { return getValPtr()->getType(); }
 
     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const SCEV *S) {
+    static bool classof(const SCEV *S) {
       return S->getSCEVType() == scUnknown;
     }
   };
 
-  /// SCEVVisitor - This class defines a simple visitor class that may be used
-  /// for various SCEV analysis purposes.
+  /// This class defines a simple visitor class that may be used for
+  /// various SCEV analysis purposes.
   template<typename SC, typename RetVal=void>
   struct SCEVVisitor {
     RetVal visit(const SCEV *S) {
       switch (S->getSCEVType()) {
       case scConstant:
         return ((SC*)this)->visitConstant((const SCEVConstant*)S);
+      case scPtrToInt:
+        return ((SC *)this)->visitPtrToIntExpr((const SCEVPtrToIntExpr *)S);
       case scTruncate:
         return ((SC*)this)->visitTruncateExpr((const SCEVTruncateExpr*)S);
       case scZeroExtend:
@@ -549,13 +590,16 @@ namespace llvm {
         return ((SC*)this)->visitSMaxExpr((const SCEVSMaxExpr*)S);
       case scUMaxExpr:
         return ((SC*)this)->visitUMaxExpr((const SCEVUMaxExpr*)S);
+      case scSMinExpr:
+        return ((SC *)this)->visitSMinExpr((const SCEVSMinExpr *)S);
+      case scUMinExpr:
+        return ((SC *)this)->visitUMinExpr((const SCEVUMinExpr *)S);
       case scUnknown:
         return ((SC*)this)->visitUnknown((const SCEVUnknown*)S);
       case scCouldNotCompute:
         return ((SC*)this)->visitCouldNotCompute((const SCEVCouldNotCompute*)S);
-      default:
-        llvm_unreachable("Unknown SCEV type!");
       }
+      llvm_unreachable("Unknown SCEV kind!");
     }
 
     RetVal visitCouldNotCompute(const SCEVCouldNotCompute *S) {
@@ -580,6 +624,7 @@ namespace llvm {
       if (Visited.insert(S).second && Visitor.follow(S))
         Worklist.push_back(S);
     }
+
   public:
     SCEVTraversal(SV& V): Visitor(V) {}
 
@@ -591,35 +636,33 @@ namespace llvm {
         switch (S->getSCEVType()) {
         case scConstant:
         case scUnknown:
-          break;
+          continue;
+        case scPtrToInt:
         case scTruncate:
         case scZeroExtend:
         case scSignExtend:
           push(cast<SCEVCastExpr>(S)->getOperand());
-          break;
+          continue;
         case scAddExpr:
         case scMulExpr:
         case scSMaxExpr:
         case scUMaxExpr:
-        case scAddRecExpr: {
-          const SCEVNAryExpr *NAry = cast<SCEVNAryExpr>(S);
-          for (SCEVNAryExpr::op_iterator I = NAry->op_begin(),
-                 E = NAry->op_end(); I != E; ++I) {
-            push(*I);
-          }
-          break;
-        }
+        case scSMinExpr:
+        case scUMinExpr:
+        case scAddRecExpr:
+          for (const auto *Op : cast<SCEVNAryExpr>(S)->operands())
+            push(Op);
+          continue;
         case scUDivExpr: {
           const SCEVUDivExpr *UDiv = cast<SCEVUDivExpr>(S);
           push(UDiv->getLHS());
           push(UDiv->getRHS());
-          break;
+          continue;
         }
         case scCouldNotCompute:
           llvm_unreachable("Attempt to use a SCEVCouldNotCompute object!");
-        default:
-          llvm_unreachable("Unknown SCEV kind!");
         }
+        llvm_unreachable("Unknown SCEV kind!");
       }
     }
   };
@@ -631,160 +674,225 @@ namespace llvm {
     T.visitAll(Root);
   }
 
-  typedef DenseMap<const Value*, Value*> ValueToValueMap;
+  /// Return true if any node in \p Root satisfies the predicate \p Pred.
+  template <typename PredTy>
+  bool SCEVExprContains(const SCEV *Root, PredTy Pred) {
+    struct FindClosure {
+      bool Found = false;
+      PredTy Pred;
 
-  /// The SCEVParameterRewriter takes a scalar evolution expression and updates
-  /// the SCEVUnknown components following the Map (Value -> Value).
-  struct SCEVParameterRewriter
-    : public SCEVVisitor<SCEVParameterRewriter, const SCEV*> {
+      FindClosure(PredTy Pred) : Pred(Pred) {}
+
+      bool follow(const SCEV *S) {
+        if (!Pred(S))
+          return true;
+
+        Found = true;
+        return false;
+      }
+
+      bool isDone() const { return Found; }
+    };
+
+    FindClosure FC(Pred);
+    visitAll(Root, FC);
+    return FC.Found;
+  }
+
+  /// This visitor recursively visits a SCEV expression and re-writes it.
+  /// The result from each visit is cached, so it will return the same
+  /// SCEV for the same input.
+  template<typename SC>
+  class SCEVRewriteVisitor : public SCEVVisitor<SC, const SCEV *> {
+  protected:
+    ScalarEvolution &SE;
+    // Memoize the result of each visit so that we only compute once for
+    // the same input SCEV. This is to avoid redundant computations when
+    // a SCEV is referenced by multiple SCEVs. Without memoization, this
+    // visit algorithm would have exponential time complexity in the worst
+    // case, causing the compiler to hang on certain tests.
+    DenseMap<const SCEV *, const SCEV *> RewriteResults;
+
   public:
-    static const SCEV *rewrite(const SCEV *Scev, ScalarEvolution &SE,
-                               ValueToValueMap &Map,
-                               bool InterpretConsts = false) {
-      SCEVParameterRewriter Rewriter(SE, Map, InterpretConsts);
-      return Rewriter.visit(Scev);
-    }
+    SCEVRewriteVisitor(ScalarEvolution &SE) : SE(SE) {}
 
-    SCEVParameterRewriter(ScalarEvolution &S, ValueToValueMap &M, bool C)
-      : SE(S), Map(M), InterpretConsts(C) {}
+    const SCEV *visit(const SCEV *S) {
+      auto It = RewriteResults.find(S);
+      if (It != RewriteResults.end())
+        return It->second;
+      auto* Visited = SCEVVisitor<SC, const SCEV *>::visit(S);
+      auto Result = RewriteResults.try_emplace(S, Visited);
+      assert(Result.second && "Should insert a new entry");
+      return Result.first->second;
+    }
 
     const SCEV *visitConstant(const SCEVConstant *Constant) {
       return Constant;
     }
 
+    const SCEV *visitPtrToIntExpr(const SCEVPtrToIntExpr *Expr) {
+      const SCEV *Operand = ((SC *)this)->visit(Expr->getOperand());
+      return Operand == Expr->getOperand()
+                 ? Expr
+                 : SE.getPtrToIntExpr(Operand, Expr->getType());
+    }
+
     const SCEV *visitTruncateExpr(const SCEVTruncateExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getTruncateExpr(Operand, Expr->getType());
+      const SCEV *Operand = ((SC*)this)->visit(Expr->getOperand());
+      return Operand == Expr->getOperand()
+                 ? Expr
+                 : SE.getTruncateExpr(Operand, Expr->getType());
     }
 
     const SCEV *visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getZeroExtendExpr(Operand, Expr->getType());
+      const SCEV *Operand = ((SC*)this)->visit(Expr->getOperand());
+      return Operand == Expr->getOperand()
+                 ? Expr
+                 : SE.getZeroExtendExpr(Operand, Expr->getType());
     }
 
     const SCEV *visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getSignExtendExpr(Operand, Expr->getType());
+      const SCEV *Operand = ((SC*)this)->visit(Expr->getOperand());
+      return Operand == Expr->getOperand()
+                 ? Expr
+                 : SE.getSignExtendExpr(Operand, Expr->getType());
     }
 
     const SCEV *visitAddExpr(const SCEVAddExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getAddExpr(Operands);
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC*)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getAddExpr(Operands);
     }
 
     const SCEV *visitMulExpr(const SCEVMulExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getMulExpr(Operands);
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC*)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getMulExpr(Operands);
     }
 
     const SCEV *visitUDivExpr(const SCEVUDivExpr *Expr) {
-      return SE.getUDivExpr(visit(Expr->getLHS()), visit(Expr->getRHS()));
+      auto *LHS = ((SC *)this)->visit(Expr->getLHS());
+      auto *RHS = ((SC *)this)->visit(Expr->getRHS());
+      bool Changed = LHS != Expr->getLHS() || RHS != Expr->getRHS();
+      return !Changed ? Expr : SE.getUDivExpr(LHS, RHS);
     }
 
     const SCEV *visitAddRecExpr(const SCEVAddRecExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getAddRecExpr(Operands, Expr->getLoop(),
-                              Expr->getNoWrapFlags());
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC*)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr
+                      : SE.getAddRecExpr(Operands, Expr->getLoop(),
+                                         Expr->getNoWrapFlags());
     }
 
     const SCEV *visitSMaxExpr(const SCEVSMaxExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getSMaxExpr(Operands);
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC *)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getSMaxExpr(Operands);
     }
 
     const SCEV *visitUMaxExpr(const SCEVUMaxExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getUMaxExpr(Operands);
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC*)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getUMaxExpr(Operands);
+    }
+
+    const SCEV *visitSMinExpr(const SCEVSMinExpr *Expr) {
+      SmallVector<const SCEV *, 2> Operands;
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC *)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getSMinExpr(Operands);
+    }
+
+    const SCEV *visitUMinExpr(const SCEVUMinExpr *Expr) {
+      SmallVector<const SCEV *, 2> Operands;
+      bool Changed = false;
+      for (auto *Op : Expr->operands()) {
+        Operands.push_back(((SC *)this)->visit(Op));
+        Changed |= Op != Operands.back();
+      }
+      return !Changed ? Expr : SE.getUMinExpr(Operands);
     }
 
     const SCEV *visitUnknown(const SCEVUnknown *Expr) {
-      Value *V = Expr->getValue();
-      if (Map.count(V)) {
-        Value *NV = Map[V];
-        if (InterpretConsts && isa<ConstantInt>(NV))
-          return SE.getConstant(cast<ConstantInt>(NV));
-        return SE.getUnknown(NV);
-      }
       return Expr;
     }
 
     const SCEV *visitCouldNotCompute(const SCEVCouldNotCompute *Expr) {
       return Expr;
     }
-
-  private:
-    ScalarEvolution &SE;
-    ValueToValueMap &Map;
-    bool InterpretConsts;
   };
 
-  typedef DenseMap<const Loop*, const SCEV*> LoopToScevMapT;
+  using ValueToValueMap = DenseMap<const Value *, Value *>;
+  using ValueToSCEVMapTy = DenseMap<const Value *, const SCEV *>;
 
-  /// The SCEVApplyRewriter takes a scalar evolution expression and applies
-  /// the Map (Loop -> SCEV) to all AddRecExprs.
-  struct SCEVApplyRewriter
-    : public SCEVVisitor<SCEVApplyRewriter, const SCEV*> {
+  /// The SCEVParameterRewriter takes a scalar evolution expression and updates
+  /// the SCEVUnknown components following the Map (Value -> SCEV).
+  class SCEVParameterRewriter : public SCEVRewriteVisitor<SCEVParameterRewriter> {
   public:
-    static const SCEV *rewrite(const SCEV *Scev, LoopToScevMapT &Map,
-                               ScalarEvolution &SE) {
-      SCEVApplyRewriter Rewriter(SE, Map);
+    static const SCEV *rewrite(const SCEV *Scev, ScalarEvolution &SE,
+                               ValueToSCEVMapTy &Map) {
+      SCEVParameterRewriter Rewriter(SE, Map);
       return Rewriter.visit(Scev);
     }
 
-    SCEVApplyRewriter(ScalarEvolution &S, LoopToScevMapT &M)
-      : SE(S), Map(M) {}
+    SCEVParameterRewriter(ScalarEvolution &SE, ValueToSCEVMapTy &M)
+        : SCEVRewriteVisitor(SE), Map(M) {}
 
-    const SCEV *visitConstant(const SCEVConstant *Constant) {
-      return Constant;
+    const SCEV *visitUnknown(const SCEVUnknown *Expr) {
+      auto I = Map.find(Expr->getValue());
+      if (I == Map.end())
+        return Expr;
+      return I->second;
     }
 
-    const SCEV *visitTruncateExpr(const SCEVTruncateExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getTruncateExpr(Operand, Expr->getType());
-    }
+  private:
+    ValueToSCEVMapTy &Map;
+  };
 
-    const SCEV *visitZeroExtendExpr(const SCEVZeroExtendExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getZeroExtendExpr(Operand, Expr->getType());
-    }
+  using LoopToScevMapT = DenseMap<const Loop *, const SCEV *>;
 
-    const SCEV *visitSignExtendExpr(const SCEVSignExtendExpr *Expr) {
-      const SCEV *Operand = visit(Expr->getOperand());
-      return SE.getSignExtendExpr(Operand, Expr->getType());
-    }
+  /// The SCEVLoopAddRecRewriter takes a scalar evolution expression and applies
+  /// the Map (Loop -> SCEV) to all AddRecExprs.
+  class SCEVLoopAddRecRewriter
+      : public SCEVRewriteVisitor<SCEVLoopAddRecRewriter> {
+  public:
+    SCEVLoopAddRecRewriter(ScalarEvolution &SE, LoopToScevMapT &M)
+        : SCEVRewriteVisitor(SE), Map(M) {}
 
-    const SCEV *visitAddExpr(const SCEVAddExpr *Expr) {
-      SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getAddExpr(Operands);
-    }
-
-    const SCEV *visitMulExpr(const SCEVMulExpr *Expr) {
-      SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getMulExpr(Operands);
-    }
-
-    const SCEV *visitUDivExpr(const SCEVUDivExpr *Expr) {
-      return SE.getUDivExpr(visit(Expr->getLHS()), visit(Expr->getRHS()));
+    static const SCEV *rewrite(const SCEV *Scev, LoopToScevMapT &Map,
+                               ScalarEvolution &SE) {
+      SCEVLoopAddRecRewriter Rewriter(SE, Map);
+      return Rewriter.visit(Scev);
     }
 
     const SCEV *visitAddRecExpr(const SCEVAddRecExpr *Expr) {
       SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
+      for (const SCEV *Op : Expr->operands())
+        Operands.push_back(visit(Op));
 
       const Loop *L = Expr->getLoop();
       const SCEV *Res = SE.getAddRecExpr(Operands, L, Expr->getNoWrapFlags());
@@ -792,43 +900,14 @@ namespace llvm {
       if (0 == Map.count(L))
         return Res;
 
-      const SCEVAddRecExpr *Rec = (const SCEVAddRecExpr *) Res;
+      const SCEVAddRecExpr *Rec = cast<SCEVAddRecExpr>(Res);
       return Rec->evaluateAtIteration(Map[L], SE);
     }
 
-    const SCEV *visitSMaxExpr(const SCEVSMaxExpr *Expr) {
-      SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getSMaxExpr(Operands);
-    }
-
-    const SCEV *visitUMaxExpr(const SCEVUMaxExpr *Expr) {
-      SmallVector<const SCEV *, 2> Operands;
-      for (int i = 0, e = Expr->getNumOperands(); i < e; ++i)
-        Operands.push_back(visit(Expr->getOperand(i)));
-      return SE.getUMaxExpr(Operands);
-    }
-
-    const SCEV *visitUnknown(const SCEVUnknown *Expr) {
-      return Expr;
-    }
-
-    const SCEV *visitCouldNotCompute(const SCEVCouldNotCompute *Expr) {
-      return Expr;
-    }
-
   private:
-    ScalarEvolution &SE;
     LoopToScevMapT &Map;
   };
 
-/// Applies the Map (Loop -> SCEV) to the given Scev.
-static inline const SCEV *apply(const SCEV *Scev, LoopToScevMapT &Map,
-                                ScalarEvolution &SE) {
-  return SCEVApplyRewriter::rewrite(Scev, Map, SE);
-}
+} // end namespace llvm
 
-}
-
-#endif
+#endif // LLVM_ANALYSIS_SCALAREVOLUTIONEXPRESSIONS_H

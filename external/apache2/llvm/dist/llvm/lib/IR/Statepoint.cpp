@@ -1,61 +1,44 @@
 //===-- IR/Statepoint.cpp -- gc.statepoint utilities ---  -----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// 
+// This file contains some utility functions to help recognize gc.statepoint
+// intrinsics.
+//
 //===----------------------------------------------------------------------===//
+
+#include "llvm/IR/Statepoint.h"
 
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Statepoint.h"
-#include "llvm/Support/CommandLine.h"
 
-using namespace std;
 using namespace llvm;
 
-bool llvm::isStatepoint(const ImmutableCallSite &CS) {
-  const Function *F = CS.getCalledFunction();
-  return (F && F->getIntrinsicID() == Intrinsic::experimental_gc_statepoint);
-}
-bool llvm::isStatepoint(const Instruction *inst) {
-  if (isa<InvokeInst>(inst) || isa<CallInst>(inst)) {
-    ImmutableCallSite CS(inst);
-    return isStatepoint(CS);
-  }
-  return false;
-}
-bool llvm::isStatepoint(const Instruction &inst) {
-  return isStatepoint(&inst);
+bool llvm::isStatepointDirectiveAttr(Attribute Attr) {
+  return Attr.hasAttribute("statepoint-id") ||
+         Attr.hasAttribute("statepoint-num-patch-bytes");
 }
 
-bool llvm::isGCRelocate(const ImmutableCallSite &CS) {
-  return isGCRelocate(CS.getInstruction());
-}
-bool llvm::isGCRelocate(const Instruction *inst) {
-  if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-    if (const Function *F = call->getCalledFunction()) {
-      return F->getIntrinsicID() == Intrinsic::experimental_gc_relocate;
-    }
-  }
-  return false;
-}
+StatepointDirectives
+llvm::parseStatepointDirectivesFromAttrs(AttributeList AS) {
+  StatepointDirectives Result;
 
-bool llvm::isGCResult(const ImmutableCallSite &CS) {
-  return isGCResult(CS.getInstruction());
-}
-bool llvm::isGCResult(const Instruction *inst) {
-  if (const CallInst *call = dyn_cast<CallInst>(inst)) {
-    if (Function *F = call->getCalledFunction()) {
-      return (F->getIntrinsicID() == Intrinsic::experimental_gc_result_int ||
-              F->getIntrinsicID() == Intrinsic::experimental_gc_result_float ||
-              F->getIntrinsicID() == Intrinsic::experimental_gc_result_ptr);
-    }
-  }
-  return false;
+  Attribute AttrID =
+      AS.getAttribute(AttributeList::FunctionIndex, "statepoint-id");
+  uint64_t StatepointID;
+  if (AttrID.isStringAttribute())
+    if (!AttrID.getValueAsString().getAsInteger(10, StatepointID))
+      Result.StatepointID = StatepointID;
+
+  uint32_t NumPatchBytes;
+  Attribute AttrNumPatchBytes = AS.getAttribute(AttributeList::FunctionIndex,
+                                                "statepoint-num-patch-bytes");
+  if (AttrNumPatchBytes.isStringAttribute())
+    if (!AttrNumPatchBytes.getValueAsString().getAsInteger(10, NumPatchBytes))
+      Result.NumPatchBytes = NumPatchBytes;
+
+  return Result;
 }

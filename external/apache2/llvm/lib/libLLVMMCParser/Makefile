@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.2 2011/08/02 17:12:39 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:53 joerg Exp $
 
 LIB=	LLVMMCParser
 
@@ -9,12 +9,15 @@ LIB=	LLVMMCParser
 SRCS+=	AsmLexer.cpp \
 	AsmParser.cpp \
 	COFFAsmParser.cpp \
+	COFFMasmParser.cpp \
 	DarwinAsmParser.cpp \
 	ELFAsmParser.cpp \
+	MasmParser.cpp \
 	MCAsmLexer.cpp \
 	MCAsmParser.cpp \
 	MCAsmParserExtension.cpp \
-	MCTargetAsmParser.cpp
+	MCTargetAsmParser.cpp \
+	WasmAsmParser.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>

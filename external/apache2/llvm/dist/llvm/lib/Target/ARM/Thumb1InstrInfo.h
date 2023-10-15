@@ -1,9 +1,8 @@
 //===-- Thumb1InstrInfo.h - Thumb-1 Instruction Information -----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,18 +14,18 @@
 #define LLVM_LIB_TARGET_ARM_THUMB1INSTRINFO_H
 
 #include "ARMBaseInstrInfo.h"
-#include "Thumb1RegisterInfo.h"
+#include "ThumbRegisterInfo.h"
 
 namespace llvm {
   class ARMSubtarget;
 
 class Thumb1InstrInfo : public ARMBaseInstrInfo {
-  Thumb1RegisterInfo RI;
+  ThumbRegisterInfo RI;
 public:
   explicit Thumb1InstrInfo(const ARMSubtarget &STI);
 
-  /// getNoopForMachoTarget - Return the noop instruction to use for a noop.
-  void getNoopForMachoTarget(MCInst &NopInst) const override;
+  /// Return the noop instruction to use for a noop.
+  MCInst getNop() const override;
 
   // Return the non-pre/post incrementing version of 'Opc'. Return 0
   // if there is not such an opcode.
@@ -36,27 +35,26 @@ public:
   /// such, whenever a client has an instance of instruction info, it should
   /// always be able to get register info as well (through this method).
   ///
-  const Thumb1RegisterInfo &getRegisterInfo() const override { return RI; }
+  const ThumbRegisterInfo &getRegisterInfo() const override { return RI; }
 
-  void copyPhysReg(MachineBasicBlock &MBB,
-                   MachineBasicBlock::iterator I, DebugLoc DL,
-                   unsigned DestReg, unsigned SrcReg,
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                   const DebugLoc &DL, MCRegister DestReg, MCRegister SrcReg,
                    bool KillSrc) const override;
   void storeRegToStackSlot(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MBBI,
-                           unsigned SrcReg, bool isKill, int FrameIndex,
+                           Register SrcReg, bool isKill, int FrameIndex,
                            const TargetRegisterClass *RC,
                            const TargetRegisterInfo *TRI) const override;
 
   void loadRegFromStackSlot(MachineBasicBlock &MBB,
                             MachineBasicBlock::iterator MBBI,
-                            unsigned DestReg, int FrameIndex,
+                            Register DestReg, int FrameIndex,
                             const TargetRegisterClass *RC,
                             const TargetRegisterInfo *TRI) const override;
 
+  bool canCopyGluedNodeDuringSchedule(SDNode *N) const override;
 private:
-  void expandLoadStackGuard(MachineBasicBlock::iterator MI,
-                            Reloc::Model RM) const override;
+  void expandLoadStackGuard(MachineBasicBlock::iterator MI) const override;
 };
 }
 

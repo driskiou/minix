@@ -1,9 +1,8 @@
 //===--- CreateInvocationFromCommandLine.cpp - CompilerInvocation from Args ==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +14,7 @@
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
+#include "clang/Driver/Action.h"
 #include "clang/Driver/Options.h"
 #include "clang/Driver/Tool.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -24,35 +24,31 @@
 using namespace clang;
 using namespace llvm::opt;
 
-/// createInvocationFromCommandLine - Construct a compiler invocation object for
-/// a command line argument vector.
-///
-/// \return A CompilerInvocation, or 0 if none was built for the given
-/// argument vector.
-CompilerInvocation *
-clang::createInvocationFromCommandLine(ArrayRef<const char *> ArgList,
-                            IntrusiveRefCntPtr<DiagnosticsEngine> Diags) {
+std::unique_ptr<CompilerInvocation> clang::createInvocationFromCommandLine(
+    ArrayRef<const char *> ArgList, IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
+    IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, bool ShouldRecoverOnErorrs,
+    std::vector<std::string> *CC1Args) {
   if (!Diags.get()) {
     // No diagnostics engine was provided, so create our own diagnostics object
     // with the default options.
     Diags = CompilerInstance::createDiagnostics(new DiagnosticOptions);
   }
 
-  SmallVector<const char *, 16> Args;
-  Args.push_back("<clang>"); // FIXME: Remove dummy argument.
-  Args.insert(Args.end(), ArgList.begin(), ArgList.end());
+  SmallVector<const char *, 16> Args(ArgList.begin(), ArgList.end());
 
   // FIXME: Find a cleaner way to force the driver into restricted modes.
   Args.push_back("-fsyntax-only");
 
   // FIXME: We shouldn't have to pass in the path info.
-  driver::Driver TheDriver("clang", llvm::sys::getDefaultTargetTriple(),
-                           *Diags);
+  driver::Driver TheDriver(Args[0], llvm::sys::getDefaultTargetTriple(), *Diags,
+                           "clang LLVM compiler", VFS);
 
   // Don't check that inputs exist, they may have been remapped.
   TheDriver.setCheckInputsExist(false);
 
   std::unique_ptr<driver::Compilation> C(TheDriver.BuildCompilation(Args));
+  if (!C)
+    return nullptr;
 
   // Just print the cc1 options if -### was present.
   if (C->getArgs().hasArg(driver::options::OPT__HASH_HASH_HASH)) {
@@ -61,9 +57,25 @@ clang::createInvocationFromCommandLine(ArrayRef<const char *> ArgList,
   }
 
   // We expect to get back exactly one command job, if we didn't something
-  // failed.
+  // failed. Offload compilation is an exception as it creates multiple jobs. If
+  // that's the case, we proceed with the first job. If caller needs a
+  // particular job, it should be controlled via options (e.g.
+  // --cuda-{host|device}-only for CUDA) passed to the driver.
   const driver::JobList &Jobs = C->getJobs();
-  if (Jobs.size() != 1 || !isa<driver::Command>(*Jobs.begin())) {
+  bool OffloadCompilation = false;
+  if (Jobs.size() > 1) {
+    for (auto &A : C->getActions()){
+      // On MacOSX real actions may end up being wrapped in BindArchAction
+      if (isa<driver::BindArchAction>(A))
+        A = *A->input_begin();
+      if (isa<driver::OffloadAction>(A)) {
+        OffloadCompilation = true;
+        break;
+      }
+    }
+  }
+  if (Jobs.size() == 0 || !isa<driver::Command>(*Jobs.begin()) ||
+      (Jobs.size() > 1 && !OffloadCompilation)) {
     SmallString<256> Msg;
     llvm::raw_svector_ostream OS(Msg);
     Jobs.Print(OS, "; ", true);
@@ -78,12 +90,11 @@ clang::createInvocationFromCommandLine(ArrayRef<const char *> ArgList,
   }
 
   const ArgStringList &CCArgs = Cmd.getArguments();
-  std::unique_ptr<CompilerInvocation> CI(new CompilerInvocation());
-  if (!CompilerInvocation::CreateFromArgs(*CI,
-                                     const_cast<const char **>(CCArgs.data()),
-                                     const_cast<const char **>(CCArgs.data()) +
-                                     CCArgs.size(),
-                                     *Diags))
+  if (CC1Args)
+    *CC1Args = {CCArgs.begin(), CCArgs.end()};
+  auto CI = std::make_unique<CompilerInvocation>();
+  if (!CompilerInvocation::CreateFromArgs(*CI, CCArgs, *Diags, Args[0]) &&
+      !ShouldRecoverOnErorrs)
     return nullptr;
-  return CI.release();
+  return CI;
 }

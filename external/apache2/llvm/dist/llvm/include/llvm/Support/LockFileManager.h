@@ -1,9 +1,8 @@
 //===--- LockFileManager.h - File-level locking utility ---------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 #ifndef LLVM_SUPPORT_LOCKFILEMANAGER_H
@@ -11,12 +10,13 @@
 
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/StringRef.h"
 #include <system_error>
 #include <utility> // for std::pair
 
 namespace llvm {
-/// \brief Class that manages the creation of a lock file to aid
+class StringRef;
+
+/// Class that manages the creation of a lock file to aid
 /// implicit coordination between different processes.
 ///
 /// The implicit coordination works by creating a ".lock" file alongside
@@ -26,26 +26,26 @@ namespace llvm {
 /// operation.
 class LockFileManager {
 public:
-  /// \brief Describes the state of a lock file.
+  /// Describes the state of a lock file.
   enum LockFileState {
-    /// \brief The lock file has been created and is owned by this instance
+    /// The lock file has been created and is owned by this instance
     /// of the object.
     LFS_Owned,
-    /// \brief The lock file already exists and is owned by some other
+    /// The lock file already exists and is owned by some other
     /// instance.
     LFS_Shared,
-    /// \brief An error occurred while trying to create or find the lock
+    /// An error occurred while trying to create or find the lock
     /// file.
     LFS_Error
   };
 
-  /// \brief Describes the result of waiting for the owner to release the lock.
+  /// Describes the result of waiting for the owner to release the lock.
   enum WaitForUnlockResult {
-    /// \brief The lock was released successfully.
+    /// The lock was released successfully.
     Res_Success,
-    /// \brief Owner died while holding the lock.
+    /// Owner died while holding the lock.
     Res_OwnerDied,
-    /// \brief Reached timeout while waiting for the owner to release the lock.
+    /// Reached timeout while waiting for the owner to release the lock.
     Res_Timeout
   };
 
@@ -55,10 +55,11 @@ private:
   SmallString<128> UniqueLockFileName;
 
   Optional<std::pair<std::string, int> > Owner;
-  Optional<std::error_code> Error;
+  std::error_code ErrorCode;
+  std::string ErrorDiagMsg;
 
-  LockFileManager(const LockFileManager &) LLVM_DELETED_FUNCTION;
-  LockFileManager &operator=(const LockFileManager &) LLVM_DELETED_FUNCTION;
+  LockFileManager(const LockFileManager &) = delete;
+  LockFileManager &operator=(const LockFileManager &) = delete;
 
   static Optional<std::pair<std::string, int> >
   readLockFile(StringRef LockFileName);
@@ -70,13 +71,28 @@ public:
   LockFileManager(StringRef FileName);
   ~LockFileManager();
 
-  /// \brief Determine the state of the lock file.
+  /// Determine the state of the lock file.
   LockFileState getState() const;
 
   operator LockFileState() const { return getState(); }
 
-  /// \brief For a shared lock, wait until the owner releases the lock.
-  WaitForUnlockResult waitForUnlock();
+  /// For a shared lock, wait until the owner releases the lock.
+  /// Total timeout for the file to appear is ~1.5 minutes.
+  /// \param MaxSeconds the maximum total wait time in seconds.
+  WaitForUnlockResult waitForUnlock(const unsigned MaxSeconds = 90);
+
+  /// Remove the lock file.  This may delete a different lock file than
+  /// the one previously read if there is a race.
+  std::error_code unsafeRemoveLockFile();
+
+  /// Get error message, or "" if there is no error.
+  std::string getErrorMessage() const;
+
+  /// Set error and error message
+  void setError(const std::error_code &EC, StringRef ErrorMsg = "") {
+    ErrorCode = EC;
+    ErrorDiagMsg = ErrorMsg.str();
+  }
 };
 
 } // end namespace llvm

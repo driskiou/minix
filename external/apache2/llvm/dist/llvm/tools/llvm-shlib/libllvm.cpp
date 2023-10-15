@@ -1,9 +1,8 @@
 //===-libllvm.cpp - LLVM Shared Library -----------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,10 +10,3 @@
 // you can't define a target with no sources.
 //
 //===----------------------------------------------------------------------===//
-
-#include "llvm/Config/config.h"
-
-#if defined(DISABLE_LLVM_DYLIB_ATEXIT)
-extern "C" int __cxa_atexit();
-extern "C" int __cxa_atexit() { return 0; }
-#endif

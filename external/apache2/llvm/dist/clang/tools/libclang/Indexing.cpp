@@ -1,43 +1,42 @@
-//===- CIndexHigh.cpp - Higher level API functions ------------------------===//
+//===- Indexing.cpp - Higher level API functions --------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-#include "IndexingContext.h"
 #include "CIndexDiagnostic.h"
 #include "CIndexer.h"
 #include "CLog.h"
 #include "CXCursor.h"
+#include "CXIndexDataConsumer.h"
 #include "CXSourceLocation.h"
 #include "CXString.h"
 #include "CXTranslationUnit.h"
 #include "clang/AST/ASTConsumer.h"
-#include "clang/AST/DeclVisitor.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/Frontend/MultiplexConsumer.h"
 #include "clang/Frontend/Utils.h"
+#include "clang/Index/IndexingAction.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/PPConditionalDirectiveRecord.h"
 #include "clang/Lex/Preprocessor.h"
-#include "clang/Sema/SemaConsumer.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Mutex.h"
-#include "llvm/Support/MutexGuard.h"
 #include <cstdio>
+#include <mutex>
+#include <utility>
 
 using namespace clang;
+using namespace clang::index;
 using namespace cxtu;
 using namespace cxindex;
-
-static void indexDiagnostics(CXTranslationUnit TU, IndexingContext &IdxCtx);
 
 namespace {
 
@@ -45,27 +44,7 @@ namespace {
 // Skip Parsed Bodies
 //===----------------------------------------------------------------------===//
 
-#ifdef LLVM_ON_WIN32
-
-// FIXME: On windows it is disabled since current implementation depends on
-// file inodes.
-
-class SessionSkipBodyData { };
-
-class TUSkipBodyControl {
-public:
-  TUSkipBodyControl(SessionSkipBodyData &sessionData,
-                    PPConditionalDirectiveRecord &ppRec,
-                    Preprocessor &pp) { }
-  bool isParsed(SourceLocation Loc, FileID FID, const FileEntry *FE) {
-    return false;
-  }
-  void finished() { }
-};
-
-#else
-
-/// \brief A "region" in source code identified by the file/offset of the
+/// A "region" in source code identified by the file/offset of the
 /// preprocessor conditional directive that it belongs to.
 /// Multiple, non-consecutive ranges can be parts of the same region.
 ///
@@ -109,14 +88,9 @@ public:
   }
 };
 
-typedef llvm::DenseSet<PPRegion> PPRegionSetTy;
-
 } // end anonymous namespace
 
 namespace llvm {
-  template <> struct isPodLike<PPRegion> {
-    static const bool value = true;
-  };
 
   template <>
   struct DenseMapInfo<PPRegion> {
@@ -145,46 +119,61 @@ namespace llvm {
 
 namespace {
 
-class SessionSkipBodyData {
-  llvm::sys::Mutex Mux;
-  PPRegionSetTy ParsedRegions;
+/// Keeps track of function bodies that have already been parsed.
+///
+/// Is thread-safe.
+class ThreadSafeParsedRegions {
+  mutable std::mutex Mutex;
+  llvm::DenseSet<PPRegion> ParsedRegions;
 
 public:
-  SessionSkipBodyData() : Mux(/*recursive=*/false) {}
-  ~SessionSkipBodyData() {
-    //llvm::errs() << "RegionData: " << Skipped.size() << " - " << Skipped.getMemorySize() << "\n";
+  ~ThreadSafeParsedRegions() = default;
+
+  llvm::DenseSet<PPRegion> getParsedRegions() const {
+    std::lock_guard<std::mutex> MG(Mutex);
+    return ParsedRegions;
   }
 
-  void copyTo(PPRegionSetTy &Set) {
-    llvm::MutexGuard MG(Mux);
-    Set = ParsedRegions;
-  }
-
-  void update(ArrayRef<PPRegion> Regions) {
-    llvm::MutexGuard MG(Mux);
+  void addParsedRegions(ArrayRef<PPRegion> Regions) {
+    std::lock_guard<std::mutex> MG(Mutex);
     ParsedRegions.insert(Regions.begin(), Regions.end());
   }
 };
 
-class TUSkipBodyControl {
-  SessionSkipBodyData &SessionData;
+/// Provides information whether source locations have already been parsed in
+/// another FrontendAction.
+///
+/// Is NOT thread-safe.
+class ParsedSrcLocationsTracker {
+  ThreadSafeParsedRegions &ParsedRegionsStorage;
   PPConditionalDirectiveRecord &PPRec;
   Preprocessor &PP;
 
-  PPRegionSetTy ParsedRegions;
+  /// Snapshot of the shared state at the point when this instance was
+  /// constructed.
+  llvm::DenseSet<PPRegion> ParsedRegionsSnapshot;
+  /// Regions that were queried during this instance lifetime.
   SmallVector<PPRegion, 32> NewParsedRegions;
+
+  /// Caching the last queried region.
   PPRegion LastRegion;
   bool LastIsParsed;
 
 public:
-  TUSkipBodyControl(SessionSkipBodyData &sessionData,
-                    PPConditionalDirectiveRecord &ppRec,
-                    Preprocessor &pp)
-    : SessionData(sessionData), PPRec(ppRec), PP(pp) {
-    SessionData.copyTo(ParsedRegions);
-  }
+  /// Creates snapshot of \p ParsedRegionsStorage.
+  ParsedSrcLocationsTracker(ThreadSafeParsedRegions &ParsedRegionsStorage,
+                            PPConditionalDirectiveRecord &ppRec,
+                            Preprocessor &pp)
+      : ParsedRegionsStorage(ParsedRegionsStorage), PPRec(ppRec), PP(pp),
+        ParsedRegionsSnapshot(ParsedRegionsStorage.getParsedRegions()) {}
 
-  bool isParsed(SourceLocation Loc, FileID FID, const FileEntry *FE) {
+  /// \returns true iff \p Loc has already been parsed.
+  ///
+  /// Can provide false-negative in case the location was parsed after this
+  /// instance had been constructed.
+  bool hasAlredyBeenParsed(SourceLocation Loc, FileID FID,
+                           const FileEntry *FE) {
+    assert(FE);
     PPRegion region = getRegion(Loc, FID, FE);
     if (region.isInvalid())
       return false;
@@ -194,51 +183,54 @@ public:
       return LastIsParsed;
 
     LastRegion = region;
-    LastIsParsed = ParsedRegions.count(region);
+    // Source locations can't be revisited during single TU parsing.
+    // That means if we hit the same region again, it's a different location in
+    // the same region and so the "is parsed" value from the snapshot is still
+    // correct.
+    LastIsParsed = ParsedRegionsSnapshot.count(region);
     if (!LastIsParsed)
-      NewParsedRegions.push_back(region);
+      NewParsedRegions.emplace_back(std::move(region));
     return LastIsParsed;
   }
 
-  void finished() {
-    SessionData.update(NewParsedRegions);
+  /// Updates ParsedRegionsStorage with newly parsed regions.
+  void syncWithStorage() {
+    ParsedRegionsStorage.addParsedRegions(NewParsedRegions);
   }
 
 private:
   PPRegion getRegion(SourceLocation Loc, FileID FID, const FileEntry *FE) {
-    SourceLocation RegionLoc = PPRec.findConditionalDirectiveRegionLoc(Loc);
-    if (RegionLoc.isInvalid()) {
+    assert(FE);
+    auto Bail = [this, FE]() {
       if (isParsedOnceInclude(FE)) {
         const llvm::sys::fs::UniqueID &ID = FE->getUniqueID();
         return PPRegion(ID, 0, FE->getModificationTime());
       }
       return PPRegion();
-    }
+    };
 
-    const SourceManager &SM = PPRec.getSourceManager();
+    SourceLocation RegionLoc = PPRec.findConditionalDirectiveRegionLoc(Loc);
     assert(RegionLoc.isFileID());
+    if (RegionLoc.isInvalid())
+      return Bail();
+
     FileID RegionFID;
     unsigned RegionOffset;
-    std::tie(RegionFID, RegionOffset) = SM.getDecomposedLoc(RegionLoc);
+    std::tie(RegionFID, RegionOffset) =
+        PPRec.getSourceManager().getDecomposedLoc(RegionLoc);
 
-    if (RegionFID != FID) {
-      if (isParsedOnceInclude(FE)) {
-        const llvm::sys::fs::UniqueID &ID = FE->getUniqueID();
-        return PPRegion(ID, 0, FE->getModificationTime());
-      }
-      return PPRegion();
-    }
+    if (RegionFID != FID)
+      return Bail();
 
     const llvm::sys::fs::UniqueID &ID = FE->getUniqueID();
     return PPRegion(ID, RegionOffset, FE->getModificationTime());
   }
 
   bool isParsedOnceInclude(const FileEntry *FE) {
-    return PP.getHeaderSearchInfo().isFileMultipleIncludeGuarded(FE);
+    return PP.getHeaderSearchInfo().isFileMultipleIncludeGuarded(FE) ||
+           PP.getHeaderSearchInfo().hasFileBeenImported(FE);
   }
 };
-
-#endif
 
 //===----------------------------------------------------------------------===//
 // IndexPPCallbacks
@@ -246,12 +238,12 @@ private:
 
 class IndexPPCallbacks : public PPCallbacks {
   Preprocessor &PP;
-  IndexingContext &IndexCtx;
+  CXIndexDataConsumer &DataConsumer;
   bool IsMainFileEntered;
 
 public:
-  IndexPPCallbacks(Preprocessor &PP, IndexingContext &indexCtx)
-    : PP(PP), IndexCtx(indexCtx), IsMainFileEntered(false) { }
+  IndexPPCallbacks(Preprocessor &PP, CXIndexDataConsumer &dataConsumer)
+    : PP(PP), DataConsumer(dataConsumer), IsMainFileEntered(false) { }
 
   void FileChanged(SourceLocation Loc, FileChangeReason Reason,
                  SrcMgr::CharacteristicKind FileType, FileID PrevFID) override {
@@ -263,7 +255,7 @@ public:
 
     if (Loc == MainFileLoc && Reason == PPCallbacks::EnterFile) {
       IsMainFileEntered = true;
-      IndexCtx.enteredMainFile(SM.getFileEntryForID(SM.getMainFileID()));
+      DataConsumer.enteredMainFile(SM.getFileEntryForID(SM.getMainFileID()));
     }
   }
 
@@ -271,10 +263,11 @@ public:
                           StringRef FileName, bool IsAngled,
                           CharSourceRange FilenameRange, const FileEntry *File,
                           StringRef SearchPath, StringRef RelativePath,
-                          const Module *Imported) override {
+                          const Module *Imported,
+                          SrcMgr::CharacteristicKind FileType) override {
     bool isImport = (IncludeTok.is(tok::identifier) &&
             IncludeTok.getIdentifierInfo()->getPPKeywordID() == tok::pp_import);
-    IndexCtx.ppIncludedFile(HashLoc, FileName, File, isImport, IsAngled,
+    DataConsumer.ppIncludedFile(HashLoc, FileName, File, isImport, IsAngled,
                             Imported);
   }
 
@@ -284,16 +277,18 @@ public:
   /// MacroUndefined - This hook is called whenever a macro #undef is seen.
   /// MI is released immediately following this callback.
   void MacroUndefined(const Token &MacroNameTok,
-                      const MacroDirective *MD) override {}
+                      const MacroDefinition &MD,
+                      const MacroDirective *UD) override {}
 
   /// MacroExpands - This is called by when a macro invocation is found.
-  void MacroExpands(const Token &MacroNameTok, const MacroDirective *MD,
+  void MacroExpands(const Token &MacroNameTok, const MacroDefinition &MD,
                     SourceRange Range, const MacroArgs *Args) override {}
 
   /// SourceRangeSkipped - This hook is called when a source range is skipped.
   /// \param Range The SourceRange that was skipped. The range begins at the
   /// #if/#else directive and ends after the #endif/#else directive.
-  void SourceRangeSkipped(SourceRange Range) override {}
+  void SourceRangeSkipped(SourceRange Range, SourceLocation EndifLoc) override {
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -301,81 +296,20 @@ public:
 //===----------------------------------------------------------------------===//
 
 class IndexingConsumer : public ASTConsumer {
-  IndexingContext &IndexCtx;
-  TUSkipBodyControl *SKCtrl;
+  CXIndexDataConsumer &DataConsumer;
 
 public:
-  IndexingConsumer(IndexingContext &indexCtx, TUSkipBodyControl *skCtrl)
-    : IndexCtx(indexCtx), SKCtrl(skCtrl) { }
-
-  // ASTConsumer Implementation
+  IndexingConsumer(CXIndexDataConsumer &dataConsumer,
+                   ParsedSrcLocationsTracker *parsedLocsTracker)
+      : DataConsumer(dataConsumer) {}
 
   void Initialize(ASTContext &Context) override {
-    IndexCtx.setASTContext(Context);
-    IndexCtx.startedTranslationUnit();
-  }
-
-  void HandleTranslationUnit(ASTContext &Ctx) override {
-    if (SKCtrl)
-      SKCtrl->finished();
+    DataConsumer.setASTContext(Context);
+    DataConsumer.startedTranslationUnit();
   }
 
   bool HandleTopLevelDecl(DeclGroupRef DG) override {
-    IndexCtx.indexDeclGroupRef(DG);
-    return !IndexCtx.shouldAbort();
-  }
-
-  /// \brief Handle the specified top-level declaration that occurred inside
-  /// and ObjC container.
-  void HandleTopLevelDeclInObjCContainer(DeclGroupRef D) override {
-    // They will be handled after the interface is seen first.
-    IndexCtx.addTUDeclInObjCContainer(D);
-  }
-
-  /// \brief This is called by the AST reader when deserializing things.
-  /// The default implementation forwards to HandleTopLevelDecl but we don't
-  /// care about them when indexing, so have an empty definition.
-  void HandleInterestingDecl(DeclGroupRef D) override {}
-
-  void HandleTagDeclDefinition(TagDecl *D) override {
-    if (!IndexCtx.shouldIndexImplicitTemplateInsts())
-      return;
-
-    if (IndexCtx.isTemplateImplicitInstantiation(D))
-      IndexCtx.indexDecl(D);
-  }
-
-  void HandleCXXImplicitFunctionInstantiation(FunctionDecl *D) override {
-    if (!IndexCtx.shouldIndexImplicitTemplateInsts())
-      return;
-
-    IndexCtx.indexDecl(D);
-  }
-
-  bool shouldSkipFunctionBody(Decl *D) override {
-    if (!SKCtrl) {
-      // Always skip bodies.
-      return true;
-    }
-
-    const SourceManager &SM = IndexCtx.getASTContext().getSourceManager();
-    SourceLocation Loc = D->getLocation();
-    if (Loc.isMacroID())
-      return false;
-    if (SM.isInSystemHeader(Loc))
-      return true; // always skip bodies from system headers.
-
-    FileID FID;
-    unsigned Offset;
-    std::tie(FID, Offset) = SM.getDecomposedLoc(Loc);
-    // Don't skip bodies from main files; this may be revisited.
-    if (SM.getMainFileID() == FID)
-      return false;
-    const FileEntry *FE = SM.getFileEntryForID(FID);
-    if (!FE)
-      return false;
-
-    return SKCtrl->isParsed(Loc, FID, FE);
+    return !DataConsumer.shouldAbort();
   }
 };
 
@@ -399,111 +333,128 @@ public:
 //===----------------------------------------------------------------------===//
 
 class IndexingFrontendAction : public ASTFrontendAction {
-  IndexingContext IndexCtx;
-  CXTranslationUnit CXTU;
+  std::shared_ptr<CXIndexDataConsumer> DataConsumer;
+  IndexingOptions Opts;
 
-  SessionSkipBodyData *SKData;
-  std::unique_ptr<TUSkipBodyControl> SKCtrl;
+  ThreadSafeParsedRegions *SKData;
+  std::unique_ptr<ParsedSrcLocationsTracker> ParsedLocsTracker;
 
 public:
-  IndexingFrontendAction(CXClientData clientData,
-                         IndexerCallbacks &indexCallbacks,
-                         unsigned indexOptions,
-                         CXTranslationUnit cxTU,
-                         SessionSkipBodyData *skData)
-    : IndexCtx(clientData, indexCallbacks, indexOptions, cxTU),
-      CXTU(cxTU), SKData(skData) { }
+  IndexingFrontendAction(std::shared_ptr<CXIndexDataConsumer> dataConsumer,
+                         const IndexingOptions &Opts,
+                         ThreadSafeParsedRegions *skData)
+      : DataConsumer(std::move(dataConsumer)), Opts(Opts), SKData(skData) {}
 
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI,
                                                  StringRef InFile) override {
     PreprocessorOptions &PPOpts = CI.getPreprocessorOpts();
 
     if (!PPOpts.ImplicitPCHInclude.empty()) {
-      IndexCtx.importedPCH(
-                        CI.getFileManager().getFile(PPOpts.ImplicitPCHInclude));
+      auto File = CI.getFileManager().getFile(PPOpts.ImplicitPCHInclude);
+      if (File)
+        DataConsumer->importedPCH(*File);
     }
 
-    IndexCtx.setASTContext(CI.getASTContext());
+    DataConsumer->setASTContext(CI.getASTContext());
     Preprocessor &PP = CI.getPreprocessor();
-    PP.addPPCallbacks(llvm::make_unique<IndexPPCallbacks>(PP, IndexCtx));
-    IndexCtx.setPreprocessor(PP);
+    PP.addPPCallbacks(std::make_unique<IndexPPCallbacks>(PP, *DataConsumer));
+    DataConsumer->setPreprocessor(CI.getPreprocessorPtr());
 
     if (SKData) {
       auto *PPRec = new PPConditionalDirectiveRecord(PP.getSourceManager());
       PP.addPPCallbacks(std::unique_ptr<PPCallbacks>(PPRec));
-      SKCtrl = llvm::make_unique<TUSkipBodyControl>(*SKData, *PPRec, PP);
+      ParsedLocsTracker =
+          std::make_unique<ParsedSrcLocationsTracker>(*SKData, *PPRec, PP);
     }
 
-    return llvm::make_unique<IndexingConsumer>(IndexCtx, SKCtrl.get());
+    std::vector<std::unique_ptr<ASTConsumer>> Consumers;
+    Consumers.push_back(std::make_unique<IndexingConsumer>(
+        *DataConsumer, ParsedLocsTracker.get()));
+    Consumers.push_back(createIndexingASTConsumer(
+        DataConsumer, Opts, CI.getPreprocessorPtr(),
+        [this](const Decl *D) { return this->shouldSkipFunctionBody(D); }));
+    return std::make_unique<MultiplexConsumer>(std::move(Consumers));
   }
 
-  void EndSourceFileAction() override {
-    indexDiagnostics(CXTU, IndexCtx);
+  bool shouldSkipFunctionBody(const Decl *D) {
+    if (!ParsedLocsTracker) {
+      // Always skip bodies.
+      return true;
+    }
+
+    const SourceManager &SM = D->getASTContext().getSourceManager();
+    SourceLocation Loc = D->getLocation();
+    if (Loc.isMacroID())
+      return false;
+    if (SM.isInSystemHeader(Loc))
+      return true; // always skip bodies from system headers.
+
+    FileID FID;
+    unsigned Offset;
+    std::tie(FID, Offset) = SM.getDecomposedLoc(Loc);
+    // Don't skip bodies from main files; this may be revisited.
+    if (SM.getMainFileID() == FID)
+      return false;
+    const FileEntry *FE = SM.getFileEntryForID(FID);
+    if (!FE)
+      return false;
+
+    return ParsedLocsTracker->hasAlredyBeenParsed(Loc, FID, FE);
   }
 
   TranslationUnitKind getTranslationUnitKind() override {
-    if (IndexCtx.shouldIndexImplicitTemplateInsts())
+    if (DataConsumer->shouldIndexImplicitTemplateInsts())
       return TU_Complete;
     else
       return TU_Prefix;
   }
   bool hasCodeCompletionSupport() const override { return false; }
+
+  void EndSourceFileAction() override {
+    if (ParsedLocsTracker)
+      ParsedLocsTracker->syncWithStorage();
+  }
 };
 
 //===----------------------------------------------------------------------===//
 // clang_indexSourceFileUnit Implementation
 //===----------------------------------------------------------------------===//
 
+static IndexingOptions getIndexingOptionsFromCXOptions(unsigned index_options) {
+  IndexingOptions IdxOpts;
+  if (index_options & CXIndexOpt_IndexFunctionLocalSymbols)
+    IdxOpts.IndexFunctionLocals = true;
+  if (index_options & CXIndexOpt_IndexImplicitTemplateInstantiations)
+    IdxOpts.IndexImplicitInstantiation = true;
+  return IdxOpts;
+}
+
 struct IndexSessionData {
   CXIndex CIdx;
-  std::unique_ptr<SessionSkipBodyData> SkipBodyData;
+  std::unique_ptr<ThreadSafeParsedRegions> SkipBodyData =
+      std::make_unique<ThreadSafeParsedRegions>();
 
-  explicit IndexSessionData(CXIndex cIdx)
-    : CIdx(cIdx), SkipBodyData(new SessionSkipBodyData) {}
-};
-
-struct IndexSourceFileInfo {
-  CXIndexAction idxAction;
-  CXClientData client_data;
-  IndexerCallbacks *index_callbacks;
-  unsigned index_callbacks_size;
-  unsigned index_options;
-  const char *source_filename;
-  const char *const *command_line_args;
-  int num_command_line_args;
-  ArrayRef<CXUnsavedFile> unsaved_files;
-  CXTranslationUnit *out_TU;
-  unsigned TU_options;
-  CXErrorCode &result;
+  explicit IndexSessionData(CXIndex cIdx) : CIdx(cIdx) {}
 };
 
 } // anonymous namespace
 
-static void clang_indexSourceFile_Impl(void *UserData) {
-  const IndexSourceFileInfo *ITUI =
-      static_cast<IndexSourceFileInfo *>(UserData);
-  CXIndexAction cxIdxAction = ITUI->idxAction;
-  CXClientData client_data = ITUI->client_data;
-  IndexerCallbacks *client_index_callbacks = ITUI->index_callbacks;
-  unsigned index_callbacks_size = ITUI->index_callbacks_size;
-  unsigned index_options = ITUI->index_options;
-  const char *source_filename = ITUI->source_filename;
-  const char * const *command_line_args = ITUI->command_line_args;
-  int num_command_line_args = ITUI->num_command_line_args;
-  CXTranslationUnit *out_TU  = ITUI->out_TU;
-  unsigned TU_options = ITUI->TU_options;
-
+static CXErrorCode clang_indexSourceFile_Impl(
+    CXIndexAction cxIdxAction, CXClientData client_data,
+    IndexerCallbacks *client_index_callbacks, unsigned index_callbacks_size,
+    unsigned index_options, const char *source_filename,
+    const char *const *command_line_args, int num_command_line_args,
+    ArrayRef<CXUnsavedFile> unsaved_files, CXTranslationUnit *out_TU,
+    unsigned TU_options) {
   if (out_TU)
     *out_TU = nullptr;
   bool requestedToGetTU = (out_TU != nullptr);
 
   if (!cxIdxAction) {
-    ITUI->result = CXError_InvalidArguments;
-    return;
+    return CXError_InvalidArguments;
   }
   if (!client_index_callbacks || index_callbacks_size == 0) {
-    ITUI->result = CXError_InvalidArguments;
-    return;
+    return CXError_InvalidArguments;
   }
 
   IndexerCallbacks CB;
@@ -518,10 +469,14 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   if (CXXIdx->isOptEnabled(CXGlobalOpt_ThreadBackgroundPriorityForIndexing))
     setThreadBackgroundPriority();
 
-  bool CaptureDiagnostics = !Logger::isLoggingEnabled();
+  CaptureDiagsKind CaptureDiagnostics = CaptureDiagsKind::All;
+  if (TU_options & CXTranslationUnit_IgnoreNonErrorsFromIncludedFiles)
+    CaptureDiagnostics = CaptureDiagsKind::AllWithoutNonErrorsFromIncludes;
+  if (Logger::isLoggingEnabled())
+    CaptureDiagnostics = CaptureDiagsKind::None;
 
   CaptureDiagnosticConsumer *CaptureDiag = nullptr;
-  if (CaptureDiagnostics)
+  if (CaptureDiagnostics != CaptureDiagsKind::None)
     CaptureDiag = new CaptureDiagnosticConsumer();
 
   // Configure the diagnostics.
@@ -552,20 +507,22 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   // present it will be unused.
   if (source_filename)
     Args->push_back(source_filename);
-  
-  IntrusiveRefCntPtr<CompilerInvocation>
-    CInvok(createInvocationFromCommandLine(*Args, Diags));
+
+  std::shared_ptr<CompilerInvocation> CInvok =
+      createInvocationFromCommandLine(*Args, Diags);
 
   if (!CInvok)
-    return;
+    return CXError_Failure;
 
   // Recover resources if we crash before exiting this function.
-  llvm::CrashRecoveryContextCleanupRegistrar<CompilerInvocation,
-    llvm::CrashRecoveryContextReleaseRefCleanup<CompilerInvocation> >
-    CInvokCleanup(CInvok.get());
+  llvm::CrashRecoveryContextCleanupRegistrar<
+      std::shared_ptr<CompilerInvocation>,
+      llvm::CrashRecoveryContextDestructorCleanup<
+          std::shared_ptr<CompilerInvocation>>>
+      CInvokCleanup(&CInvok);
 
   if (CInvok->getFrontendOpts().Inputs.empty())
-    return;
+    return CXError_Failure;
 
   typedef SmallVector<std::unique_ptr<llvm::MemoryBuffer>, 8> MemBufferOwner;
   std::unique_ptr<MemBufferOwner> BufOwner(new MemBufferOwner);
@@ -574,7 +531,7 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   llvm::CrashRecoveryContextCleanupRegistrar<MemBufferOwner> BufOwnerCleanup(
       BufOwner.get());
 
-  for (auto &UF : ITUI->unsaved_files) {
+  for (auto &UF : unsaved_files) {
     std::unique_ptr<llvm::MemoryBuffer> MB =
         llvm::MemoryBuffer::getMemBufferCopy(getContents(UF), UF.Filename);
     CInvok->getPreprocessorOpts().addRemappedFile(UF.Filename, MB.get());
@@ -590,16 +547,18 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   if (index_options & CXIndexOpt_SuppressWarnings)
     CInvok->getDiagnosticOpts().IgnoreWarnings = true;
 
-  ASTUnit *Unit = ASTUnit::create(CInvok.get(), Diags,
-                                  CaptureDiagnostics,
-                                  /*UserFilesAreVolatile=*/true);
-  if (!Unit) {
-    ITUI->result = CXError_InvalidArguments;
-    return;
-  }
+  // Make sure to use the raw module format.
+  CInvok->getHeaderSearchOpts().ModuleFormat = std::string(
+      CXXIdx->getPCHContainerOperations()->getRawReader().getFormat());
 
+  auto Unit = ASTUnit::create(CInvok, Diags, CaptureDiagnostics,
+                              /*UserFilesAreVolatile=*/true);
+  if (!Unit)
+    return CXError_InvalidArguments;
+
+  auto *UPtr = Unit.get();
   std::unique_ptr<CXTUOwner> CXTU(
-      new CXTUOwner(MakeCXTranslationUnit(CXXIdx, Unit)));
+      new CXTUOwner(MakeCXTranslationUnit(CXXIdx, std::move(Unit))));
 
   // Recover resources if we crash before exiting this method.
   llvm::CrashRecoveryContextCleanupRegistrar<CXTUOwner>
@@ -612,18 +571,21 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   if (SkipBodies)
     CInvok->getFrontendOpts().SkipFunctionBodies = true;
 
-  std::unique_ptr<IndexingFrontendAction> IndexAction;
-  IndexAction.reset(new IndexingFrontendAction(client_data, CB,
-                                               index_options, CXTU->getTU(),
-                        SkipBodies ? IdxSession->SkipBodyData.get() : nullptr));
+  auto DataConsumer =
+    std::make_shared<CXIndexDataConsumer>(client_data, CB, index_options,
+                                          CXTU->getTU());
+  auto IndexAction = std::make_unique<IndexingFrontendAction>(
+      DataConsumer, getIndexingOptionsFromCXOptions(index_options),
+      SkipBodies ? IdxSession->SkipBodyData.get() : nullptr);
 
   // Recover resources if we crash before exiting this method.
-  llvm::CrashRecoveryContextCleanupRegistrar<IndexingFrontendAction>
+  llvm::CrashRecoveryContextCleanupRegistrar<FrontendAction>
     IndexActionCleanup(IndexAction.get());
 
   bool Persistent = requestedToGetTU;
   bool OnlyLocalDecls = false;
   bool PrecompilePreamble = false;
+  bool CreatePreambleOnFirstParse = false;
   bool CacheCodeCompletionResults = false;
   PreprocessorOptions &PPOpts = CInvok->getPreprocessorOpts(); 
   PPOpts.AllowPCHWithCompilerErrors = true;
@@ -631,6 +593,8 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   if (requestedToGetTU) {
     OnlyLocalDecls = CXXIdx->getOnlyLocalDecls();
     PrecompilePreamble = TU_options & CXTranslationUnit_PrecompiledPreamble;
+    CreatePreambleOnFirstParse =
+        TU_options & CXTranslationUnit_CreatePreambleOnFirstParse;
     // FIXME: Add a flag for modules.
     CacheCodeCompletionResults
       = TU_options & CXTranslationUnit_CacheCompletionResults;
@@ -643,67 +607,45 @@ static void clang_indexSourceFile_Impl(void *UserData) {
   if (!requestedToGetTU && !CInvok->getLangOpts()->Modules)
     PPOpts.DetailedRecord = false;
 
+  // Unless the user specified that they want the preamble on the first parse
+  // set it up to be created on the first reparse. This makes the first parse
+  // faster, trading for a slower (first) reparse.
+  unsigned PrecompilePreambleAfterNParses =
+      !PrecompilePreamble ? 0 : 2 - CreatePreambleOnFirstParse;
   DiagnosticErrorTrap DiagTrap(*Diags);
-  bool Success = ASTUnit::LoadFromCompilerInvocationAction(CInvok.get(), Diags,
-                                                       IndexAction.get(),
-                                                       Unit,
-                                                       Persistent,
-                                                CXXIdx->getClangResourcesPath(),
-                                                       OnlyLocalDecls,
-                                                       CaptureDiagnostics,
-                                                       PrecompilePreamble,
-                                                    CacheCodeCompletionResults,
-                                 /*IncludeBriefCommentsInCodeCompletion=*/false,
-                                                 /*UserFilesAreVolatile=*/true);
+  bool Success = ASTUnit::LoadFromCompilerInvocationAction(
+      std::move(CInvok), CXXIdx->getPCHContainerOperations(), Diags,
+      IndexAction.get(), UPtr, Persistent, CXXIdx->getClangResourcesPath(),
+      OnlyLocalDecls, CaptureDiagnostics, PrecompilePreambleAfterNParses,
+      CacheCodeCompletionResults, /*UserFilesAreVolatile=*/true);
   if (DiagTrap.hasErrorOccurred() && CXXIdx->getDisplayDiagnostics())
-    printDiagsToStderr(Unit);
+    printDiagsToStderr(UPtr);
 
-  if (isASTReadError(Unit)) {
-    ITUI->result = CXError_ASTReadError;
-    return;
-  }
+  if (isASTReadError(UPtr))
+    return CXError_ASTReadError;
 
   if (!Success)
-    return;
+    return CXError_Failure;
 
   if (out_TU)
     *out_TU = CXTU->takeTU();
 
-  ITUI->result = CXError_Success;
+  return CXError_Success;
 }
 
 //===----------------------------------------------------------------------===//
 // clang_indexTranslationUnit Implementation
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-struct IndexTranslationUnitInfo {
-  CXIndexAction idxAction;
-  CXClientData client_data;
-  IndexerCallbacks *index_callbacks;
-  unsigned index_callbacks_size;
-  unsigned index_options;
-  CXTranslationUnit TU;
-  int result;
-};
-
-} // anonymous namespace
-
-static void indexPreprocessingRecord(ASTUnit &Unit, IndexingContext &IdxCtx) {
+static void indexPreprocessingRecord(ASTUnit &Unit, CXIndexDataConsumer &IdxCtx) {
   Preprocessor &PP = Unit.getPreprocessor();
   if (!PP.getPreprocessingRecord())
     return;
 
   // FIXME: Only deserialize inclusion directives.
 
-  PreprocessingRecord::iterator I, E;
-  std::tie(I, E) = Unit.getLocalPreprocessingEntities();
-
   bool isModuleFile = Unit.isModuleFile();
-  for (; I != E; ++I) {
-    PreprocessedEntity *PPE = *I;
-
+  for (PreprocessedEntity *PPE : Unit.getLocalPreprocessingEntities()) {
     if (InclusionDirective *ID = dyn_cast<InclusionDirective>(PPE)) {
       SourceLocation Loc = ID->getSourceRange().getBegin();
       // Modules have synthetic main files as input, give an invalid location
@@ -718,47 +660,17 @@ static void indexPreprocessingRecord(ASTUnit &Unit, IndexingContext &IdxCtx) {
   }
 }
 
-static bool topLevelDeclVisitor(void *context, const Decl *D) {
-  IndexingContext &IdxCtx = *static_cast<IndexingContext*>(context);
-  IdxCtx.indexTopLevelDecl(D);
-  if (IdxCtx.shouldAbort())
-    return false;
-  return true;
-}
-
-static void indexTranslationUnit(ASTUnit &Unit, IndexingContext &IdxCtx) {
-  Unit.visitLocalTopLevelDecls(&IdxCtx, topLevelDeclVisitor);
-}
-
-static void indexDiagnostics(CXTranslationUnit TU, IndexingContext &IdxCtx) {
-  if (!IdxCtx.hasDiagnosticCallback())
-    return;
-
-  CXDiagnosticSetImpl *DiagSet = cxdiag::lazyCreateDiags(TU);
-  IdxCtx.handleDiagnosticSet(DiagSet);
-}
-
-static void clang_indexTranslationUnit_Impl(void *UserData) {
-  IndexTranslationUnitInfo *ITUI =
-    static_cast<IndexTranslationUnitInfo*>(UserData);
-  CXTranslationUnit TU = ITUI->TU;
-  CXClientData client_data = ITUI->client_data;
-  IndexerCallbacks *client_index_callbacks = ITUI->index_callbacks;
-  unsigned index_callbacks_size = ITUI->index_callbacks_size;
-  unsigned index_options = ITUI->index_options;
-
-  // Set up the initial return value.
-  ITUI->result = CXError_Failure;
-
+static CXErrorCode clang_indexTranslationUnit_Impl(
+    CXIndexAction idxAction, CXClientData client_data,
+    IndexerCallbacks *client_index_callbacks, unsigned index_callbacks_size,
+    unsigned index_options, CXTranslationUnit TU) {
   // Check arguments.
   if (isNotUsableTU(TU)) {
     LOG_BAD_TU(TU);
-    ITUI->result = CXError_InvalidArguments;
-    return;
+    return CXError_InvalidArguments;
   }
   if (!client_index_callbacks || index_callbacks_size == 0) {
-    ITUI->result = CXError_InvalidArguments;
-    return;
+    return CXError_InvalidArguments;
   }
 
   CIndexer *CXXIdx = TU->CIdx;
@@ -771,50 +683,39 @@ static void clang_indexTranslationUnit_Impl(void *UserData) {
                                   ? index_callbacks_size : sizeof(CB);
   memcpy(&CB, client_index_callbacks, ClientCBSize);
 
-  std::unique_ptr<IndexingContext> IndexCtx;
-  IndexCtx.reset(new IndexingContext(client_data, CB, index_options, TU));
-
-  // Recover resources if we crash before exiting this method.
-  llvm::CrashRecoveryContextCleanupRegistrar<IndexingContext>
-    IndexCtxCleanup(IndexCtx.get());
-
-  std::unique_ptr<IndexingConsumer> IndexConsumer;
-  IndexConsumer.reset(new IndexingConsumer(*IndexCtx, nullptr));
-
-  // Recover resources if we crash before exiting this method.
-  llvm::CrashRecoveryContextCleanupRegistrar<IndexingConsumer>
-    IndexConsumerCleanup(IndexConsumer.get());
+  CXIndexDataConsumer DataConsumer(client_data, CB, index_options, TU);
 
   ASTUnit *Unit = cxtu::getASTUnit(TU);
   if (!Unit)
-    return;
+    return CXError_Failure;
 
   ASTUnit::ConcurrencyCheck Check(*Unit);
 
   if (const FileEntry *PCHFile = Unit->getPCHFile())
-    IndexCtx->importedPCH(PCHFile);
+    DataConsumer.importedPCH(PCHFile);
 
   FileManager &FileMgr = Unit->getFileManager();
 
   if (Unit->getOriginalSourceFileName().empty())
-    IndexCtx->enteredMainFile(nullptr);
+    DataConsumer.enteredMainFile(nullptr);
+  else if (auto MainFile = FileMgr.getFile(Unit->getOriginalSourceFileName()))
+    DataConsumer.enteredMainFile(*MainFile);
   else
-    IndexCtx->enteredMainFile(FileMgr.getFile(Unit->getOriginalSourceFileName()));
+    DataConsumer.enteredMainFile(nullptr);
 
-  IndexConsumer->Initialize(Unit->getASTContext());
+  DataConsumer.setASTContext(Unit->getASTContext());
+  DataConsumer.startedTranslationUnit();
 
-  indexPreprocessingRecord(*Unit, *IndexCtx);
-  indexTranslationUnit(*Unit, *IndexCtx);
-  indexDiagnostics(TU, *IndexCtx);
+  indexPreprocessingRecord(*Unit, DataConsumer);
+  indexASTUnit(*Unit, DataConsumer, getIndexingOptionsFromCXOptions(index_options));
+  DataConsumer.indexDiagnostics();
 
-  ITUI->result = CXError_Success;
+  return CXError_Success;
 }
 
 //===----------------------------------------------------------------------===//
 // libclang public APIs.
 //===----------------------------------------------------------------------===//
-
-extern "C" {
 
 int clang_index_isEntityObjCContainerKind(CXIdxEntityKind K) {
   return CXIdxEntity_ObjCClass <= K && K <= CXIdxEntity_ObjCCategory;
@@ -969,6 +870,22 @@ int clang_indexSourceFile(CXIndexAction idxAction,
                           unsigned num_unsaved_files,
                           CXTranslationUnit *out_TU,
                           unsigned TU_options) {
+  SmallVector<const char *, 4> Args;
+  Args.push_back("clang");
+  Args.append(command_line_args, command_line_args + num_command_line_args);
+  return clang_indexSourceFileFullArgv(
+      idxAction, client_data, index_callbacks, index_callbacks_size,
+      index_options, source_filename, Args.data(), Args.size(), unsaved_files,
+      num_unsaved_files, out_TU, TU_options);
+}
+
+int clang_indexSourceFileFullArgv(
+    CXIndexAction idxAction, CXClientData client_data,
+    IndexerCallbacks *index_callbacks, unsigned index_callbacks_size,
+    unsigned index_options, const char *source_filename,
+    const char *const *command_line_args, int num_command_line_args,
+    struct CXUnsavedFile *unsaved_files, unsigned num_unsaved_files,
+    CXTranslationUnit *out_TU, unsigned TU_options) {
   LOG_FUNC_SECTION {
     *Log << source_filename << ": ";
     for (int i = 0; i != num_command_line_args; ++i)
@@ -979,28 +896,18 @@ int clang_indexSourceFile(CXIndexAction idxAction,
     return CXError_InvalidArguments;
 
   CXErrorCode result = CXError_Failure;
-  IndexSourceFileInfo ITUI = {
-      idxAction,
-      client_data,
-      index_callbacks,
-      index_callbacks_size,
-      index_options,
-      source_filename,
-      command_line_args,
-      num_command_line_args,
-      llvm::makeArrayRef(unsaved_files, num_unsaved_files),
-      out_TU,
-      TU_options,
-      result};
-
-  if (getenv("LIBCLANG_NOTHREADS")) {
-    clang_indexSourceFile_Impl(&ITUI);
-    return result;
-  }
+  auto IndexSourceFileImpl = [=, &result]() {
+    result = clang_indexSourceFile_Impl(
+        idxAction, client_data, index_callbacks, index_callbacks_size,
+        index_options, source_filename, command_line_args,
+        num_command_line_args,
+        llvm::makeArrayRef(unsaved_files, num_unsaved_files), out_TU,
+        TU_options);
+  };
 
   llvm::CrashRecoveryContext CRC;
 
-  if (!RunSafely(CRC, clang_indexSourceFile_Impl, &ITUI)) {
+  if (!RunSafely(CRC, IndexSourceFileImpl)) {
     fprintf(stderr, "libclang: crash detected during indexing source file: {\n");
     fprintf(stderr, "  'source_filename' : '%s'\n", source_filename);
     fprintf(stderr, "  'command_line_args' : [");
@@ -1040,24 +947,22 @@ int clang_indexTranslationUnit(CXIndexAction idxAction,
     *Log << TU;
   }
 
-  IndexTranslationUnitInfo ITUI = { idxAction, client_data, index_callbacks,
-                                    index_callbacks_size, index_options, TU,
-                                    0 };
-
-  if (getenv("LIBCLANG_NOTHREADS")) {
-    clang_indexTranslationUnit_Impl(&ITUI);
-    return ITUI.result;
-  }
+  CXErrorCode result;
+  auto IndexTranslationUnitImpl = [=, &result]() {
+    result = clang_indexTranslationUnit_Impl(
+        idxAction, client_data, index_callbacks, index_callbacks_size,
+        index_options, TU);
+  };
 
   llvm::CrashRecoveryContext CRC;
 
-  if (!RunSafely(CRC, clang_indexTranslationUnit_Impl, &ITUI)) {
+  if (!RunSafely(CRC, IndexTranslationUnitImpl)) {
     fprintf(stderr, "libclang: crash detected during indexing TU\n");
     
     return 1;
   }
 
-  return ITUI.result;
+  return result;
 }
 
 void clang_indexLoc_getFileLocation(CXIdxLoc location,
@@ -1076,9 +981,9 @@ void clang_indexLoc_getFileLocation(CXIdxLoc location,
   if (!location.ptr_data[0] || Loc.isInvalid())
     return;
 
-  IndexingContext &IndexCtx =
-      *static_cast<IndexingContext*>(location.ptr_data[0]);
-  IndexCtx.translateLoc(Loc, indexFile, file, line, column, offset);
+  CXIndexDataConsumer &DataConsumer =
+      *static_cast<CXIndexDataConsumer*>(location.ptr_data[0]);
+  DataConsumer.translateLoc(Loc, indexFile, file, line, column, offset);
 }
 
 CXSourceLocation clang_indexLoc_getCXSourceLocation(CXIdxLoc location) {
@@ -1086,10 +991,7 @@ CXSourceLocation clang_indexLoc_getCXSourceLocation(CXIdxLoc location) {
   if (!location.ptr_data[0] || Loc.isInvalid())
     return clang_getNullLocation();
 
-  IndexingContext &IndexCtx =
-      *static_cast<IndexingContext*>(location.ptr_data[0]);
-  return cxloc::translateSourceLocation(IndexCtx.getASTContext(), Loc);
+  CXIndexDataConsumer &DataConsumer =
+      *static_cast<CXIndexDataConsumer*>(location.ptr_data[0]);
+  return cxloc::translateSourceLocation(DataConsumer.getASTContext(), Loc);
 }
-
-} // end: extern "C"
-

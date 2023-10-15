@@ -29,7 +29,7 @@ system is not necessarily the best solution:
 Supported Systems
 =================
 
-Currently `CMake <http://cmake.org>`_ (since 2.8.5) supports generation
+Currently `CMake <https://cmake.org>`_ (since 2.8.5) supports generation
 of compilation databases for Unix Makefile builds (Ninja builds in the
 works) with the option ``CMAKE_EXPORT_COMPILE_COMMANDS``.
 
@@ -78,6 +78,11 @@ The contracts for each field in the command object are:
    Parameters use shell quoting and shell escaping of quotes, with '``"``'
    and '``\``' being the only special characters. Shell expansion is not
    supported.
+-  **arguments:** The compile command executed as list of strings.
+   Either **arguments** or **command** is required.
+-  **output:** The name of the output created by this compilation step.
+   This field is optional. It can be used to distinguish different processing
+   modes of the same input file.
 
 Build System Integration
 ========================
@@ -86,3 +91,21 @@ The convention is to name the file compile\_commands.json and put it at
 the top of the build directory. Clang tools are pointed to the top of
 the build directory to detect the file and use the compilation database
 to parse C++ code in the source tree.
+
+Alternatives
+============
+For simple projects, Clang tools also recognize a ``compile_flags.txt`` file.
+This should contain one argument per line. The same flags will be used to
+compile any file.
+
+Example:
+
+::
+
+    -xc++
+    -I
+    libwidget/include/
+
+Here ``-I libwidget/include`` is two arguments, and so becomes two lines.
+Paths are relative to the directory containing ``compile_flags.txt``.
+

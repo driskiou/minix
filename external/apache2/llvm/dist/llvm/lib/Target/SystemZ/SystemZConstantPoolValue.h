@@ -1,9 +1,8 @@
 //===- SystemZConstantPoolValue.h - SystemZ constant-pool value -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,13 +18,17 @@ class GlobalValue;
 
 namespace SystemZCP {
 enum SystemZCPModifier {
+  TLSGD,
+  TLSLDM,
+  DTPOFF,
   NTPOFF
 };
 } // end namespace SystemZCP
 
 /// A SystemZ-specific constant pool value.  At present, the only
-/// defined constant pool values are offsets of thread-local variables
-/// (written x@NTPOFF).
+/// defined constant pool values are module IDs or offsets of
+/// thread-local variables (written x@TLSGD, x@TLSLDM, x@DTPOFF,
+/// or x@NTPOFF).
 class SystemZConstantPoolValue : public MachineConstantPoolValue {
   const GlobalValue *GV;
   SystemZCP::SystemZCPModifier Modifier;
@@ -39,9 +42,8 @@ public:
     Create(const GlobalValue *GV, SystemZCP::SystemZCPModifier Modifier);
 
   // Override MachineConstantPoolValue.
-  unsigned getRelocationInfo() const override;
   int getExistingMachineCPValue(MachineConstantPool *CP,
-                                unsigned Alignment) override;
+                                Align Alignment) override;
   void addSelectionDAGCSEId(FoldingSetNodeID &ID) override;
   void print(raw_ostream &O) const override;
 

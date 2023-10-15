@@ -1,12 +1,15 @@
+add_llvm_component_group(XCore)
+
 set(LLVM_TARGET_DEFINITIONS XCore.td)
 
-tablegen(LLVM XCoreGenRegisterInfo.inc -gen-register-info)
-tablegen(LLVM XCoreGenInstrInfo.inc -gen-instr-info)
-tablegen(LLVM XCoreGenDisassemblerTables.inc -gen-disassembler)
 tablegen(LLVM XCoreGenAsmWriter.inc -gen-asm-writer)
-tablegen(LLVM XCoreGenDAGISel.inc -gen-dag-isel)
 tablegen(LLVM XCoreGenCallingConv.inc -gen-callingconv)
+tablegen(LLVM XCoreGenDAGISel.inc -gen-dag-isel)
+tablegen(LLVM XCoreGenDisassemblerTables.inc -gen-disassembler)
+tablegen(LLVM XCoreGenInstrInfo.inc -gen-instr-info)
+tablegen(LLVM XCoreGenRegisterInfo.inc -gen-register-info)
 tablegen(LLVM XCoreGenSubtargetInfo.inc -gen-subtarget)
+
 add_public_tablegen_target(XCoreCommonTableGen)
 
 add_llvm_target(XCoreCodeGen
@@ -22,12 +25,26 @@ add_llvm_target(XCoreCodeGen
   XCoreSubtarget.cpp
   XCoreTargetMachine.cpp
   XCoreTargetObjectFile.cpp
-  XCoreTargetTransformInfo.cpp
   XCoreSelectionDAGInfo.cpp
   XCoreFrameToArgsOffsetElim.cpp
+
+  LINK_COMPONENTS
+  Analysis
+  AsmPrinter
+  CodeGen
+  Core
+  MC
+  SelectionDAG
+  Support
+  Target
+  TransformUtils
+  XCoreDesc
+  XCoreInfo
+
+  ADD_TO_COMPONENT
+  XCore
   )
 
 add_subdirectory(Disassembler)
-add_subdirectory(InstPrinter)
-add_subdirectory(TargetInfo)
 add_subdirectory(MCTargetDesc)
+add_subdirectory(TargetInfo)

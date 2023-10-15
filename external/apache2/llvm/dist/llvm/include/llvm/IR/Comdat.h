@@ -1,9 +1,8 @@
-//===-- llvm/IR/Comdat.h - Comdat definitions -------------------*- C++ -*-===//
+//===- llvm/IR/Comdat.h - Comdat definitions --------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,12 +15,13 @@
 #ifndef LLVM_IR_COMDAT_H
 #define LLVM_IR_COMDAT_H
 
-#include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm-c/Types.h"
+#include "llvm/Support/CBindingWrapping.h"
 
 namespace llvm {
 
 class raw_ostream;
+class StringRef;
 template <typename ValueTy> class StringMapEntry;
 
 // This is a Name X SelectionKind pair. The reason for having this be an
@@ -38,29 +38,33 @@ public:
     SameSize,     ///< The data referenced by the COMDAT must be the same size.
   };
 
+  Comdat(const Comdat &) = delete;
   Comdat(Comdat &&C);
+
   SelectionKind getSelectionKind() const { return SK; }
   void setSelectionKind(SelectionKind Val) { SK = Val; }
   StringRef getName() const;
-  void print(raw_ostream &OS) const;
+  void print(raw_ostream &OS, bool IsForDebug = false) const;
   void dump() const;
 
 private:
   friend class Module;
+
   Comdat();
-  Comdat(SelectionKind SK, StringMapEntry<Comdat> *Name);
-  Comdat(const Comdat &) LLVM_DELETED_FUNCTION;
 
   // Points to the map in Module.
-  StringMapEntry<Comdat> *Name;
-  SelectionKind SK;
+  StringMapEntry<Comdat> *Name = nullptr;
+  SelectionKind SK = Any;
 };
+
+// Create wrappers for C Binding types (see CBindingWrapping.h).
+DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Comdat, LLVMComdatRef)
 
 inline raw_ostream &operator<<(raw_ostream &OS, const Comdat &C) {
   C.print(OS);
   return OS;
 }
 
-} // end llvm namespace
+} // end namespace llvm
 
-#endif
+#endif // LLVM_IR_COMDAT_H

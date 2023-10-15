@@ -1,9 +1,8 @@
 (*===-- llvm_executionengine.ml - LLVM OCaml Interface --------*- OCaml -*-===*
  *
- *                     The LLVM Compiler Infrastructure
- *
- * This file is distributed under the University of Illinois Open Source
- * License. See LICENSE.TXT for details.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===----------------------------------------------------------------------===*)
 
@@ -43,11 +42,11 @@ external run_static_dtors : llexecutionengine -> unit
   = "llvm_ee_run_static_dtors"
 external data_layout : llexecutionengine -> Llvm_target.DataLayout.t
   = "llvm_ee_get_data_layout"
-external add_global_mapping_ : Llvm.llvalue -> int64 -> llexecutionengine -> unit
+external add_global_mapping_ : Llvm.llvalue -> nativeint -> llexecutionengine -> unit
   = "llvm_ee_add_global_mapping"
-external get_global_value_address_ : string -> llexecutionengine -> int64
+external get_global_value_address_ : string -> llexecutionengine -> nativeint
   = "llvm_ee_get_global_value_address"
-external get_function_address_ : string -> llexecutionengine -> int64
+external get_function_address_ : string -> llexecutionengine -> nativeint
   = "llvm_ee_get_function_address"
 
 let add_global_mapping llval ptr ee =
@@ -55,14 +54,14 @@ let add_global_mapping llval ptr ee =
 
 let get_global_value_address name typ ee =
   let vptr = get_global_value_address_ name ee in
-  if Int64.to_int vptr <> 0 then
+  if Nativeint.to_int vptr <> 0 then
     let open Ctypes in !@ (coerce (ptr void) (ptr typ) (ptr_of_raw_address vptr))
   else
     raise (Error ("Value " ^ name ^ " not found"))
 
 let get_function_address name typ ee =
   let fptr = get_function_address_ name ee in
-  if Int64.to_int fptr <> 0 then
+  if Nativeint.to_int fptr <> 0 then
     let open Ctypes in coerce (ptr void) typ (ptr_of_raw_address fptr)
   else
     raise (Error ("Function " ^ name ^ " not found"))

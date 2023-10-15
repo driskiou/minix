@@ -1,9 +1,8 @@
 //===-- lib/CodeGen/MachineInstrBundle.cpp --------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -13,21 +12,28 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/Passes.h"
-#include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include <utility>
 using namespace llvm;
 
 namespace {
   class UnpackMachineBundles : public MachineFunctionPass {
   public:
     static char ID; // Pass identification
-    UnpackMachineBundles() : MachineFunctionPass(ID) {
+    UnpackMachineBundles(
+        std::function<bool(const MachineFunction &)> Ftor = nullptr)
+        : MachineFunctionPass(ID), PredicateFtor(std::move(Ftor)) {
       initializeUnpackMachineBundlesPass(*PassRegistry::getPassRegistry());
     }
 
     bool runOnMachineFunction(MachineFunction &MF) override;
+
+  private:
+    std::function<bool(const MachineFunction &)> PredicateFtor;
   };
 } // end anonymous namespace
 
@@ -37,12 +43,13 @@ INITIALIZE_PASS(UnpackMachineBundles, "unpack-mi-bundles",
                 "Unpack machine instruction bundles", false, false)
 
 bool UnpackMachineBundles::runOnMachineFunction(MachineFunction &MF) {
-  bool Changed = false;
-  for (MachineFunction::iterator I = MF.begin(), E = MF.end(); I != E; ++I) {
-    MachineBasicBlock *MBB = &*I;
+  if (PredicateFtor && !PredicateFtor(MF))
+    return false;
 
-    for (MachineBasicBlock::instr_iterator MII = MBB->instr_begin(),
-           MIE = MBB->instr_end(); MII != MIE; ) {
+  bool Changed = false;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineBasicBlock::instr_iterator MII = MBB.instr_begin(),
+           MIE = MBB.instr_end(); MII != MIE; ) {
       MachineInstr *MI = &*MII;
 
       // Remove BUNDLE instruction and the InsideBundle flags from bundled
@@ -69,6 +76,11 @@ bool UnpackMachineBundles::runOnMachineFunction(MachineFunction &MF) {
   return Changed;
 }
 
+FunctionPass *
+llvm::createUnpackMachineBundles(
+    std::function<bool(const MachineFunction &)> Ftor) {
+  return new UnpackMachineBundles(std::move(Ftor));
+}
 
 namespace {
   class FinalizeMachineBundles : public MachineFunctionPass {
@@ -91,6 +103,16 @@ bool FinalizeMachineBundles::runOnMachineFunction(MachineFunction &MF) {
   return llvm::finalizeBundles(MF);
 }
 
+/// Return the first found DebugLoc that has a DILocation, given a range of
+/// instructions. The search range is from FirstMI to LastMI (exclusive). If no
+/// DILocation is found, then an empty location is returned.
+static DebugLoc getDebugLoc(MachineBasicBlock::instr_iterator FirstMI,
+                            MachineBasicBlock::instr_iterator LastMI) {
+  for (auto MII = FirstMI; MII != LastMI; ++MII)
+    if (MII->getDebugLoc().get())
+      return MII->getDebugLoc();
+  return DebugLoc();
+}
 
 /// finalizeBundle - Finalize a machine instruction bundle which includes
 /// a sequence of instructions starting from FirstMI to LastMI (exclusive).
@@ -109,21 +131,21 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
 
   MachineInstrBuilder MIB =
-      BuildMI(MF, FirstMI->getDebugLoc(), TII->get(TargetOpcode::BUNDLE));
+      BuildMI(MF, getDebugLoc(FirstMI, LastMI), TII->get(TargetOpcode::BUNDLE));
   Bundle.prepend(MIB);
 
-  SmallVector<unsigned, 32> LocalDefs;
-  SmallSet<unsigned, 32> LocalDefSet;
-  SmallSet<unsigned, 8> DeadDefSet;
-  SmallSet<unsigned, 16> KilledDefSet;
-  SmallVector<unsigned, 8> ExternUses;
-  SmallSet<unsigned, 8> ExternUseSet;
-  SmallSet<unsigned, 8> KilledUseSet;
-  SmallSet<unsigned, 8> UndefUseSet;
+  SmallVector<Register, 32> LocalDefs;
+  SmallSet<Register, 32> LocalDefSet;
+  SmallSet<Register, 8> DeadDefSet;
+  SmallSet<Register, 16> KilledDefSet;
+  SmallVector<Register, 8> ExternUses;
+  SmallSet<Register, 8> ExternUseSet;
+  SmallSet<Register, 8> KilledUseSet;
+  SmallSet<Register, 8> UndefUseSet;
   SmallVector<MachineOperand*, 4> Defs;
-  for (; FirstMI != LastMI; ++FirstMI) {
-    for (unsigned i = 0, e = FirstMI->getNumOperands(); i != e; ++i) {
-      MachineOperand &MO = FirstMI->getOperand(i);
+  for (auto MII = FirstMI; MII != LastMI; ++MII) {
+    for (unsigned i = 0, e = MII->getNumOperands(); i != e; ++i) {
+      MachineOperand &MO = MII->getOperand(i);
       if (!MO.isReg())
         continue;
       if (MO.isDef()) {
@@ -131,10 +153,10 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
         continue;
       }
 
-      unsigned Reg = MO.getReg();
+      Register Reg = MO.getReg();
       if (!Reg)
         continue;
-      assert(TargetRegisterInfo::isPhysicalRegister(Reg));
+
       if (LocalDefSet.count(Reg)) {
         MO.setIsInternalRead();
         if (MO.isKill())
@@ -154,7 +176,7 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
 
     for (unsigned i = 0, e = Defs.size(); i != e; ++i) {
       MachineOperand &MO = *Defs[i];
-      unsigned Reg = MO.getReg();
+      Register Reg = MO.getReg();
       if (!Reg)
         continue;
 
@@ -171,7 +193,7 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
           DeadDefSet.erase(Reg);
       }
 
-      if (!MO.isDead()) {
+      if (!MO.isDead() && Register::isPhysicalRegister(Reg)) {
         for (MCSubRegIterator SubRegs(Reg, TRI); SubRegs.isValid(); ++SubRegs) {
           unsigned SubReg = *SubRegs;
           if (LocalDefSet.insert(SubReg).second)
@@ -183,9 +205,9 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
     Defs.clear();
   }
 
-  SmallSet<unsigned, 32> Added;
+  SmallSet<Register, 32> Added;
   for (unsigned i = 0, e = LocalDefs.size(); i != e; ++i) {
-    unsigned Reg = LocalDefs[i];
+    Register Reg = LocalDefs[i];
     if (Added.insert(Reg).second) {
       // If it's not live beyond end of the bundle, mark it dead.
       bool isDead = DeadDefSet.count(Reg) || KilledDefSet.count(Reg);
@@ -195,11 +217,20 @@ void llvm::finalizeBundle(MachineBasicBlock &MBB,
   }
 
   for (unsigned i = 0, e = ExternUses.size(); i != e; ++i) {
-    unsigned Reg = ExternUses[i];
+    Register Reg = ExternUses[i];
     bool isKill = KilledUseSet.count(Reg);
     bool isUndef = UndefUseSet.count(Reg);
     MIB.addReg(Reg, getKillRegState(isKill) | getUndefRegState(isUndef) |
                getImplRegState(true));
+  }
+
+  // Set FrameSetup/FrameDestroy for the bundle. If any of the instructions got
+  // the property, then also set it on the bundle.
+  for (auto MII = FirstMI; MII != LastMI; ++MII) {
+    if (MII->getFlag(MachineInstr::FrameSetup))
+      MIB.setMIFlag(MachineInstr::FrameSetup);
+    if (MII->getFlag(MachineInstr::FrameDestroy))
+      MIB.setMIFlag(MachineInstr::FrameDestroy);
   }
 }
 
@@ -223,8 +254,7 @@ llvm::finalizeBundle(MachineBasicBlock &MBB,
 /// MachineFunction. Return true if any bundles are finalized.
 bool llvm::finalizeBundles(MachineFunction &MF) {
   bool Changed = false;
-  for (MachineFunction::iterator I = MF.begin(), E = MF.end(); I != E; ++I) {
-    MachineBasicBlock &MBB = *I;
+  for (MachineBasicBlock &MBB : MF) {
     MachineBasicBlock::instr_iterator MII = MBB.instr_begin();
     MachineBasicBlock::instr_iterator MIE = MBB.instr_end();
     if (MII == MIE)
@@ -245,22 +275,18 @@ bool llvm::finalizeBundles(MachineFunction &MF) {
   return Changed;
 }
 
-//===----------------------------------------------------------------------===//
-// MachineOperand iterator
-//===----------------------------------------------------------------------===//
-
-MachineOperandIteratorBase::VirtRegInfo
-MachineOperandIteratorBase::analyzeVirtReg(unsigned Reg,
-                    SmallVectorImpl<std::pair<MachineInstr*, unsigned> > *Ops) {
-  VirtRegInfo RI = { false, false, false };
-  for(; isValid(); ++*this) {
-    MachineOperand &MO = deref();
+VirtRegInfo llvm::AnalyzeVirtRegInBundle(
+    MachineInstr &MI, Register Reg,
+    SmallVectorImpl<std::pair<MachineInstr *, unsigned>> *Ops) {
+  VirtRegInfo RI = {false, false, false};
+  for (MIBundleOperands O(MI); O.isValid(); ++O) {
+    MachineOperand &MO = *O;
     if (!MO.isReg() || MO.getReg() != Reg)
       continue;
 
     // Remember each (MI, OpNo) that refers to Reg.
     if (Ops)
-      Ops->push_back(std::make_pair(MO.getParent(), getOperandNo()));
+      Ops->push_back(std::make_pair(MO.getParent(), O.getOperandNo()));
 
     // Both defs and uses can read virtual registers.
     if (MO.readsReg()) {
@@ -272,60 +298,60 @@ MachineOperandIteratorBase::analyzeVirtReg(unsigned Reg,
     // Only defs can write.
     if (MO.isDef())
       RI.Writes = true;
-    else if (!RI.Tied && MO.getParent()->isRegTiedToDefOperand(getOperandNo()))
+    else if (!RI.Tied &&
+             MO.getParent()->isRegTiedToDefOperand(O.getOperandNo()))
       RI.Tied = true;
   }
   return RI;
 }
 
-MachineOperandIteratorBase::PhysRegInfo
-MachineOperandIteratorBase::analyzePhysReg(unsigned Reg,
-                                           const TargetRegisterInfo *TRI) {
+PhysRegInfo llvm::AnalyzePhysRegInBundle(const MachineInstr &MI, Register Reg,
+                                         const TargetRegisterInfo *TRI) {
   bool AllDefsDead = true;
-  PhysRegInfo PRI = {false, false, false, false, false, false};
+  PhysRegInfo PRI = {false, false, false, false, false, false, false, false};
 
-  assert(TargetRegisterInfo::isPhysicalRegister(Reg) &&
-         "analyzePhysReg not given a physical register!");
-  for (; isValid(); ++*this) {
-    MachineOperand &MO = deref();
+  assert(Reg.isPhysical() && "analyzePhysReg not given a physical register!");
+  for (ConstMIBundleOperands O(MI); O.isValid(); ++O) {
+    const MachineOperand &MO = *O;
 
-    if (MO.isRegMask() && MO.clobbersPhysReg(Reg))
-      PRI.Clobbers = true;    // Regmask clobbers Reg.
+    if (MO.isRegMask() && MO.clobbersPhysReg(Reg)) {
+      PRI.Clobbered = true;
+      continue;
+    }
 
     if (!MO.isReg())
       continue;
 
-    unsigned MOReg = MO.getReg();
-    if (!MOReg || !TargetRegisterInfo::isPhysicalRegister(MOReg))
+    Register MOReg = MO.getReg();
+    if (!MOReg || !Register::isPhysicalRegister(MOReg))
       continue;
 
-    bool IsRegOrSuperReg = MOReg == Reg || TRI->isSubRegister(MOReg, Reg);
-    bool IsRegOrOverlapping = MOReg == Reg || TRI->regsOverlap(MOReg, Reg);
-
-    if (IsRegOrSuperReg && MO.readsReg()) {
-      // Reg or a super-reg is read, and perhaps killed also.
-      PRI.Reads = true;
-      PRI.Kills = MO.isKill();
-    }
-
-    if (IsRegOrOverlapping && MO.readsReg()) {
-      PRI.ReadsOverlap = true;// Reg or an overlapping register is read.
-    }
-
-    if (!MO.isDef())
+    if (!TRI->regsOverlap(MOReg, Reg))
       continue;
 
-    if (IsRegOrSuperReg) {
-      PRI.Defines = true;     // Reg or a super-register is defined.
+    bool Covered = TRI->isSuperRegisterEq(Reg, MOReg);
+    if (MO.readsReg()) {
+      PRI.Read = true;
+      if (Covered) {
+        PRI.FullyRead = true;
+        if (MO.isKill())
+          PRI.Killed = true;
+      }
+    } else if (MO.isDef()) {
+      PRI.Defined = true;
+      if (Covered)
+        PRI.FullyDefined = true;
       if (!MO.isDead())
         AllDefsDead = false;
     }
-    if (IsRegOrOverlapping)
-      PRI.Clobbers = true;    // Reg or an overlapping reg is defined.
   }
 
-  if (AllDefsDead && PRI.Defines)
-    PRI.DefinesDead = true;   // Reg or super-register was defined and was dead.
+  if (AllDefsDead) {
+    if (PRI.FullyDefined || PRI.Clobbered)
+      PRI.DeadDef = true;
+    else if (PRI.Defined)
+      PRI.PartialDeadDef = true;
+  }
 
   return PRI;
 }

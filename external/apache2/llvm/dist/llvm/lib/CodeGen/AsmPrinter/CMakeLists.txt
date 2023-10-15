@@ -1,13 +1,16 @@
-add_llvm_library(LLVMAsmPrinter
+add_llvm_component_library(LLVMAsmPrinter
+  AccelTable.cpp
   AddressPool.cpp
+  AIXException.cpp
   ARMException.cpp
   AsmPrinter.cpp
   AsmPrinterDwarf.cpp
   AsmPrinterInlineAsm.cpp
-  DbgValueHistoryCalculator.cpp
+  DbgEntityHistoryCalculator.cpp
+  DebugHandlerBase.cpp
+  DebugLocStream.cpp
   DIE.cpp
   DIEHash.cpp
-  DwarfAccelTable.cpp
   DwarfCFIException.cpp
   DwarfCompileUnit.cpp
   DwarfDebug.cpp
@@ -18,8 +21,26 @@ add_llvm_library(LLVMAsmPrinter
   EHStreamer.cpp
   ErlangGCPrinter.cpp
   OcamlGCPrinter.cpp
-  Win64Exception.cpp
-  WinCodeViewLineTables.cpp
-  )
+  PseudoProbePrinter.cpp
+  WinCFGuard.cpp
+  WinException.cpp
+  CodeViewDebug.cpp
+  WasmException.cpp
 
-add_dependencies(LLVMAsmPrinter intrinsics_gen)
+  DEPENDS
+  intrinsics_gen
+
+  LINK_COMPONENTS
+  Analysis
+  BinaryFormat
+  CodeGen
+  Core
+  DebugInfoCodeView
+  DebugInfoDWARF
+  DebugInfoMSF
+  MC
+  MCParser
+  Remarks
+  Support
+  Target
+  )

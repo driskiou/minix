@@ -1,9 +1,8 @@
 //===- IRPrintingPasses.h - Passes to print out IR constructs ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 /// \file
@@ -19,55 +18,56 @@
 #ifndef LLVM_IR_IRPRINTINGPASSES_H
 #define LLVM_IR_IRPRINTINGPASSES_H
 
-#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/PassManager.h"
 #include <string>
 
 namespace llvm {
-class BasicBlockPass;
-class Function;
-class FunctionPass;
-class Module;
-class ModulePass;
-class PreservedAnalyses;
 class raw_ostream;
+class StringRef;
 
-/// \brief Create and return a pass that writes the module to the specified
+/// Create and return a pass that writes the module to the specified
 /// \c raw_ostream.
 ModulePass *createPrintModulePass(raw_ostream &OS,
-                                  const std::string &Banner = "");
+                                  const std::string &Banner = "",
+                                  bool ShouldPreserveUseListOrder = false);
 
-/// \brief Create and return a pass that prints functions to the specified
+/// Create and return a pass that prints functions to the specified
 /// \c raw_ostream as they are processed.
 FunctionPass *createPrintFunctionPass(raw_ostream &OS,
                                       const std::string &Banner = "");
 
-/// \brief Create and return a pass that writes the BB to the specified
-/// \c raw_ostream.
-BasicBlockPass *createPrintBasicBlockPass(raw_ostream &OS,
-                                          const std::string &Banner = "");
+/// Print out a name of an LLVM value without any prefixes.
+///
+/// The name is surrounded with ""'s and escaped if it has any special or
+/// non-printable characters in it.
+void printLLVMNameWithoutPrefix(raw_ostream &OS, StringRef Name);
 
-/// \brief Pass for printing a Module as LLVM's text IR assembly.
+/// Return true if a pass is for IR printing.
+bool isIRPrintingPass(Pass *P);
+
+/// Pass for printing a Module as LLVM's text IR assembly.
 ///
 /// Note: This pass is for use with the new pass manager. Use the create...Pass
 /// functions above to create passes for use with the legacy pass manager.
-class PrintModulePass {
+class PrintModulePass : public PassInfoMixin<PrintModulePass> {
   raw_ostream &OS;
   std::string Banner;
+  bool ShouldPreserveUseListOrder;
 
 public:
   PrintModulePass();
-  PrintModulePass(raw_ostream &OS, const std::string &Banner = "");
+  PrintModulePass(raw_ostream &OS, const std::string &Banner = "",
+                  bool ShouldPreserveUseListOrder = false);
 
-  PreservedAnalyses run(Module &M);
-
-  static StringRef name() { return "PrintModulePass"; }
+  PreservedAnalyses run(Module &M, AnalysisManager<Module> &);
+  static bool isRequired() { return true; }
 };
 
-/// \brief Pass for printing a Function as LLVM's text IR assembly.
+/// Pass for printing a Function as LLVM's text IR assembly.
 ///
 /// Note: This pass is for use with the new pass manager. Use the create...Pass
 /// functions above to create passes for use with the legacy pass manager.
-class PrintFunctionPass {
+class PrintFunctionPass : public PassInfoMixin<PrintFunctionPass> {
   raw_ostream &OS;
   std::string Banner;
 
@@ -75,11 +75,10 @@ public:
   PrintFunctionPass();
   PrintFunctionPass(raw_ostream &OS, const std::string &Banner = "");
 
-  PreservedAnalyses run(Function &F);
-
-  static StringRef name() { return "PrintFunctionPass"; }
+  PreservedAnalyses run(Function &F, AnalysisManager<Function> &);
+  static bool isRequired() { return true; }
 };
 
-} // End llvm namespace
+} // namespace llvm
 
 #endif

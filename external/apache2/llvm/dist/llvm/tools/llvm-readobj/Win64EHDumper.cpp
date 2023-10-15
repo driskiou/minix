@@ -1,9 +1,8 @@
 //===- Win64EHDumper.cpp - Win64 EH Printer ---------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -112,25 +111,56 @@ static unsigned getNumUsedSlots(const UnwindCode &UnwindCode) {
   }
 }
 
+static std::error_code getSymbol(const COFFObjectFile &COFF, uint64_t VA,
+                                 object::SymbolRef &Sym) {
+  for (const auto &Symbol : COFF.symbols()) {
+    Expected<uint64_t> Address = Symbol.getAddress();
+    if (!Address)
+      return errorToErrorCode(Address.takeError());
+    if (*Address == VA) {
+      Sym = Symbol;
+      return std::error_code();
+    }
+  }
+  return inconvertibleErrorCode();
+}
+
 static std::string formatSymbol(const Dumper::Context &Ctx,
                                 const coff_section *Section, uint64_t Offset,
                                 uint32_t Displacement) {
   std::string Buffer;
   raw_string_ostream OS(Buffer);
 
-  StringRef Name;
   SymbolRef Symbol;
-  if (Ctx.ResolveSymbol(Section, Offset, Symbol, Ctx.UserData) ||
-      Symbol.getName(Name)) {
-    OS << format(" (0x%" PRIX64 ")", Offset);
-    return OS.str();
+  if (!Ctx.ResolveSymbol(Section, Offset, Symbol, Ctx.UserData)) {
+    Expected<StringRef> Name = Symbol.getName();
+    if (Name) {
+      OS << *Name;
+      if (Displacement > 0)
+        OS << format(" +0x%X (0x%" PRIX64 ")", Displacement, Offset);
+      else
+        OS << format(" (0x%" PRIX64 ")", Offset);
+      return OS.str();
+    } else {
+      // TODO: Actually report errors helpfully.
+      consumeError(Name.takeError());
+    }
+  } else if (!getSymbol(Ctx.COFF, Ctx.COFF.getImageBase() + Displacement,
+                        Symbol)) {
+    Expected<StringRef> Name = Symbol.getName();
+    if (Name) {
+      OS << *Name;
+      OS << format(" (0x%" PRIX64 ")", Ctx.COFF.getImageBase() + Displacement);
+      return OS.str();
+    } else {
+      consumeError(Name.takeError());
+    }
   }
 
-  OS << Name;
   if (Displacement > 0)
-    OS << format(" +0x%X (0x%" PRIX64 ")", Displacement, Offset);
+    OS << format("(0x%" PRIX64 ")", Ctx.COFF.getImageBase() + Displacement);
   else
-    OS << format(" (0x%" PRIX64 ")", Offset);
+    OS << format("(0x%" PRIX64 ")", Offset);
   return OS.str();
 }
 
@@ -144,15 +174,28 @@ static std::error_code resolveRelocation(const Dumper::Context &Ctx,
           Ctx.ResolveSymbol(Section, Offset, Symbol, Ctx.UserData))
     return EC;
 
-  if (std::error_code EC = Symbol.getAddress(ResolvedAddress))
-    return EC;
+  Expected<uint64_t> ResolvedAddressOrErr = Symbol.getAddress();
+  if (!ResolvedAddressOrErr)
+    return errorToErrorCode(ResolvedAddressOrErr.takeError());
+  ResolvedAddress = *ResolvedAddressOrErr;
 
-  section_iterator SI = Ctx.COFF.section_begin();
-  if (std::error_code EC = Symbol.getSection(SI))
-    return EC;
+  Expected<section_iterator> SI = Symbol.getSection();
+  if (!SI)
+    return errorToErrorCode(SI.takeError());
+  ResolvedSection = Ctx.COFF.getCOFFSection(**SI);
+  return std::error_code();
+}
 
-  ResolvedSection = Ctx.COFF.getCOFFSection(*SI);
-  return object_error::success;
+static const object::coff_section *
+getSectionContaining(const COFFObjectFile &COFF, uint64_t VA) {
+  for (const auto &Section : COFF.sections()) {
+    uint64_t Address = Section.getAddress();
+    uint64_t Size = Section.getSize();
+
+    if (VA >= Address && (VA - Address) <= Size)
+      return COFF.getCOFFSection(Section);
+  }
+  return nullptr;
 }
 
 namespace llvm {
@@ -255,7 +298,7 @@ void Dumper::printUnwindInfo(const Context &Ctx, const coff_section *Section,
         return;
       }
 
-      printUnwindCode(UI, ArrayRef<UnwindCode>(UCI, UCE));
+      printUnwindCode(UI, makeArrayRef(UCI, UCE));
       UCI = UCI + UsedSlots - 1;
     }
   }
@@ -280,16 +323,26 @@ void Dumper::printRuntimeFunction(const Context &Ctx,
   DictScope RFS(SW, "RuntimeFunction");
   printRuntimeFunctionEntry(Ctx, Section, SectionOffset, RF);
 
-  const coff_section *XData;
+  const coff_section *XData = nullptr;
   uint64_t Offset;
-  if (error(resolveRelocation(Ctx, Section, SectionOffset + 8, XData, Offset)))
-    return;
+  resolveRelocation(Ctx, Section, SectionOffset + 8, XData, Offset);
+  Offset = Offset + RF.UnwindInfoOffset;
+
+  if (!XData) {
+    uint64_t Address = Ctx.COFF.getImageBase() + RF.UnwindInfoOffset;
+    XData = getSectionContaining(Ctx.COFF, Address);
+    if (!XData)
+      return;
+    Offset = RF.UnwindInfoOffset - XData->VirtualAddress;
+  }
 
   ArrayRef<uint8_t> Contents;
-  if (error(Ctx.COFF.getSectionContents(XData, Contents)) || Contents.empty())
+  if (Error E = Ctx.COFF.getSectionContents(XData, Contents))
+    reportError(std::move(E), Ctx.COFF.getFileName());
+
+  if (Contents.empty())
     return;
 
-  Offset = Offset + RF.UnwindInfoOffset;
   if (Offset > Contents.size())
     return;
 
@@ -300,15 +353,20 @@ void Dumper::printRuntimeFunction(const Context &Ctx,
 void Dumper::printData(const Context &Ctx) {
   for (const auto &Section : Ctx.COFF.sections()) {
     StringRef Name;
-    if (error(Section.getName(Name)))
-      continue;
+    if (Expected<StringRef> NameOrErr = Section.getName())
+      Name = *NameOrErr;
+    else
+      consumeError(NameOrErr.takeError());
 
     if (Name != ".pdata" && !Name.startswith(".pdata$"))
       continue;
 
     const coff_section *PData = Ctx.COFF.getCOFFSection(Section);
     ArrayRef<uint8_t> Contents;
-    if (error(Ctx.COFF.getSectionContents(PData, Contents)) || Contents.empty())
+
+    if (Error E = Ctx.COFF.getSectionContents(PData, Contents))
+      reportError(std::move(E), Ctx.COFF.getFileName());
+    if (Contents.empty())
       continue;
 
     const RuntimeFunction *Entries =

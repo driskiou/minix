@@ -1,9 +1,8 @@
 //===-- PPCMCAsmInfo.cpp - PPC asm properties -----------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,42 +12,22 @@
 
 #include "PPCMCAsmInfo.h"
 #include "llvm/ADT/Triple.h"
+#include <cassert>
 
 using namespace llvm;
-
-void PPCMCAsmInfoDarwin::anchor() { }
-
-PPCMCAsmInfoDarwin::PPCMCAsmInfoDarwin(bool is64Bit, const Triple& T) {
-  if (is64Bit) {
-    PointerSize = CalleeSaveStackSlotSize = 8;
-  }
-  IsLittleEndian = false;
-
-  CommentString = ";";
-  ExceptionsType = ExceptionHandling::DwarfCFI;
-
-  if (!is64Bit)
-    Data64bitsDirective = nullptr; // We can't emit a 64-bit unit in PPC32 mode.
-
-  AssemblerDialect = 1;           // New-Style mnemonics.
-  SupportsDebugInformation= true; // Debug information.
-
-  // The installed assembler for OSX < 10.6 lacks some directives.
-  // FIXME: this should really be a check on the assembler characteristics
-  // rather than OS version
-  if (T.isMacOSX() && T.isMacOSXVersionLT(10, 6))
-    HasWeakDefCanBeHiddenDirective = false;
-
-  UseIntegratedAssembler = true;
-}
 
 void PPCELFMCAsmInfo::anchor() { }
 
 PPCELFMCAsmInfo::PPCELFMCAsmInfo(bool is64Bit, const Triple& T) {
+  // FIXME: This is not always needed. For example, it is not needed in the
+  // v2 abi.
+  NeedsLocalForSize = true;
+
   if (is64Bit) {
-    PointerSize = CalleeSaveStackSlotSize = 8;
+    CodePointerSize = CalleeSaveStackSlotSize = 8;
   }
-  IsLittleEndian = T.getArch() == Triple::ppc64le;
+  IsLittleEndian =
+      T.getArch() == Triple::ppc64le || T.getArch() == Triple::ppcle;
 
   // ".comm align is in bytes but .align is pow-2."
   AlignmentIsInBytes = false;
@@ -56,7 +35,7 @@ PPCELFMCAsmInfo::PPCELFMCAsmInfo(bool is64Bit, const Triple& T) {
   CommentString = "#";
 
   // Uses '.section' before '.bss' directive
-  UsesELFSectionDirectiveForBSS = true;  
+  UsesELFSectionDirectiveForBSS = true;
 
   // Debug Information
   SupportsDebugInformation = true;
@@ -68,12 +47,26 @@ PPCELFMCAsmInfo::PPCELFMCAsmInfo(bool is64Bit, const Triple& T) {
 
   // Exceptions handling
   ExceptionsType = ExceptionHandling::DwarfCFI;
-    
+
   ZeroDirective = "\t.space\t";
   Data64bitsDirective = is64Bit ? "\t.quad\t" : nullptr;
   AssemblerDialect = 1;           // New-Style mnemonics.
   LCOMMDirectiveAlignmentType = LCOMM::ByteAlignment;
-
-  UseIntegratedAssembler = true;
 }
 
+void PPCXCOFFMCAsmInfo::anchor() {}
+
+PPCXCOFFMCAsmInfo::PPCXCOFFMCAsmInfo(bool Is64Bit, const Triple &T) {
+  if (T.getArch() == Triple::ppc64le || T.getArch() == Triple::ppcle)
+    report_fatal_error("XCOFF is not supported for little-endian targets");
+  CodePointerSize = CalleeSaveStackSlotSize = Is64Bit ? 8 : 4;
+
+  // A size of 8 is only supported by the assembler under 64-bit.
+  Data64bitsDirective = Is64Bit ? "\t.vbyte\t8, " : nullptr;
+
+  // Debug Information
+  SupportsDebugInformation = true;
+
+  // Set up DWARF directives
+  MinInstAlignment = 4;
+}

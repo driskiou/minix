@@ -1,9 +1,8 @@
-//===--- DelayedDiagnostic.cpp - Delayed declarator diagnostics -*- C++ -*-===//
+//===- DelayedDiagnostic.cpp - Delayed declarator diagnostics -------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,54 +13,58 @@
 // This file also defines AccessedEntity.
 //
 //===----------------------------------------------------------------------===//
+
 #include "clang/Sema/DelayedDiagnostic.h"
-#include <string.h>
+#include <cstring>
+
 using namespace clang;
 using namespace sema;
 
 DelayedDiagnostic
-DelayedDiagnostic::makeAvailability(Sema::AvailabilityDiagnostic AD,
-                                    SourceLocation Loc,
-                                    const NamedDecl *D,
+DelayedDiagnostic::makeAvailability(AvailabilityResult AR,
+                                    ArrayRef<SourceLocation> Locs,
+                                    const NamedDecl *ReferringDecl,
+                                    const NamedDecl *OffendingDecl,
                                     const ObjCInterfaceDecl *UnknownObjCClass,
                                     const ObjCPropertyDecl  *ObjCProperty,
                                     StringRef Msg,
                                     bool ObjCPropertyAccess) {
+  assert(!Locs.empty());
   DelayedDiagnostic DD;
-  switch (AD) {
-    case Sema::AD_Deprecation:
-      DD.Kind = Deprecation;
-      break;
-    case Sema::AD_Unavailable:
-      DD.Kind = Unavailable;
-      break;
-  }
+  DD.Kind = Availability;
   DD.Triggered = false;
-  DD.Loc = Loc;
-  DD.DeprecationData.Decl = D;
-  DD.DeprecationData.UnknownObjCClass = UnknownObjCClass;
-  DD.DeprecationData.ObjCProperty = ObjCProperty;
+  DD.Loc = Locs.front();
+  DD.AvailabilityData.ReferringDecl = ReferringDecl;
+  DD.AvailabilityData.OffendingDecl = OffendingDecl;
+  DD.AvailabilityData.UnknownObjCClass = UnknownObjCClass;
+  DD.AvailabilityData.ObjCProperty = ObjCProperty;
   char *MessageData = nullptr;
-  if (Msg.size()) {
+  if (!Msg.empty()) {
     MessageData = new char [Msg.size()];
     memcpy(MessageData, Msg.data(), Msg.size());
   }
+  DD.AvailabilityData.Message = MessageData;
+  DD.AvailabilityData.MessageLen = Msg.size();
 
-  DD.DeprecationData.Message = MessageData;
-  DD.DeprecationData.MessageLen = Msg.size();
-  DD.DeprecationData.ObjCPropertyAccess = ObjCPropertyAccess;
+  DD.AvailabilityData.SelectorLocs = new SourceLocation[Locs.size()];
+  memcpy(DD.AvailabilityData.SelectorLocs, Locs.data(),
+         sizeof(SourceLocation) * Locs.size());
+  DD.AvailabilityData.NumSelectorLocs = Locs.size();
+
+  DD.AvailabilityData.AR = AR;
+  DD.AvailabilityData.ObjCPropertyAccess = ObjCPropertyAccess;
   return DD;
 }
 
 void DelayedDiagnostic::Destroy() {
-  switch (static_cast<DDKind>(Kind)) {
-  case Access: 
-    getAccessData().~AccessedEntity(); 
+  switch (Kind) {
+  case Access:
+    getAccessData().~AccessedEntity();
     break;
 
-  case Deprecation:
-  case Unavailable:
-    delete [] DeprecationData.Message;
+  case Availability:
+    delete[] AvailabilityData.Message;
+    delete[] AvailabilityData.SelectorLocs;
     break;
 
   case ForbiddenType:

@@ -1,80 +1,87 @@
-//===------------------------ CalcSpillWeights.cpp ------------------------===//
+//===- CalcSpillWeights.cpp -----------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/CalcSpillWeights.h"
-#include "llvm/CodeGen/LiveIntervalAnalysis.h"
-#include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/CodeGen/LiveInterval.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
+#include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/CodeGen/VirtRegMap.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include "llvm/CodeGen/StackMaps.h"
+#include <cassert>
+#include <tuple>
+
 using namespace llvm;
 
 #define DEBUG_TYPE "calcspillweights"
 
-void llvm::calculateSpillWeightsAndHints(LiveIntervals &LIS,
-                           MachineFunction &MF,
-                           const MachineLoopInfo &MLI,
-                           const MachineBlockFrequencyInfo &MBFI,
-                           VirtRegAuxInfo::NormalizingFn norm) {
-  DEBUG(dbgs() << "********** Compute Spill Weights **********\n"
-               << "********** Function: " << MF.getName() << '\n');
+void VirtRegAuxInfo::calculateSpillWeightsAndHints() {
+  LLVM_DEBUG(dbgs() << "********** Compute Spill Weights **********\n"
+                    << "********** Function: " << MF.getName() << '\n');
 
   MachineRegisterInfo &MRI = MF.getRegInfo();
-  VirtRegAuxInfo VRAI(MF, LIS, MLI, MBFI, norm);
-  for (unsigned i = 0, e = MRI.getNumVirtRegs(); i != e; ++i) {
-    unsigned Reg = TargetRegisterInfo::index2VirtReg(i);
+  for (unsigned I = 0, E = MRI.getNumVirtRegs(); I != E; ++I) {
+    unsigned Reg = Register::index2VirtReg(I);
     if (MRI.reg_nodbg_empty(Reg))
       continue;
-    VRAI.calculateSpillWeightAndHint(LIS.getInterval(Reg));
+    calculateSpillWeightAndHint(LIS.getInterval(Reg));
   }
 }
 
 // Return the preferred allocation register for reg, given a COPY instruction.
-static unsigned copyHint(const MachineInstr *mi, unsigned reg,
-                         const TargetRegisterInfo &tri,
-                         const MachineRegisterInfo &mri) {
-  unsigned sub, hreg, hsub;
-  if (mi->getOperand(0).getReg() == reg) {
-    sub = mi->getOperand(0).getSubReg();
-    hreg = mi->getOperand(1).getReg();
-    hsub = mi->getOperand(1).getSubReg();
+static Register copyHint(const MachineInstr *MI, unsigned Reg,
+                         const TargetRegisterInfo &TRI,
+                         const MachineRegisterInfo &MRI) {
+  unsigned Sub, HSub;
+  Register HReg;
+  if (MI->getOperand(0).getReg() == Reg) {
+    Sub = MI->getOperand(0).getSubReg();
+    HReg = MI->getOperand(1).getReg();
+    HSub = MI->getOperand(1).getSubReg();
   } else {
-    sub = mi->getOperand(1).getSubReg();
-    hreg = mi->getOperand(0).getReg();
-    hsub = mi->getOperand(0).getSubReg();
+    Sub = MI->getOperand(1).getSubReg();
+    HReg = MI->getOperand(0).getReg();
+    HSub = MI->getOperand(0).getSubReg();
   }
 
-  if (!hreg)
+  if (!HReg)
     return 0;
 
-  if (TargetRegisterInfo::isVirtualRegister(hreg))
-    return sub == hsub ? hreg : 0;
+  if (Register::isVirtualRegister(HReg))
+    return Sub == HSub ? HReg : Register();
 
-  const TargetRegisterClass *rc = mri.getRegClass(reg);
+  const TargetRegisterClass *rc = MRI.getRegClass(Reg);
+  MCRegister CopiedPReg = HSub ? TRI.getSubReg(HReg, HSub) : HReg.asMCReg();
+  if (rc->contains(CopiedPReg))
+    return CopiedPReg;
 
-  // Only allow physreg hints in rc.
-  if (sub == 0)
-    return rc->contains(hreg) ? hreg : 0;
+  // Check if reg:sub matches so that a super register could be hinted.
+  if (Sub)
+    return TRI.getMatchingSuperReg(CopiedPReg, Sub, rc);
 
-  // reg:sub should match the physreg hreg.
-  return tri.getMatchingSuperReg(hreg, sub, rc);
+  return 0;
 }
 
 // Check if all values in LI are rematerializable
-static bool isRematerializable(const LiveInterval &LI,
-                               const LiveIntervals &LIS,
+static bool isRematerializable(const LiveInterval &LI, const LiveIntervals &LIS,
+                               const VirtRegMap &VRM,
                                const TargetInstrInfo &TII) {
+  unsigned Reg = LI.reg();
+  unsigned Original = VRM.getOriginal(Reg);
   for (LiveInterval::const_vni_iterator I = LI.vni_begin(), E = LI.vni_end();
        I != E; ++I) {
     const VNInfo *VNI = *I;
@@ -86,110 +93,235 @@ static bool isRematerializable(const LiveInterval &LI,
     MachineInstr *MI = LIS.getInstructionFromIndex(VNI->def);
     assert(MI && "Dead valno in interval");
 
-    if (!TII.isTriviallyReMaterializable(MI, LIS.getAliasAnalysis()))
+    // Trace copies introduced by live range splitting.  The inline
+    // spiller can rematerialize through these copies, so the spill
+    // weight must reflect this.
+    while (MI->isFullCopy()) {
+      // The copy destination must match the interval register.
+      if (MI->getOperand(0).getReg() != Reg)
+        return false;
+
+      // Get the source register.
+      Reg = MI->getOperand(1).getReg();
+
+      // If the original (pre-splitting) registers match this
+      // copy came from a split.
+      if (!Register::isVirtualRegister(Reg) || VRM.getOriginal(Reg) != Original)
+        return false;
+
+      // Follow the copy live-in value.
+      const LiveInterval &SrcLI = LIS.getInterval(Reg);
+      LiveQueryResult SrcQ = SrcLI.Query(VNI->def);
+      VNI = SrcQ.valueIn();
+      assert(VNI && "Copy from non-existing value");
+      if (VNI->isPHIDef())
+        return false;
+      MI = LIS.getInstructionFromIndex(VNI->def);
+      assert(MI && "Dead valno in interval");
+    }
+
+    if (!TII.isTriviallyReMaterializable(*MI, LIS.getAliasAnalysis()))
       return false;
   }
   return true;
 }
 
-void
-VirtRegAuxInfo::calculateSpillWeightAndHint(LiveInterval &li) {
-  MachineRegisterInfo &mri = MF.getRegInfo();
-  const TargetRegisterInfo &tri = *MF.getSubtarget().getRegisterInfo();
-  MachineBasicBlock *mbb = nullptr;
-  MachineLoop *loop = nullptr;
-  bool isExiting = false;
-  float totalWeight = 0;
-  unsigned numInstr = 0; // Number of instructions using li
-  SmallPtrSet<MachineInstr*, 8> visited;
+bool VirtRegAuxInfo::isLiveAtStatepointVarArg(LiveInterval &LI) {
+  return any_of(VRM.getRegInfo().reg_operands(LI.reg()),
+                [](MachineOperand &MO) {
+    MachineInstr *MI = MO.getParent();
+    if (MI->getOpcode() != TargetOpcode::STATEPOINT)
+      return false;
+    return StatepointOpers(MI).getVarIdx() <= MI->getOperandNo(&MO);
+  });
+}
 
-  // Find the best physreg hint and the best virtreg hint.
-  float bestPhys = 0, bestVirt = 0;
-  unsigned hintPhys = 0, hintVirt = 0;
+void VirtRegAuxInfo::calculateSpillWeightAndHint(LiveInterval &LI) {
+  float Weight = weightCalcHelper(LI);
+  // Check if unspillable.
+  if (Weight < 0)
+    return;
+  LI.setWeight(Weight);
+}
 
-  // Don't recompute a target specific hint.
-  bool noHint = mri.getRegAllocationHint(li.reg).first != 0;
+float VirtRegAuxInfo::futureWeight(LiveInterval &LI, SlotIndex Start,
+                                   SlotIndex End) {
+  return weightCalcHelper(LI, &Start, &End);
+}
+
+float VirtRegAuxInfo::weightCalcHelper(LiveInterval &LI, SlotIndex *Start,
+                                       SlotIndex *End) {
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+  MachineBasicBlock *MBB = nullptr;
+  MachineLoop *Loop = nullptr;
+  bool IsExiting = false;
+  float TotalWeight = 0;
+  unsigned NumInstr = 0; // Number of instructions using LI
+  SmallPtrSet<MachineInstr *, 8> Visited;
+
+  std::pair<Register, Register> TargetHint = MRI.getRegAllocationHint(LI.reg());
+
+  if (LI.isSpillable()) {
+    Register Reg = LI.reg();
+    Register Original = VRM.getOriginal(Reg);
+    const LiveInterval &OrigInt = LIS.getInterval(Original);
+    // li comes from a split of OrigInt. If OrigInt was marked
+    // as not spillable, make sure the new interval is marked
+    // as not spillable as well.
+    if (!OrigInt.isSpillable())
+      LI.markNotSpillable();
+  }
 
   // Don't recompute spill weight for an unspillable register.
-  bool Spillable = li.isSpillable();
+  bool IsSpillable = LI.isSpillable();
 
-  for (MachineRegisterInfo::reg_instr_iterator
-       I = mri.reg_instr_begin(li.reg), E = mri.reg_instr_end();
-       I != E; ) {
-    MachineInstr *mi = &*(I++);
-    numInstr++;
-    if (mi->isIdentityCopy() || mi->isImplicitDef() || mi->isDebugValue())
-      continue;
-    if (!visited.insert(mi).second)
+  bool IsLocalSplitArtifact = Start && End;
+
+  // Do not update future local split artifacts.
+  bool ShouldUpdateLI = !IsLocalSplitArtifact;
+
+  if (IsLocalSplitArtifact) {
+    MachineBasicBlock *localMBB = LIS.getMBBFromIndex(*End);
+    assert(localMBB == LIS.getMBBFromIndex(*Start) &&
+           "start and end are expected to be in the same basic block");
+
+    // Local split artifact will have 2 additional copy instructions and they
+    // will be in the same BB.
+    // localLI = COPY other
+    // ...
+    // other   = COPY localLI
+    TotalWeight += LiveIntervals::getSpillWeight(true, false, &MBFI, localMBB);
+    TotalWeight += LiveIntervals::getSpillWeight(false, true, &MBFI, localMBB);
+
+    NumInstr += 2;
+  }
+
+  // CopyHint is a sortable hint derived from a COPY instruction.
+  struct CopyHint {
+    const Register Reg;
+    const float Weight;
+    CopyHint(Register R, float W) : Reg(R), Weight(W) {}
+    bool operator<(const CopyHint &Rhs) const {
+      // Always prefer any physreg hint.
+      if (Reg.isPhysical() != Rhs.Reg.isPhysical())
+        return Reg.isPhysical();
+      if (Weight != Rhs.Weight)
+        return (Weight > Rhs.Weight);
+      return Reg.id() < Rhs.Reg.id(); // Tie-breaker.
+    }
+  };
+
+  std::set<CopyHint> CopyHints;
+  DenseMap<unsigned, float> Hint;
+  for (MachineRegisterInfo::reg_instr_nodbg_iterator
+           I = MRI.reg_instr_nodbg_begin(LI.reg()),
+           E = MRI.reg_instr_nodbg_end();
+       I != E;) {
+    MachineInstr *MI = &*(I++);
+
+    // For local split artifacts, we are interested only in instructions between
+    // the expected start and end of the range.
+    SlotIndex SI = LIS.getInstructionIndex(*MI);
+    if (IsLocalSplitArtifact && ((SI < *Start) || (SI > *End)))
       continue;
 
-    float weight = 1.0f;
-    if (Spillable) {
+    NumInstr++;
+    if (MI->isIdentityCopy() || MI->isImplicitDef())
+      continue;
+    if (!Visited.insert(MI).second)
+      continue;
+
+    // For terminators that produce values, ask the backend if the register is
+    // not spillable.
+    if (TII.isUnspillableTerminator(MI) && MI->definesRegister(LI.reg())) {
+      LI.markNotSpillable();
+      return -1.0f;
+    }
+
+    float Weight = 1.0f;
+    if (IsSpillable) {
       // Get loop info for mi.
-      if (mi->getParent() != mbb) {
-        mbb = mi->getParent();
-        loop = Loops.getLoopFor(mbb);
-        isExiting = loop ? loop->isLoopExiting(mbb) : false;
+      if (MI->getParent() != MBB) {
+        MBB = MI->getParent();
+        Loop = Loops.getLoopFor(MBB);
+        IsExiting = Loop ? Loop->isLoopExiting(MBB) : false;
       }
 
       // Calculate instr weight.
-      bool reads, writes;
-      std::tie(reads, writes) = mi->readsWritesVirtualRegister(li.reg);
-      weight = LiveIntervals::getSpillWeight(
-        writes, reads, &MBFI, mi);
+      bool Reads, Writes;
+      std::tie(Reads, Writes) = MI->readsWritesVirtualRegister(LI.reg());
+      Weight = LiveIntervals::getSpillWeight(Writes, Reads, &MBFI, *MI);
 
       // Give extra weight to what looks like a loop induction variable update.
-      if (writes && isExiting && LIS.isLiveOutOfMBB(li, mbb))
-        weight *= 3;
+      if (Writes && IsExiting && LIS.isLiveOutOfMBB(LI, MBB))
+        Weight *= 3;
 
-      totalWeight += weight;
+      TotalWeight += Weight;
     }
 
     // Get allocation hints from copies.
-    if (noHint || !mi->isCopy())
+    if (!MI->isCopy())
       continue;
-    unsigned hint = copyHint(mi, li.reg, tri, mri);
-    if (!hint)
+    Register HintReg = copyHint(MI, LI.reg(), TRI, MRI);
+    if (!HintReg)
       continue;
     // Force hweight onto the stack so that x86 doesn't add hidden precision,
     // making the comparison incorrectly pass (i.e., 1 > 1 == true??).
     //
     // FIXME: we probably shouldn't use floats at all.
-    volatile float hweight = Hint[hint] += weight;
-    if (TargetRegisterInfo::isPhysicalRegister(hint)) {
-      if (hweight > bestPhys && mri.isAllocatable(hint))
-        bestPhys = hweight, hintPhys = hint;
-    } else {
-      if (hweight > bestVirt)
-        bestVirt = hweight, hintVirt = hint;
-    }
+    volatile float HWeight = Hint[HintReg] += Weight;
+    if (HintReg.isVirtual() || MRI.isAllocatable(HintReg))
+      CopyHints.insert(CopyHint(HintReg, HWeight));
   }
 
-  Hint.clear();
+  // Pass all the sorted copy hints to mri.
+  if (ShouldUpdateLI && CopyHints.size()) {
+    // Remove a generic hint if previously added by target.
+    if (TargetHint.first == 0 && TargetHint.second)
+      MRI.clearSimpleHint(LI.reg());
 
-  // Always prefer the physreg hint.
-  if (unsigned hint = hintPhys ? hintPhys : hintVirt) {
-    mri.setRegAllocationHint(li.reg, 0, hint);
+    std::set<Register> HintedRegs;
+    for (auto &Hint : CopyHints) {
+      if (!HintedRegs.insert(Hint.Reg).second ||
+          (TargetHint.first != 0 && Hint.Reg == TargetHint.second))
+        // Don't add the same reg twice or the target-type hint again.
+        continue;
+      MRI.addRegAllocationHint(LI.reg(), Hint.Reg);
+    }
+
     // Weakly boost the spill weight of hinted registers.
-    totalWeight *= 1.01F;
+    TotalWeight *= 1.01F;
   }
 
   // If the live interval was already unspillable, leave it that way.
-  if (!Spillable)
-    return;
+  if (!IsSpillable)
+    return -1.0;
 
-  // Mark li as unspillable if all live ranges are tiny.
-  if (li.isZeroLength(LIS.getSlotIndexes())) {
-    li.markNotSpillable();
-    return;
+  // Mark li as unspillable if all live ranges are tiny and the interval
+  // is not live at any reg mask.  If the interval is live at a reg mask
+  // spilling may be required. If li is live as use in statepoint instruction
+  // spilling may be required due to if we mark interval with use in statepoint
+  // as not spillable we are risky to end up with no register to allocate.
+  // At the same time STATEPOINT instruction is perfectly fine to have this
+  // operand on stack, so spilling such interval and folding its load from stack
+  // into instruction itself makes perfect sense.
+  if (ShouldUpdateLI && LI.isZeroLength(LIS.getSlotIndexes()) &&
+      !LI.isLiveAtIndexes(LIS.getRegMaskSlots()) &&
+      !isLiveAtStatepointVarArg(LI)) {
+    LI.markNotSpillable();
+    return -1.0;
   }
 
   // If all of the definitions of the interval are re-materializable,
   // it is a preferred candidate for spilling.
   // FIXME: this gets much more complicated once we support non-trivial
   // re-materialization.
-  if (isRematerializable(li, LIS, *MF.getSubtarget().getInstrInfo()))
-    totalWeight *= 0.5F;
+  if (isRematerializable(LI, LIS, VRM, *MF.getSubtarget().getInstrInfo()))
+    TotalWeight *= 0.5F;
 
-  li.weight = normalize(totalWeight, li.getSize(), numInstr);
+  if (IsLocalSplitArtifact)
+    return normalize(TotalWeight, Start->distance(*End), NumInstr);
+  return normalize(TotalWeight, LI.getSize(), NumInstr);
 }

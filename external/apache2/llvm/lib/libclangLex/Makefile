@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.4 2013/01/23 15:03:01 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:16 joerg Exp $
 
 LIB=	clangLex
 
@@ -6,7 +6,8 @@ LIB=	clangLex
 
 .PATH: ${CLANG_SRCDIR}/lib/Lex
 
-SRCS+=	HeaderMap.cpp \
+SRCS+=	DependencyDirectivesSourceMinimizer.cpp \
+	HeaderMap.cpp \
 	HeaderSearch.cpp \
 	Lexer.cpp \
 	LiteralSupport.cpp \
@@ -20,7 +21,6 @@ SRCS+=	HeaderMap.cpp \
 	PPExpressions.cpp \
 	PPLexerChange.cpp \
 	PPMacroExpansion.cpp \
-	PTHLexer.cpp \
 	Pragma.cpp \
 	PreprocessingRecord.cpp \
 	Preprocessor.cpp \

@@ -1,10 +1,9 @@
 //===-- ARMOptimizeBarriersPass - two DMBs without a memory access in between,
 //removed one -===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===------------------------------------------------------------------------------------------===//
 
@@ -27,11 +26,12 @@ public:
 
   bool runOnMachineFunction(MachineFunction &Fn) override;
 
-  const char *getPassName() const override {
-    return "optimise barriers pass";
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+        MachineFunctionProperties::Property::NoVRegs);
   }
 
-private:
+  StringRef getPassName() const override { return "optimise barriers pass"; }
 };
 char ARMOptimizeBarriersPass::ID = 0;
 }
@@ -48,6 +48,9 @@ static bool CanMovePastDMB(const MachineInstr *MI) {
 }
 
 bool ARMOptimizeBarriersPass::runOnMachineFunction(MachineFunction &MF) {
+  if (skipFunction(MF.getFunction()))
+    return false;
+
   // Vector to store the DMBs we will remove after the first iteration
   std::vector<MachineInstr *> ToRemove;
   // DMBType is the Imm value of the first operand. It determines whether it's a
@@ -84,13 +87,15 @@ bool ARMOptimizeBarriersPass::runOnMachineFunction(MachineFunction &MF) {
       }
     }
   }
+  bool Changed = false;
   // Remove the tagged DMB
   for (auto MI : ToRemove) {
     MI->eraseFromParent();
     ++NumDMBsRemoved;
+    Changed = true;
   }
 
-  return NumDMBsRemoved > 0;
+  return Changed;
 }
 
 /// createARMOptimizeBarriersPass - Returns an instance of the remove double

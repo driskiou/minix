@@ -1,9 +1,8 @@
 //===- llvm/ADT/TinyPtrVector.h - 'Normally tiny' vectors -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -11,11 +10,16 @@
 #define LLVM_ADT_TINYPTRVECTOR_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/None.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/SmallVector.h"
+#include <cassert>
+#include <cstddef>
+#include <iterator>
+#include <type_traits>
 
 namespace llvm {
-  
+
 /// TinyPtrVector - This class is specialized for cases where there are
 /// normally 0 or 1 element in a vector, but is general enough to go beyond that
 /// when required.
@@ -25,12 +29,20 @@ namespace llvm {
 template <typename EltTy>
 class TinyPtrVector {
 public:
-  typedef llvm::SmallVector<EltTy, 4> VecTy;
-  typedef typename VecTy::value_type value_type;
+  using VecTy = SmallVector<EltTy, 4>;
+  using value_type = typename VecTy::value_type;
+  // EltTy must be the first pointer type so that is<EltTy> is true for the
+  // default-constructed PtrUnion. This allows an empty TinyPtrVector to
+  // naturally vend a begin/end iterator of type EltTy* without an additional
+  // check for the empty state.
+  using PtrUnion = PointerUnion<EltTy, VecTy *>;
 
-  llvm::PointerUnion<EltTy, VecTy*> Val;
+private:
+  PtrUnion Val;
 
-  TinyPtrVector() {}
+public:
+  TinyPtrVector() = default;
+
   ~TinyPtrVector() {
     if (VecTy *V = Val.template dyn_cast<VecTy*>())
       delete V;
@@ -40,6 +52,7 @@ public:
     if (VecTy *V = Val.template dyn_cast<VecTy*>())
       Val = new VecTy(*V);
   }
+
   TinyPtrVector &operator=(const TinyPtrVector &RHS) {
     if (this == &RHS)
       return *this;
@@ -71,6 +84,7 @@ public:
   TinyPtrVector(TinyPtrVector &&RHS) : Val(RHS.Val) {
     RHS.Val = (EltTy)nullptr;
   }
+
   TinyPtrVector &operator=(TinyPtrVector &&RHS) {
     if (this == &RHS)
       return *this;
@@ -86,22 +100,38 @@ public:
       if (RHS.Val.template is<EltTy>()) {
         V->clear();
         V->push_back(RHS.front());
+        RHS.Val = EltTy();
         return *this;
       }
       delete V;
     }
 
     Val = RHS.Val;
-    RHS.Val = (EltTy)nullptr;
+    RHS.Val = EltTy();
     return *this;
   }
 
-  /// Constructor from a single element.
-  explicit TinyPtrVector(EltTy Elt) : Val(Elt) {}
+  TinyPtrVector(std::initializer_list<EltTy> IL)
+      : Val(IL.size() == 0
+                ? PtrUnion()
+                : IL.size() == 1 ? PtrUnion(*IL.begin())
+                                 : PtrUnion(new VecTy(IL.begin(), IL.end()))) {}
 
   /// Constructor from an ArrayRef.
+  ///
+  /// This also is a constructor for individual array elements due to the single
+  /// element constructor for ArrayRef.
   explicit TinyPtrVector(ArrayRef<EltTy> Elts)
-      : Val(new VecTy(Elts.begin(), Elts.end())) {}
+      : Val(Elts.empty()
+                ? PtrUnion()
+                : Elts.size() == 1
+                      ? PtrUnion(Elts[0])
+                      : PtrUnion(new VecTy(Elts.begin(), Elts.end()))) {}
+
+  TinyPtrVector(size_t Count, EltTy Value)
+      : Val(Count == 0 ? PtrUnion()
+                       : Count == 1 ? PtrUnion(Value)
+                                    : PtrUnion(new VecTy(Count, Value))) {}
 
   // implicit conversion operator to ArrayRef.
   operator ArrayRef<EltTy>() const {
@@ -110,6 +140,24 @@ public:
     if (Val.template is<EltTy>())
       return *Val.getAddrOfPtr1();
     return *Val.template get<VecTy*>();
+  }
+
+  // implicit conversion operator to MutableArrayRef.
+  operator MutableArrayRef<EltTy>() {
+    if (Val.isNull())
+      return None;
+    if (Val.template is<EltTy>())
+      return *Val.getAddrOfPtr1();
+    return *Val.template get<VecTy*>();
+  }
+
+  // Implicit conversion to ArrayRef<U> if EltTy* implicitly converts to U*.
+  template <
+      typename U,
+      std::enable_if_t<std::is_convertible<ArrayRef<EltTy>, ArrayRef<U>>::value,
+                       bool> = false>
+  operator ArrayRef<U>() const {
+    return operator ArrayRef<EltTy>();
   }
 
   bool empty() const {
@@ -129,16 +177,18 @@ public:
     return Val.template get<VecTy*>()->size();
   }
 
-  typedef const EltTy *const_iterator;
-  typedef EltTy *iterator;
+  using iterator = EltTy *;
+  using const_iterator = const EltTy *;
+  using reverse_iterator = std::reverse_iterator<iterator>;
+  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
   iterator begin() {
     if (Val.template is<EltTy>())
       return Val.getAddrOfPtr1();
 
     return Val.template get<VecTy *>()->begin();
-
   }
+
   iterator end() {
     if (Val.template is<EltTy>())
       return begin() + (Val.isNull() ? 0 : 1);
@@ -154,11 +204,22 @@ public:
     return (const_iterator)const_cast<TinyPtrVector*>(this)->end();
   }
 
+  reverse_iterator rbegin() { return reverse_iterator(end()); }
+  reverse_iterator rend() { return reverse_iterator(begin()); }
+
+  const_reverse_iterator rbegin() const {
+    return const_reverse_iterator(end());
+  }
+
+  const_reverse_iterator rend() const {
+    return const_reverse_iterator(begin());
+  }
+
   EltTy operator[](unsigned i) const {
     assert(!Val.isNull() && "can't index into an empty vector");
-    if (EltTy V = Val.template dyn_cast<EltTy>()) {
+    if (Val.template is<EltTy>()) {
       assert(i == 0 && "tinyvector index out of range");
-      return V;
+      return Val.template get<EltTy>();
     }
 
     assert(i < Val.template get<VecTy*>()->size() &&
@@ -168,29 +229,29 @@ public:
 
   EltTy front() const {
     assert(!empty() && "vector empty");
-    if (EltTy V = Val.template dyn_cast<EltTy>())
-      return V;
+    if (Val.template is<EltTy>())
+      return Val.template get<EltTy>();
     return Val.template get<VecTy*>()->front();
   }
 
   EltTy back() const {
     assert(!empty() && "vector empty");
-    if (EltTy V = Val.template dyn_cast<EltTy>())
-      return V;
+    if (Val.template is<EltTy>())
+      return Val.template get<EltTy>();
     return Val.template get<VecTy*>()->back();
   }
 
   void push_back(EltTy NewVal) {
-    assert(NewVal && "Can't add a null value");
-
     // If we have nothing, add something.
     if (Val.isNull()) {
       Val = NewVal;
+      assert(!Val.isNull() && "Can't add a null value");
       return;
     }
 
     // If we have a single value, convert to a vector.
-    if (EltTy V = Val.template dyn_cast<EltTy>()) {
+    if (Val.template is<EltTy>()) {
+      EltTy V = Val.template get<EltTy>();
       Val = new VecTy();
       Val.template get<VecTy*>()->push_back(V);
     }
@@ -210,7 +271,7 @@ public:
   void clear() {
     // If we have a single value, convert to empty.
     if (Val.template is<EltTy>()) {
-      Val = (EltTy)nullptr;
+      Val = EltTy();
     } else if (VecTy *Vec = Val.template dyn_cast<VecTy*>()) {
       // If we have a vector form, just clear it.
       Vec->clear();
@@ -225,7 +286,7 @@ public:
     // If we have a single value, convert to empty.
     if (Val.template is<EltTy>()) {
       if (I == begin())
-        Val = (EltTy)nullptr;
+        Val = EltTy();
     } else if (VecTy *Vec = Val.template dyn_cast<VecTy*>()) {
       // multiple items in a vector; just do the erase, there is no
       // benefit to collapsing back to a pointer
@@ -241,7 +302,7 @@ public:
 
     if (Val.template is<EltTy>()) {
       if (S == begin() && S != E)
-        Val = (EltTy)nullptr;
+        Val = EltTy();
     } else if (VecTy *Vec = Val.template dyn_cast<VecTy*>()) {
       return Vec->erase(S, E);
     }
@@ -256,7 +317,8 @@ public:
       return std::prev(end());
     }
     assert(!Val.isNull() && "Null value with non-end insert iterator.");
-    if (EltTy V = Val.template dyn_cast<EltTy>()) {
+    if (Val.template is<EltTy>()) {
+      EltTy V = Val.template get<EltTy>();
       assert(I == begin());
       Val = Elt;
       push_back(V);
@@ -282,13 +344,15 @@ public:
       }
 
       Val = new VecTy();
-    } else if (EltTy V = Val.template dyn_cast<EltTy>()) {
+    } else if (Val.template is<EltTy>()) {
+      EltTy V = Val.template get<EltTy>();
       Val = new VecTy();
       Val.template get<VecTy*>()->push_back(V);
     }
     return Val.template get<VecTy*>()->insert(begin() + Offset, From, To);
   }
 };
+
 } // end namespace llvm
 
-#endif
+#endif // LLVM_ADT_TINYPTRVECTOR_H

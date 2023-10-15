@@ -1,9 +1,8 @@
 //===- llvm/CodeGen/MachineLoopInfo.h - Natural Loop Calculator -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -33,159 +32,171 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/IR/DebugLoc.h"
+#include "llvm/Pass.h"
 
 namespace llvm {
 
+class MachineDominatorTree;
 // Implementation in LoopInfoImpl.h
-#ifdef __GNUC__
 class MachineLoop;
-__extension__ extern template class LoopBase<MachineBasicBlock, MachineLoop>;
-#endif
+extern template class LoopBase<MachineBasicBlock, MachineLoop>;
 
 class MachineLoop : public LoopBase<MachineBasicBlock, MachineLoop> {
 public:
-  MachineLoop();
-
-  /// getTopBlock - Return the "top" block in the loop, which is the first
-  /// block in the linear layout, ignoring any parts of the loop not
-  /// contiguous with the part the contains the header.
+  /// Return the "top" block in the loop, which is the first block in the linear
+  /// layout, ignoring any parts of the loop not contiguous with the part that
+  /// contains the header.
   MachineBasicBlock *getTopBlock();
 
-  /// getBottomBlock - Return the "bottom" block in the loop, which is the last
-  /// block in the linear layout, ignoring any parts of the loop not
-  /// contiguous with the part the contains the header.
+  /// Return the "bottom" block in the loop, which is the last block in the
+  /// linear layout, ignoring any parts of the loop not contiguous with the part
+  /// that contains the header.
   MachineBasicBlock *getBottomBlock();
+
+  /// Find the block that contains the loop control variable and the
+  /// loop test. This will return the latch block if it's one of the exiting
+  /// blocks. Otherwise, return the exiting block. Return 'null' when
+  /// multiple exiting blocks are present.
+  MachineBasicBlock *findLoopControlBlock();
+
+  /// Return the debug location of the start of this loop.
+  /// This looks for a BB terminating instruction with a known debug
+  /// location by looking at the preheader and header blocks. If it
+  /// cannot find a terminating instruction with location information,
+  /// it returns an unknown location.
+  DebugLoc getStartLoc() const;
+
+  /// Returns true if the instruction is loop invariant.
+  /// I.e., all virtual register operands are defined outside of the loop,
+  /// physical registers aren't accessed explicitly, and there are no side
+  /// effects that aren't captured by the operands or other flags.
+  bool isLoopInvariant(MachineInstr &I) const;
 
   void dump() const;
 
 private:
   friend class LoopInfoBase<MachineBasicBlock, MachineLoop>;
+
   explicit MachineLoop(MachineBasicBlock *MBB)
     : LoopBase<MachineBasicBlock, MachineLoop>(MBB) {}
+
+  MachineLoop() = default;
 };
 
 // Implementation in LoopInfoImpl.h
-#ifdef __GNUC__
-__extension__ extern template
-class LoopInfoBase<MachineBasicBlock, MachineLoop>;
-#endif
+extern template class LoopInfoBase<MachineBasicBlock, MachineLoop>;
 
 class MachineLoopInfo : public MachineFunctionPass {
-  LoopInfoBase<MachineBasicBlock, MachineLoop> LI;
   friend class LoopBase<MachineBasicBlock, MachineLoop>;
 
-  void operator=(const MachineLoopInfo &) LLVM_DELETED_FUNCTION;
-  MachineLoopInfo(const MachineLoopInfo &) LLVM_DELETED_FUNCTION;
+  LoopInfoBase<MachineBasicBlock, MachineLoop> LI;
 
 public:
   static char ID; // Pass identification, replacement for typeid
 
-  MachineLoopInfo() : MachineFunctionPass(ID) {
-    initializeMachineLoopInfoPass(*PassRegistry::getPassRegistry());
+  MachineLoopInfo();
+  explicit MachineLoopInfo(MachineDominatorTree &MDT)
+      : MachineFunctionPass(ID) {
+    calculate(MDT);
   }
+  MachineLoopInfo(const MachineLoopInfo &) = delete;
+  MachineLoopInfo &operator=(const MachineLoopInfo &) = delete;
 
   LoopInfoBase<MachineBasicBlock, MachineLoop>& getBase() { return LI; }
 
-  /// iterator/begin/end - The interface to the top-level loops in the current
-  /// function.
-  ///
-  typedef LoopInfoBase<MachineBasicBlock, MachineLoop>::iterator iterator;
+  /// Find the block that either is the loop preheader, or could
+  /// speculatively be used as the preheader. This is e.g. useful to place
+  /// loop setup code. Code that cannot be speculated should not be placed
+  /// here. SpeculativePreheader is controlling whether it also tries to
+  /// find the speculative preheader if the regular preheader is not present.
+  MachineBasicBlock *findLoopPreheader(MachineLoop *L,
+                                       bool SpeculativePreheader = false) const;
+
+  /// The iterator interface to the top-level loops in the current function.
+  using iterator = LoopInfoBase<MachineBasicBlock, MachineLoop>::iterator;
   inline iterator begin() const { return LI.begin(); }
   inline iterator end() const { return LI.end(); }
   bool empty() const { return LI.empty(); }
 
-  /// getLoopFor - Return the inner most loop that BB lives in.  If a basic
-  /// block is in no loop (for example the entry node), null is returned.
-  ///
+  /// Return the innermost loop that BB lives in. If a basic block is in no loop
+  /// (for example the entry node), null is returned.
   inline MachineLoop *getLoopFor(const MachineBasicBlock *BB) const {
     return LI.getLoopFor(BB);
   }
 
-  /// operator[] - same as getLoopFor...
-  ///
+  /// Same as getLoopFor.
   inline const MachineLoop *operator[](const MachineBasicBlock *BB) const {
     return LI.getLoopFor(BB);
   }
 
-  /// getLoopDepth - Return the loop nesting level of the specified block...
-  ///
+  /// Return the loop nesting level of the specified block.
   inline unsigned getLoopDepth(const MachineBasicBlock *BB) const {
     return LI.getLoopDepth(BB);
   }
 
-  // isLoopHeader - True if the block is a loop header node
-  inline bool isLoopHeader(MachineBasicBlock *BB) const {
+  /// True if the block is a loop header node.
+  inline bool isLoopHeader(const MachineBasicBlock *BB) const {
     return LI.isLoopHeader(BB);
   }
 
-  /// runOnFunction - Calculate the natural loop information.
-  ///
+  /// Calculate the natural loop information.
   bool runOnMachineFunction(MachineFunction &F) override;
+  void calculate(MachineDominatorTree &MDT);
 
   void releaseMemory() override { LI.releaseMemory(); }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
-  /// removeLoop - This removes the specified top-level loop from this loop info
-  /// object.  The loop is not deleted, as it will presumably be inserted into
-  /// another loop.
+  /// This removes the specified top-level loop from this loop info object. The
+  /// loop is not deleted, as it will presumably be inserted into another loop.
   inline MachineLoop *removeLoop(iterator I) { return LI.removeLoop(I); }
 
-  /// changeLoopFor - Change the top-level loop that contains BB to the
-  /// specified loop.  This should be used by transformations that restructure
-  /// the loop hierarchy tree.
+  /// Change the top-level loop that contains BB to the specified loop. This
+  /// should be used by transformations that restructure the loop hierarchy
+  /// tree.
   inline void changeLoopFor(MachineBasicBlock *BB, MachineLoop *L) {
     LI.changeLoopFor(BB, L);
   }
 
-  /// changeTopLevelLoop - Replace the specified loop in the top-level loops
-  /// list with the indicated loop.
+  /// Replace the specified loop in the top-level loops list with the indicated
+  /// loop.
   inline void changeTopLevelLoop(MachineLoop *OldLoop, MachineLoop *NewLoop) {
     LI.changeTopLevelLoop(OldLoop, NewLoop);
   }
 
-  /// addTopLevelLoop - This adds the specified loop to the collection of
-  /// top-level loops.
+  /// This adds the specified loop to the collection of top-level loops.
   inline void addTopLevelLoop(MachineLoop *New) {
     LI.addTopLevelLoop(New);
   }
 
-  /// removeBlock - This method completely removes BB from all data structures,
-  /// including all of the Loop objects it is nested in and our mapping from
+  /// This method completely removes BB from all data structures, including all
+  /// of the Loop objects it is nested in and our mapping from
   /// MachineBasicBlocks to loops.
   void removeBlock(MachineBasicBlock *BB) {
     LI.removeBlock(BB);
   }
 };
 
-
 // Allow clients to walk the list of nested loops...
 template <> struct GraphTraits<const MachineLoop*> {
-  typedef const MachineLoop NodeType;
-  typedef MachineLoopInfo::iterator ChildIteratorType;
+  using NodeRef = const MachineLoop *;
+  using ChildIteratorType = MachineLoopInfo::iterator;
 
-  static NodeType *getEntryNode(const MachineLoop *L) { return L; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
-    return N->begin();
-  }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->end();
-  }
+  static NodeRef getEntryNode(const MachineLoop *L) { return L; }
+  static ChildIteratorType child_begin(NodeRef N) { return N->begin(); }
+  static ChildIteratorType child_end(NodeRef N) { return N->end(); }
 };
 
 template <> struct GraphTraits<MachineLoop*> {
-  typedef MachineLoop NodeType;
-  typedef MachineLoopInfo::iterator ChildIteratorType;
+  using NodeRef = MachineLoop *;
+  using ChildIteratorType = MachineLoopInfo::iterator;
 
-  static NodeType *getEntryNode(MachineLoop *L) { return L; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
-    return N->begin();
-  }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->end();
-  }
+  static NodeRef getEntryNode(MachineLoop *L) { return L; }
+  static ChildIteratorType child_begin(NodeRef N) { return N->begin(); }
+  static ChildIteratorType child_end(NodeRef N) { return N->end(); }
 };
 
-} // End llvm namespace
+} // end namespace llvm
 
-#endif
+#endif // LLVM_CODEGEN_MACHINELOOPINFO_H

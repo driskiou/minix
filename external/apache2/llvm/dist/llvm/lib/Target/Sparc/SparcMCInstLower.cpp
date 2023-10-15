@@ -1,9 +1,8 @@
 //===-- SparcMCInstLower.cpp - Convert Sparc MachineInstr to MCInst -------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,9 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Sparc.h"
 #include "MCTargetDesc/SparcMCExpr.h"
-#include "llvm/ADT/SmallString.h"
+#include "Sparc.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -59,11 +57,11 @@ static MCOperand LowerSymbolOperand(const MachineInstr *MI,
     break;
   }
 
-  const MCSymbolRefExpr *MCSym = MCSymbolRefExpr::Create(Symbol,
+  const MCSymbolRefExpr *MCSym = MCSymbolRefExpr::create(Symbol,
                                                          AP.OutContext);
-  const SparcMCExpr *expr = SparcMCExpr::Create(Kind, MCSym,
+  const SparcMCExpr *expr = SparcMCExpr::create(Kind, MCSym,
                                                 AP.OutContext);
-  return MCOperand::CreateExpr(expr);
+  return MCOperand::createExpr(expr);
 }
 
 static MCOperand LowerOperand(const MachineInstr *MI,
@@ -74,10 +72,10 @@ static MCOperand LowerOperand(const MachineInstr *MI,
   case MachineOperand::MO_Register:
     if (MO.isImplicit())
       break;
-    return MCOperand::CreateReg(MO.getReg());
+    return MCOperand::createReg(MO.getReg());
 
   case MachineOperand::MO_Immediate:
-    return MCOperand::CreateImm(MO.getImm());
+    return MCOperand::createImm(MO.getImm());
 
   case MachineOperand::MO_MachineBasicBlock:
   case MachineOperand::MO_GlobalAddress:

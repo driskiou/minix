@@ -1,9 +1,8 @@
 //===----- CXXABI.h - Interface to C++ ABIs ---------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,17 +19,28 @@
 namespace clang {
 
 class ASTContext;
-class MemberPointerType;
+class CXXConstructorDecl;
+class DeclaratorDecl;
+class Expr;
+class MangleContext;
 class MangleNumberingContext;
+class MemberPointerType;
 
 /// Implements C++ ABI-specific semantic analysis functions.
 class CXXABI {
 public:
   virtual ~CXXABI();
 
-  /// Returns the width and alignment of a member pointer in bits.
-  virtual std::pair<uint64_t, unsigned>
-  getMemberPointerWidthAndAlign(const MemberPointerType *MPT) const = 0;
+  struct MemberPointerInfo {
+    uint64_t Width;
+    unsigned Align;
+    bool HasPadding;
+  };
+
+  /// Returns the width and alignment of a member pointer in bits, as well as
+  /// whether it has padding.
+  virtual MemberPointerInfo
+  getMemberPointerInfo(const MemberPointerType *MPT) const = 0;
 
   /// Returns the default calling convention for C++ methods.
   virtual CallingConv getDefaultMethodCallConv(bool isVariadic) const = 0;
@@ -40,12 +50,34 @@ public:
   virtual bool isNearlyEmpty(const CXXRecordDecl *RD) const = 0;
 
   /// Returns a new mangling number context for this C++ ABI.
-  virtual MangleNumberingContext *createMangleNumberingContext() const = 0;
+  virtual std::unique_ptr<MangleNumberingContext>
+  createMangleNumberingContext() const = 0;
+
+  /// Adds a mapping from class to copy constructor for this C++ ABI.
+  virtual void addCopyConstructorForExceptionObject(CXXRecordDecl *,
+                                                    CXXConstructorDecl *) = 0;
+
+  /// Retrieves the mapping from class to copy constructor for this C++ ABI.
+  virtual const CXXConstructorDecl *
+  getCopyConstructorForExceptionObject(CXXRecordDecl *) = 0;
+
+  virtual void addTypedefNameForUnnamedTagDecl(TagDecl *TD,
+                                               TypedefNameDecl *DD) = 0;
+
+  virtual TypedefNameDecl *
+  getTypedefNameForUnnamedTagDecl(const TagDecl *TD) = 0;
+
+  virtual void addDeclaratorForUnnamedTagDecl(TagDecl *TD,
+                                              DeclaratorDecl *DD) = 0;
+
+  virtual DeclaratorDecl *getDeclaratorForUnnamedTagDecl(const TagDecl *TD) = 0;
 };
 
 /// Creates an instance of a C++ ABI class.
 CXXABI *CreateItaniumCXXABI(ASTContext &Ctx);
 CXXABI *CreateMicrosoftCXXABI(ASTContext &Ctx);
+std::unique_ptr<MangleNumberingContext>
+createItaniumNumberingContext(MangleContext *);
 }
 
 #endif

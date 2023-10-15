@@ -15,43 +15,23 @@
 #ifndef LLVM_CONFIG_H
 #define LLVM_CONFIG_H
 
-/* Installation directory for binary executables */
-#define LLVM_BINDIR "/usr/bin"
-
-/* Time at which LLVM was configured */
-#define LLVM_CONFIGTIME "(timestamp not enabled)"
-
-/* Installation directory for data files */
-#define LLVM_DATADIR "/usr/share/llvm"
+/* Define if we link Polly to the tools */
+/* #undef LINK_POLLY_INTO_TOOLS */
 
 /* Target triple LLVM will generate code for by default */
-#define LLVM_DEFAULT_TARGET_TRIPLE "i586-elf32-minix"
+#define LLVM_DEFAULT_TARGET_TRIPLE "x86_64--netbsd"
 
-/* Installation directory for documentation */
-#define LLVM_DOCSDIR "/usr/share/doc/llvm"
+/* Define to enable checks that alter the LLVM C++ ABI */
+#define LLVM_ENABLE_ABI_BREAKING_CHECKS 0
 
-#if !defined(__minix)
 /* Define if threads enabled */
 #define LLVM_ENABLE_THREADS 1
-#endif /* !defined(__MINIX) */
-
-/* Installation directory for config files */
-#define LLVM_ETCDIR "/usr/etc/llvm"
 
 /* Has gcc/MSVC atomic intrinsics */
 #define LLVM_HAS_ATOMICS 1
 
 /* Host triple LLVM will be executed on */
-#define LLVM_HOST_TRIPLE "i586-elf32-minix"
-
-/* Installation directory for include files */
-#define LLVM_INCLUDEDIR "/usr/include"
-
-/* Installation directory for .info files */
-#define LLVM_INFODIR "/usr/info"
-
-/* Installation directory for man pages */
-#define LLVM_MANDIR "/usr/man"
+#define LLVM_HOST_TRIPLE "x86_64--netbsd"
 
 /* LLVM architecture name for the native architecture, if available */
 #define LLVM_NATIVE_ARCH X86
@@ -90,15 +70,20 @@
 #define LLVM_USE_OPROFILE 0
 
 /* Major version of the LLVM API */
-#define LLVM_VERSION_MAJOR 3
+#define LLVM_VERSION_MAJOR 4
 
 /* Minor version of the LLVM API */
-#define LLVM_VERSION_MINOR 6
+#define LLVM_VERSION_MINOR 0
 
 /* Patch version of the LLVM API */
-#define LLVM_VERSION_PATCH 1
+#define LLVM_VERSION_PATCH 0
 
 /* LLVM version string */
-#define LLVM_VERSION_STRING "3.6.1"
+#define LLVM_VERSION_STRING "4.0.0svn"
+
+/* Define to 1 if you have the <sysexits.h> header file. */
+#define HAVE_SYSEXITS_H 1
+
+#define LLVM_ENABLE_NEW_PASS_MANAGER 0
 
 #endif

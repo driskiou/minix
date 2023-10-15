@@ -1,13 +1,12 @@
 //===-- ARMSelectionDAGInfo.h - ARM SelectionDAG Info -----------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the ARM subclass for TargetSelectionDAGInfo.
+// This file defines the ARM subclass for SelectionDAGTargetInfo.
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,7 +14,8 @@
 #define LLVM_LIB_TARGET_ARM_ARMSELECTIONDAGINFO_H
 
 #include "MCTargetDesc/ARMAddressingModes.h"
-#include "llvm/Target/TargetSelectionDAGInfo.h"
+#include "llvm/CodeGen/RuntimeLibcalls.h"
+#include "llvm/CodeGen/SelectionDAGTargetInfo.h"
 
 namespace llvm {
 
@@ -35,26 +35,32 @@ namespace ARM_AM {
   }
 }  // end namespace ARM_AM
 
-class ARMSelectionDAGInfo : public TargetSelectionDAGInfo {
+class ARMSelectionDAGInfo : public SelectionDAGTargetInfo {
 public:
-  explicit ARMSelectionDAGInfo(const DataLayout &DL);
-  ~ARMSelectionDAGInfo();
-
-  SDValue EmitTargetCodeForMemcpy(SelectionDAG &DAG, SDLoc dl,
-                                  SDValue Chain,
-                                  SDValue Dst, SDValue Src,
-                                  SDValue Size, unsigned Align,
+  SDValue EmitTargetCodeForMemcpy(SelectionDAG &DAG, const SDLoc &dl,
+                                  SDValue Chain, SDValue Dst, SDValue Src,
+                                  SDValue Size, Align Alignment,
                                   bool isVolatile, bool AlwaysInline,
                                   MachinePointerInfo DstPtrInfo,
                                   MachinePointerInfo SrcPtrInfo) const override;
 
+  SDValue
+  EmitTargetCodeForMemmove(SelectionDAG &DAG, const SDLoc &dl, SDValue Chain,
+                           SDValue Dst, SDValue Src, SDValue Size,
+                           Align Alignment, bool isVolatile,
+                           MachinePointerInfo DstPtrInfo,
+                           MachinePointerInfo SrcPtrInfo) const override;
+
   // Adjust parameters for memset, see RTABI section 4.3.4
-  SDValue EmitTargetCodeForMemset(SelectionDAG &DAG, SDLoc dl,
-                                  SDValue Chain,
-                                  SDValue Op1, SDValue Op2,
-                                  SDValue Op3, unsigned Align,
-                                  bool isVolatile,
+  SDValue EmitTargetCodeForMemset(SelectionDAG &DAG, const SDLoc &dl,
+                                  SDValue Chain, SDValue Op1, SDValue Op2,
+                                  SDValue Op3, Align Alignment, bool isVolatile,
                                   MachinePointerInfo DstPtrInfo) const override;
+
+  SDValue EmitSpecializedLibcall(SelectionDAG &DAG, const SDLoc &dl,
+                                 SDValue Chain, SDValue Dst, SDValue Src,
+                                 SDValue Size, unsigned Align,
+                                 RTLIB::Libcall LC) const;
 };
 
 }

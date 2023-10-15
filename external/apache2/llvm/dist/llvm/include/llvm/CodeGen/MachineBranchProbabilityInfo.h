@@ -1,9 +1,8 @@
 //=- MachineBranchProbabilityInfo.h - Branch Probability Analysis -*- C++ -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,6 +17,7 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/BranchProbability.h"
 #include <climits>
+#include <numeric>
 
 namespace llvm {
 
@@ -35,29 +35,21 @@ class MachineBranchProbabilityInfo : public ImmutablePass {
 public:
   static char ID;
 
-  MachineBranchProbabilityInfo() : ImmutablePass(ID) {
-    PassRegistry &Registry = *PassRegistry::getPassRegistry();
-    initializeMachineBranchProbabilityInfoPass(Registry);
-  }
+  MachineBranchProbabilityInfo();
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesAll();
   }
 
-  // Return edge weight. If we don't have any informations about it - return
-  // DEFAULT_WEIGHT.
-  uint32_t getEdgeWeight(const MachineBasicBlock *Src,
-                         const MachineBasicBlock *Dst) const;
+  // Return edge probability.
+  BranchProbability getEdgeProbability(const MachineBasicBlock *Src,
+                                       const MachineBasicBlock *Dst) const;
 
-  // Same thing, but using a const_succ_iterator from Src. This is faster when
-  // the iterator is already available.
-  uint32_t getEdgeWeight(const MachineBasicBlock *Src,
-                         MachineBasicBlock::const_succ_iterator Dst) const;
-
-  // Get sum of the block successors' weights, potentially scaling them to fit
-  // within 32-bits. If scaling is required, sets Scale based on the necessary
-  // adjustment. Any edge weights used with the sum should be divided by Scale.
-  uint32_t getSumForBlock(const MachineBasicBlock *MBB, uint32_t &Scale) const;
+  // Same as above, but using a const_succ_iterator from Src. This is faster
+  // when the iterator is already available.
+  BranchProbability
+  getEdgeProbability(const MachineBasicBlock *Src,
+                     MachineBasicBlock::const_succ_iterator Dst) const;
 
   // A 'Hot' edge is an edge which probability is >= 80%.
   bool isEdgeHot(const MachineBasicBlock *Src,
@@ -66,15 +58,6 @@ public:
   // Return a hot successor for the block BB or null if there isn't one.
   // NB: This routine's complexity is linear on the number of successors.
   MachineBasicBlock *getHotSucc(MachineBasicBlock *MBB) const;
-
-  // Return a probability as a fraction between 0 (0% probability) and
-  // 1 (100% probability), however the value is never equal to 0, and can be 1
-  // only iff SRC block has only one successor.
-  // NB: This routine's complexity is linear on the number of successors of
-  // Src. Querying sequentially for each successor's probability is a quadratic
-  // query pattern.
-  BranchProbability getEdgeProbability(const MachineBasicBlock *Src,
-                                       const MachineBasicBlock *Dst) const;
 
   // Print value between 0 (0% probability) and 1 (100% probability),
   // however the value is never equal to 0, and can be 1 only iff SRC block

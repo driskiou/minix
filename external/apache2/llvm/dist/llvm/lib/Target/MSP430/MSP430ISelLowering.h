@@ -1,9 +1,8 @@
 //===-- MSP430ISelLowering.h - MSP430 DAG Lowering Interface ----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,11 +16,11 @@
 
 #include "MSP430.h"
 #include "llvm/CodeGen/SelectionDAG.h"
-#include "llvm/Target/TargetLowering.h"
+#include "llvm/CodeGen/TargetLowering.h"
 
 namespace llvm {
   namespace MSP430ISD {
-    enum {
+    enum NodeType : unsigned {
       FIRST_NUMBER = ISD::BUILTIN_OP_END,
 
       /// Return with a flag operand. Operand 0 is the chain operand.
@@ -35,6 +34,9 @@ namespace llvm {
 
       /// Y = RRC X, rotate right via carry
       RRC,
+
+      /// Rotate right via carry, carry gets cleared beforehand by clrc
+      RRCL,
 
       /// CALL - These operations represent an abstract call
       /// instruction, which includes a bunch of information.
@@ -61,16 +63,25 @@ namespace llvm {
       /// is condition code and operand 4 is flag operand.
       SELECT_CC,
 
-      /// SHL, SRA, SRL - Non-constant shifts.
-      SHL, SRA, SRL
+      /// DADD - Decimal addition with carry
+      /// TODO Nothing generates a node of this type yet.
+      DADD,
     };
   }
 
+  class MSP430Subtarget;
   class MSP430TargetLowering : public TargetLowering {
   public:
-    explicit MSP430TargetLowering(const TargetMachine &TM);
+    explicit MSP430TargetLowering(const TargetMachine &TM,
+                                  const MSP430Subtarget &STI);
 
-    MVT getScalarShiftAmountTy(EVT LHSTy) const override { return MVT::i8; }
+    MVT getScalarShiftAmountTy(const DataLayout &, EVT) const override {
+      return MVT::i8;
+    }
+
+    MVT::SimpleValueType getCmpLibcallReturnType() const override {
+      return MVT::i16;
+    }
 
     /// LowerOperation - Provide custom lowering hooks for some operations.
     SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
@@ -94,10 +105,10 @@ namespace llvm {
     SDValue getReturnAddressFrameIndex(SelectionDAG &DAG) const;
 
     TargetLowering::ConstraintType
-    getConstraintType(const std::string &Constraint) const override;
-    std::pair<unsigned, const TargetRegisterClass*>
-    getRegForInlineAsmConstraint(const std::string &Constraint,
-                                 MVT VT) const override;
+    getConstraintType(StringRef Constraint) const override;
+    std::pair<unsigned, const TargetRegisterClass *>
+    getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                                 StringRef Constraint, MVT VT) const override;
 
     /// isTruncateFree - Return true if it's free to truncate a value of type
     /// Ty1 to type Ty2. e.g. On msp430 it's free to truncate a i16 value in
@@ -117,9 +128,13 @@ namespace llvm {
     bool isZExtFree(EVT VT1, EVT VT2) const override;
     bool isZExtFree(SDValue Val, EVT VT2) const override;
 
-    MachineBasicBlock* EmitInstrWithCustomInserter(MachineInstr *MI,
-                                                   MachineBasicBlock *BB) const override;
-    MachineBasicBlock* EmitShiftInstr(MachineInstr *MI,
+    bool isLegalICmpImmediate(int64_t) const override;
+    bool shouldAvoidTransformToShift(EVT VT, unsigned Amount) const override;
+
+    MachineBasicBlock *
+    EmitInstrWithCustomInserter(MachineInstr &MI,
+                                MachineBasicBlock *BB) const override;
+    MachineBasicBlock *EmitShiftInstr(MachineInstr &MI,
                                       MachineBasicBlock *BB) const;
 
   private:
@@ -129,38 +144,40 @@ namespace llvm {
                            const SmallVectorImpl<ISD::OutputArg> &Outs,
                            const SmallVectorImpl<SDValue> &OutVals,
                            const SmallVectorImpl<ISD::InputArg> &Ins,
-                           SDLoc dl, SelectionDAG &DAG,
+                           const SDLoc &dl, SelectionDAG &DAG,
                            SmallVectorImpl<SDValue> &InVals) const;
 
-    SDValue LowerCCCArguments(SDValue Chain,
-                              CallingConv::ID CallConv,
+    SDValue LowerCCCArguments(SDValue Chain, CallingConv::ID CallConv,
                               bool isVarArg,
                               const SmallVectorImpl<ISD::InputArg> &Ins,
-                              SDLoc dl,
-                              SelectionDAG &DAG,
+                              const SDLoc &dl, SelectionDAG &DAG,
                               SmallVectorImpl<SDValue> &InVals) const;
 
     SDValue LowerCallResult(SDValue Chain, SDValue InFlag,
                             CallingConv::ID CallConv, bool isVarArg,
                             const SmallVectorImpl<ISD::InputArg> &Ins,
-                            SDLoc dl, SelectionDAG &DAG,
+                            const SDLoc &dl, SelectionDAG &DAG,
                             SmallVectorImpl<SDValue> &InVals) const;
 
     SDValue
-      LowerFormalArguments(SDValue Chain,
-                           CallingConv::ID CallConv, bool isVarArg,
-                           const SmallVectorImpl<ISD::InputArg> &Ins,
-                           SDLoc dl, SelectionDAG &DAG,
-                           SmallVectorImpl<SDValue> &InVals) const override;
+    LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
+                         const SmallVectorImpl<ISD::InputArg> &Ins,
+                         const SDLoc &dl, SelectionDAG &DAG,
+                         SmallVectorImpl<SDValue> &InVals) const override;
     SDValue
       LowerCall(TargetLowering::CallLoweringInfo &CLI,
                 SmallVectorImpl<SDValue> &InVals) const override;
 
-    SDValue LowerReturn(SDValue Chain,
-                        CallingConv::ID CallConv, bool isVarArg,
+    bool CanLowerReturn(CallingConv::ID CallConv,
+                        MachineFunction &MF,
+                        bool IsVarArg,
+                        const SmallVectorImpl<ISD::OutputArg> &Outs,
+                        LLVMContext &Context) const override;
+
+    SDValue LowerReturn(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
                         const SmallVectorImpl<ISD::OutputArg> &Outs,
                         const SmallVectorImpl<SDValue> &OutVals,
-                        SDLoc dl, SelectionDAG &DAG) const override;
+                        const SDLoc &dl, SelectionDAG &DAG) const override;
 
     bool getPostIndexedAddressParts(SDNode *N, SDNode *Op,
                                     SDValue &Base,

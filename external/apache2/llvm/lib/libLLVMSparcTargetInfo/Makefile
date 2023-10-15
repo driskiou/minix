@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2011/07/05 14:15:56 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:12 joerg Exp $
 
 LIB=	LLVMSparcTargetInfo
 

@@ -17,18 +17,36 @@ Using Clang as a Compiler
    :maxdepth: 1
 
    UsersManual
+   Toolchain
    LanguageExtensions
+   ClangCommandLineReference
    AttributeReference
+   DiagnosticsReference
    CrossCompilation
+   ClangStaticAnalyzer
    ThreadSafetyAnalysis
    AddressSanitizer
    ThreadSanitizer
    MemorySanitizer
+   UndefinedBehaviorSanitizer
    DataFlowSanitizer
    LeakSanitizer
+   SanitizerCoverage
+   SanitizerStats
    SanitizerSpecialCaseList
+   ControlFlowIntegrity
+   LTOVisibility
+   SafeStack
+   ShadowCallStack
+   SourceBasedCodeCoverage
    Modules
    MSVCCompatibility
+   OpenCLSupport
+   OpenMPSupport
+   SYCLSupport
+   ThinLTO
+   APINotes
+   CommandGuide/index
    FAQ
 
 Using Clang as a Library
@@ -46,8 +64,10 @@ Using Clang as a Library
    RAVFrontendAction
    LibASTMatchersTutorial
    LibASTMatchers
+   LibASTImporter
    HowToSetupToolingForLLVM
    JSONCompilationDatabase
+   RefactoringEngine
 
 Using Clang Tools
 =================
@@ -59,6 +79,8 @@ Using Clang Tools
    ClangCheck
    ClangFormat
    ClangFormatStyleOptions
+   ClangFormattedStatus
+   ClangOffloadBundler
 
 Design Documents
 ================
@@ -68,8 +90,10 @@ Design Documents
 
    InternalsManual
    DriverInternals
-   PTHInternals
    PCHInternals
+   ItaniumMangleAbiTags
+   HardwareAssistedAddressSanitizerDesign.rst
+   ConstantInterpreter
 
 
 Indices and tables

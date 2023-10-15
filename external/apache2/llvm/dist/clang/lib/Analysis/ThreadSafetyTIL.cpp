@@ -1,31 +1,31 @@
-//===- ThreadSafetyTIL.cpp -------------------------------------*- C++ --*-===//
+//===- ThreadSafetyTIL.cpp ------------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT in the llvm repository for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "clang/Analysis/Analyses/ThreadSafetyTIL.h"
-#include "clang/Analysis/Analyses/ThreadSafetyTraverse.h"
+#include "clang/Basic/LLVM.h"
+#include "llvm/Support/Casting.h"
+#include <cassert>
+#include <cstddef>
 
-namespace clang {
-namespace threadSafety {
-namespace til {
+using namespace clang;
+using namespace threadSafety;
+using namespace til;
 
-
-StringRef getUnaryOpcodeString(TIL_UnaryOpcode Op) {
+StringRef til::getUnaryOpcodeString(TIL_UnaryOpcode Op) {
   switch (Op) {
     case UOP_Minus:    return "-";
     case UOP_BitNot:   return "~";
     case UOP_LogicNot: return "!";
   }
-  return "";
+  return {};
 }
 
-
-StringRef getBinaryOpcodeString(TIL_BinaryOpcode Op) {
+StringRef til::getBinaryOpcodeString(TIL_BinaryOpcode Op) {
   switch (Op) {
     case BOP_Mul:      return "*";
     case BOP_Div:      return "/";
@@ -41,12 +41,12 @@ StringRef getBinaryOpcodeString(TIL_BinaryOpcode Op) {
     case BOP_Neq:      return "!=";
     case BOP_Lt:       return "<";
     case BOP_Leq:      return "<=";
+    case BOP_Cmp:      return "<=>";
     case BOP_LogicAnd: return "&&";
     case BOP_LogicOr:  return "||";
   }
-  return "";
+  return {};
 }
-
 
 SExpr* Future::force() {
   Status = FS_evaluating;
@@ -55,13 +55,12 @@ SExpr* Future::force() {
   return Result;
 }
 
-
 unsigned BasicBlock::addPredecessor(BasicBlock *Pred) {
   unsigned Idx = Predecessors.size();
   Predecessors.reserveCheck(1, Arena);
   Predecessors.push_back(Pred);
-  for (SExpr *E : Args) {
-    if (Phi* Ph = dyn_cast<Phi>(E)) {
+  for (auto *E : Args) {
+    if (auto *Ph = dyn_cast<Phi>(E)) {
       Ph->values().reserveCheck(1, Arena);
       Ph->values().push_back(nullptr);
     }
@@ -69,28 +68,26 @@ unsigned BasicBlock::addPredecessor(BasicBlock *Pred) {
   return Idx;
 }
 
-
 void BasicBlock::reservePredecessors(unsigned NumPreds) {
   Predecessors.reserve(NumPreds, Arena);
-  for (SExpr *E : Args) {
-    if (Phi* Ph = dyn_cast<Phi>(E)) {
+  for (auto *E : Args) {
+    if (auto *Ph = dyn_cast<Phi>(E)) {
       Ph->values().reserve(NumPreds, Arena);
     }
   }
 }
 
-
 // If E is a variable, then trace back through any aliases or redundant
 // Phi nodes to find the canonical definition.
-const SExpr *getCanonicalVal(const SExpr *E) {
+const SExpr *til::getCanonicalVal(const SExpr *E) {
   while (true) {
-    if (auto *V = dyn_cast<Variable>(E)) {
+    if (const auto *V = dyn_cast<Variable>(E)) {
       if (V->kind() == Variable::VK_Let) {
         E = V->definition();
         continue;
       }
     }
-    if (const Phi *Ph = dyn_cast<Phi>(E)) {
+    if (const auto *Ph = dyn_cast<Phi>(E)) {
       if (Ph->status() == Phi::PH_SingleVal) {
         E = Ph->values()[0];
         continue;
@@ -101,11 +98,10 @@ const SExpr *getCanonicalVal(const SExpr *E) {
   return E;
 }
 
-
 // If E is a variable, then trace back through any aliases or redundant
 // Phi nodes to find the canonical definition.
 // The non-const version will simplify incomplete Phi nodes.
-SExpr *simplifyToCanonicalVal(SExpr *E) {
+SExpr *til::simplifyToCanonicalVal(SExpr *E) {
   while (true) {
     if (auto *V = dyn_cast<Variable>(E)) {
       if (V->kind() != Variable::VK_Let)
@@ -131,18 +127,17 @@ SExpr *simplifyToCanonicalVal(SExpr *E) {
   }
 }
 
-
 // Trace the arguments of an incomplete Phi node to see if they have the same
 // canonical definition.  If so, mark the Phi node as redundant.
 // getCanonicalVal() will recursively call simplifyIncompletePhi().
-void simplifyIncompleteArg(til::Phi *Ph) {
+void til::simplifyIncompleteArg(til::Phi *Ph) {
   assert(Ph && Ph->status() == Phi::PH_Incomplete);
 
   // eliminate infinite recursion -- assume that this node is not redundant.
   Ph->setStatus(Phi::PH_MultiVal);
 
   SExpr *E0 = simplifyToCanonicalVal(Ph->values()[0]);
-  for (unsigned i=1, n=Ph->values().size(); i<n; ++i) {
+  for (unsigned i = 1, n = Ph->values().size(); i < n; ++i) {
     SExpr *Ei = simplifyToCanonicalVal(Ph->values()[i]);
     if (Ei == Ph)
       continue;  // Recursive reference to itself.  Don't count.
@@ -153,9 +148,8 @@ void simplifyIncompleteArg(til::Phi *Ph) {
   Ph->setStatus(Phi::PH_SingleVal);
 }
 
-
 // Renumbers the arguments and instructions to have unique, sequential IDs.
-int BasicBlock::renumberInstrs(int ID) {
+unsigned BasicBlock::renumberInstrs(unsigned ID) {
   for (auto *Arg : Args)
     Arg->setID(this, ID++);
   for (auto *Instr : Instrs)
@@ -168,7 +162,8 @@ int BasicBlock::renumberInstrs(int ID) {
 // Each block will be written into the Blocks array in order, and its BlockID
 // will be set to the index in the array.  Sorting should start from the entry
 // block, and ID should be the total number of blocks.
-int BasicBlock::topologicalSort(SimpleArray<BasicBlock*>& Blocks, int ID) {
+unsigned BasicBlock::topologicalSort(SimpleArray<BasicBlock *> &Blocks,
+                                     unsigned ID) {
   if (Visited) return ID;
   Visited = true;
   for (auto *Block : successors())
@@ -189,9 +184,10 @@ int BasicBlock::topologicalSort(SimpleArray<BasicBlock*>& Blocks, int ID) {
 //
 // This sort assumes that (1) dominators have been computed, (2) there are no
 // critical edges, and (3) the entry block is reachable from the exit block
-// and no blocks are accessable via traversal of back-edges from the exit that
-// weren't accessable via forward edges from the entry.
-int BasicBlock::topologicalFinalSort(SimpleArray<BasicBlock*>& Blocks, int ID) {
+// and no blocks are accessible via traversal of back-edges from the exit that
+// weren't accessible via forward edges from the entry.
+unsigned BasicBlock::topologicalFinalSort(SimpleArray<BasicBlock *> &Blocks,
+                                          unsigned ID) {
   // Visited is assumed to have been set by the topologicalSort.  This pass
   // assumes !Visited means that we've visited this node before.
   if (!Visited) return ID;
@@ -260,14 +256,12 @@ void BasicBlock::computePostDominator() {
   PostDominatorNode.SizeOfSubTree = 1;
 }
 
-
 // Renumber instructions in all blocks
 void SCFG::renumberInstrs() {
-  int InstrID = 0;
+  unsigned InstrID = 0;
   for (auto *Block : Blocks)
     InstrID = Block->renumberInstrs(InstrID);
 }
-
 
 static inline void computeNodeSize(BasicBlock *B,
                                    BasicBlock::TopologyNode BasicBlock::*TN) {
@@ -289,18 +283,17 @@ static inline void computeNodeID(BasicBlock *B,
   }
 }
 
-
 // Normalizes a CFG.  Normalization has a few major components:
 // 1) Removing unreachable blocks.
 // 2) Computing dominators and post-dominators
 // 3) Topologically sorting the blocks into the "Blocks" array.
 void SCFG::computeNormalForm() {
   // Topologically sort the blocks starting from the entry block.
-  int NumUnreachableBlocks = Entry->topologicalSort(Blocks, Blocks.size());
+  unsigned NumUnreachableBlocks = Entry->topologicalSort(Blocks, Blocks.size());
   if (NumUnreachableBlocks > 0) {
     // If there were unreachable blocks shift everything down, and delete them.
-    for (size_t I = NumUnreachableBlocks, E = Blocks.size(); I < E; ++I) {
-      size_t NI = I - NumUnreachableBlocks;
+    for (unsigned I = NumUnreachableBlocks, E = Blocks.size(); I < E; ++I) {
+      unsigned NI = I - NumUnreachableBlocks;
       Blocks[NI] = Blocks[I];
       Blocks[NI]->BlockID = NI;
       // FIXME: clean up predecessor pointers to unreachable blocks?
@@ -313,7 +306,7 @@ void SCFG::computeNormalForm() {
     Block->computeDominator();
 
   // Once dominators have been computed, the final sort may be performed.
-  int NumBlocks = Exit->topologicalFinalSort(Blocks, 0);
+  unsigned NumBlocks = Exit->topologicalFinalSort(Blocks, 0);
   assert(static_cast<size_t>(NumBlocks) == Blocks.size());
   (void) NumBlocks;
 
@@ -337,7 +330,3 @@ void SCFG::computeNormalForm() {
     computeNodeID(Block, &BasicBlock::PostDominatorNode);
   }
 }
-
-}  // end namespace til
-}  // end namespace threadSafety
-}  // end namespace clang

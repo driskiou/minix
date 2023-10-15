@@ -1,9 +1,8 @@
 //===- ObjCARCAPElim.cpp - ObjC ARC Optimization --------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 /// \file
@@ -27,8 +26,11 @@
 #include "ObjCARC.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/ObjCARC.h"
 
 using namespace llvm;
 using namespace llvm::objcarc;
@@ -36,53 +38,20 @@ using namespace llvm::objcarc;
 #define DEBUG_TYPE "objc-arc-ap-elim"
 
 namespace {
-  /// \brief Autorelease pool elimination.
-  class ObjCARCAPElim : public ModulePass {
-    void getAnalysisUsage(AnalysisUsage &AU) const override;
-    bool runOnModule(Module &M) override;
-
-    static bool MayAutorelease(ImmutableCallSite CS, unsigned Depth = 0);
-    static bool OptimizeBB(BasicBlock *BB);
-
-  public:
-    static char ID;
-    ObjCARCAPElim() : ModulePass(ID) {
-      initializeObjCARCAPElimPass(*PassRegistry::getPassRegistry());
-    }
-  };
-}
-
-char ObjCARCAPElim::ID = 0;
-INITIALIZE_PASS(ObjCARCAPElim,
-                "objc-arc-apelim",
-                "ObjC ARC autorelease pool elimination",
-                false, false)
-
-Pass *llvm::createObjCARCAPElimPass() {
-  return new ObjCARCAPElim();
-}
-
-void ObjCARCAPElim::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesCFG();
-}
 
 /// Interprocedurally determine if calls made by the given call site can
 /// possibly produce autoreleases.
-bool ObjCARCAPElim::MayAutorelease(ImmutableCallSite CS, unsigned Depth) {
-  if (const Function *Callee = CS.getCalledFunction()) {
-    if (Callee->isDeclaration() || Callee->mayBeOverridden())
+bool MayAutorelease(const CallBase &CB, unsigned Depth = 0) {
+  if (const Function *Callee = CB.getCalledFunction()) {
+    if (!Callee->hasExactDefinition())
       return true;
-    for (Function::const_iterator I = Callee->begin(), E = Callee->end();
-         I != E; ++I) {
-      const BasicBlock *BB = I;
-      for (BasicBlock::const_iterator J = BB->begin(), F = BB->end();
-           J != F; ++J)
-        if (ImmutableCallSite JCS = ImmutableCallSite(J))
+    for (const BasicBlock &BB : *Callee) {
+      for (const Instruction &I : BB)
+        if (const CallBase *JCB = dyn_cast<CallBase>(&I))
           // This recursion depth limit is arbitrary. It's just great
           // enough to cover known interesting testcases.
-          if (Depth < 3 &&
-              !JCS.onlyReadsMemory() &&
-              MayAutorelease(JCS, Depth + 1))
+          if (Depth < 3 && !JCB->onlyReadsMemory() &&
+              MayAutorelease(*JCB, Depth + 1))
             return true;
     }
     return false;
@@ -91,32 +60,34 @@ bool ObjCARCAPElim::MayAutorelease(ImmutableCallSite CS, unsigned Depth) {
   return true;
 }
 
-bool ObjCARCAPElim::OptimizeBB(BasicBlock *BB) {
+bool OptimizeBB(BasicBlock *BB) {
   bool Changed = false;
 
   Instruction *Push = nullptr;
   for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ) {
-    Instruction *Inst = I++;
-    switch (GetBasicInstructionClass(Inst)) {
-    case IC_AutoreleasepoolPush:
+    Instruction *Inst = &*I++;
+    switch (GetBasicARCInstKind(Inst)) {
+    case ARCInstKind::AutoreleasepoolPush:
       Push = Inst;
       break;
-    case IC_AutoreleasepoolPop:
+    case ARCInstKind::AutoreleasepoolPop:
       // If this pop matches a push and nothing in between can autorelease,
       // zap the pair.
       if (Push && cast<CallInst>(Inst)->getArgOperand(0) == Push) {
         Changed = true;
-        DEBUG(dbgs() << "ObjCARCAPElim::OptimizeBB: Zapping push pop "
-                        "autorelease pair:\n"
-                        "                           Pop: " << *Inst << "\n"
-                     << "                           Push: " << *Push << "\n");
+        LLVM_DEBUG(dbgs() << "ObjCARCAPElim::OptimizeBB: Zapping push pop "
+                             "autorelease pair:\n"
+                             "                           Pop: "
+                          << *Inst << "\n"
+                          << "                           Push: " << *Push
+                          << "\n");
         Inst->eraseFromParent();
         Push->eraseFromParent();
       }
       Push = nullptr;
       break;
-    case IC_CallOrUser:
-      if (MayAutorelease(ImmutableCallSite(Inst)))
+    case ARCInstKind::CallOrUser:
+      if (MayAutorelease(cast<CallBase>(*Inst)))
         Push = nullptr;
       break;
     default:
@@ -127,14 +98,13 @@ bool ObjCARCAPElim::OptimizeBB(BasicBlock *BB) {
   return Changed;
 }
 
-bool ObjCARCAPElim::runOnModule(Module &M) {
+bool runImpl(Module &M) {
   if (!EnableARCOpts)
     return false;
 
   // If nothing in the Module uses ARC, don't do anything.
   if (!ModuleHasARC(M))
     return false;
-
   // Find the llvm.global_ctors variable, as the first step in
   // identifying the global constructors. In theory, unnecessary autorelease
   // pools could occur anywhere, but in practice it's pretty rare. Global
@@ -169,8 +139,45 @@ bool ObjCARCAPElim::runOnModule(Module &M) {
     if (std::next(F->begin()) != F->end())
       continue;
     // Ok, a single-block constructor function definition. Try to optimize it.
-    Changed |= OptimizeBB(F->begin());
+    Changed |= OptimizeBB(&F->front());
   }
 
   return Changed;
+}
+
+/// Autorelease pool elimination.
+class ObjCARCAPElim : public ModulePass {
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnModule(Module &M) override;
+
+public:
+  static char ID;
+  ObjCARCAPElim() : ModulePass(ID) {
+    initializeObjCARCAPElimPass(*PassRegistry::getPassRegistry());
+  }
+};
+} // namespace
+
+char ObjCARCAPElim::ID = 0;
+INITIALIZE_PASS(ObjCARCAPElim, "objc-arc-apelim",
+                "ObjC ARC autorelease pool elimination", false, false)
+
+Pass *llvm::createObjCARCAPElimPass() { return new ObjCARCAPElim(); }
+
+void ObjCARCAPElim::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesCFG();
+}
+
+bool ObjCARCAPElim::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+  return runImpl(M);
+}
+
+PreservedAnalyses ObjCARCAPElimPass::run(Module &M, ModuleAnalysisManager &AM) {
+  if (!runImpl(M))
+    return PreservedAnalyses::all();
+  PreservedAnalyses PA;
+  PA.preserveSet<CFGAnalyses>();
+  return PA;
 }

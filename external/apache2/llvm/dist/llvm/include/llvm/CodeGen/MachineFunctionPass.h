@@ -1,9 +1,8 @@
 //===-- MachineFunctionPass.h - Pass for MachineFunctions --------*-C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,17 +18,25 @@
 #ifndef LLVM_CODEGEN_MACHINEFUNCTIONPASS_H
 #define LLVM_CODEGEN_MACHINEFUNCTIONPASS_H
 
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/Pass.h"
 
 namespace llvm {
-
-class MachineFunction;
 
 /// MachineFunctionPass - This class adapts the FunctionPass interface to
 /// allow convenient creation of passes that operate on the MachineFunction
 /// representation. Instead of overriding runOnFunction, subclasses
 /// override runOnMachineFunction.
 class MachineFunctionPass : public FunctionPass {
+public:
+  bool doInitialization(Module&) override {
+    // Cache the properties info at module-init time so we don't have to
+    // construct them for every function.
+    RequiredProperties = getRequiredProperties();
+    SetProperties = getSetProperties();
+    ClearedProperties = getClearedProperties();
+    return false;
+  }
 protected:
   explicit MachineFunctionPass(char &ID) : FunctionPass(ID) {}
 
@@ -46,7 +53,21 @@ protected:
   ///
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
+  virtual MachineFunctionProperties getRequiredProperties() const {
+    return MachineFunctionProperties();
+  }
+  virtual MachineFunctionProperties getSetProperties() const {
+    return MachineFunctionProperties();
+  }
+  virtual MachineFunctionProperties getClearedProperties() const {
+    return MachineFunctionProperties();
+  }
+
 private:
+  MachineFunctionProperties RequiredProperties;
+  MachineFunctionProperties SetProperties;
+  MachineFunctionProperties ClearedProperties;
+
   /// createPrinterPass - Get a machine function printer pass.
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;

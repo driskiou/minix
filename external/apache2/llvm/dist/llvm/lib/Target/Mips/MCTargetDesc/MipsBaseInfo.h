@@ -1,9 +1,8 @@
 //===-- MipsBaseInfo.h - Top level definitions for MIPS MC ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,6 +16,7 @@
 #include "MipsFixupKinds.h"
 #include "MipsMCTargetDesc.h"
 #include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -33,9 +33,8 @@ namespace MipsII {
 
     MO_NO_FLAG,
 
-    /// MO_GOT16 - Represents the offset into the global offset table at which
+    /// MO_GOT - Represents the offset into the global offset table at which
     /// the address the relocation entry symbol resides during execution.
-    MO_GOT16,
     MO_GOT,
 
     /// MO_GOT_CALL - Represents the offset into the global offset table at
@@ -90,7 +89,10 @@ namespace MipsII {
     MO_GOT_HI16,
     MO_GOT_LO16,
     MO_CALL_HI16,
-    MO_CALL_LO16
+    MO_CALL_LO16,
+
+    /// Helper operand used to generate R_MIPS_JALR
+    MO_JALR
   };
 
   enum {
@@ -117,7 +119,20 @@ namespace MipsII {
     /// FrmOther - This form is for instructions that have no specific format.
     FrmOther = 6,
 
-    FormMask = 15
+    FormMask = 15,
+    /// IsCTI - Instruction is a Control Transfer Instruction.
+    IsCTI = 1 << 4,
+    /// HasForbiddenSlot - Instruction has a forbidden slot.
+    HasForbiddenSlot = 1 << 5,
+    /// HasFCCRegOperand - Instruction uses an $fcc<x> register.
+    HasFCCRegOperand = 1 << 6
+
+  };
+
+  enum OperandType : unsigned {
+    OPERAND_FIRST_MIPS_MEM_IMM = MCOI::OPERAND_FIRST_TARGET,
+    OPERAND_MEM_SIMM9 = OPERAND_FIRST_MIPS_MEM_IMM,
+    OPERAND_LAST_MIPS_MEM_IMM = OPERAND_MEM_SIMM9
   };
 }
 }

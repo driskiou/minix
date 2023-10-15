@@ -1,9 +1,8 @@
-//===-- llvm/CodeGen/DwarfStringPool.h - Dwarf Debug Framework -*- C++ -*--===//
+//===- llvm/CodeGen/DwarfStringPool.h - Dwarf Debug Framework ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -11,39 +10,57 @@
 #define LLVM_LIB_CODEGEN_ASMPRINTER_DWARFSTRINGPOOL_H
 
 #include "llvm/ADT/StringMap.h"
-#include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/DwarfStringPoolEntry.h"
 #include "llvm/Support/Allocator.h"
-#include <utility>
 
 namespace llvm {
 
-class MCSymbol;
+class AsmPrinter;
 class MCSection;
-class StringRef;
+class MCSymbol;
 
 // Collection of strings for this unit and assorted symbols.
 // A String->Symbol mapping of strings used by indirect
 // references.
 class DwarfStringPool {
-  StringMap<std::pair<MCSymbol *, unsigned>, BumpPtrAllocator &> Pool;
+  using EntryTy = DwarfStringPoolEntry;
+
+  StringMap<EntryTy, BumpPtrAllocator &> Pool;
   StringRef Prefix;
+  uint64_t NumBytes = 0;
+  unsigned NumIndexedStrings = 0;
+  bool ShouldCreateSymbols;
+
+  StringMapEntry<EntryTy> &getEntryImpl(AsmPrinter &Asm, StringRef Str);
 
 public:
-  DwarfStringPool(BumpPtrAllocator &A, AsmPrinter &Asm, StringRef Prefix)
-      : Pool(A), Prefix(Prefix) {}
+  using EntryRef = DwarfStringPoolEntryRef;
 
-  void emit(AsmPrinter &Asm, const MCSection *StrSection,
-            const MCSection *OffsetSection = nullptr);
+  DwarfStringPool(BumpPtrAllocator &A, AsmPrinter &Asm, StringRef Prefix);
 
-  /// \brief Returns an entry into the string pool with the given
-  /// string text.
-  MCSymbol *getSymbol(AsmPrinter &Asm, StringRef Str);
+  void emitStringOffsetsTableHeader(AsmPrinter &Asm, MCSection *OffsetSection,
+                                    MCSymbol *StartSym);
 
-  /// \brief Returns the index into the string pool with the given
-  /// string text.
-  unsigned getIndex(AsmPrinter &Asm, StringRef Str);
+  void emit(AsmPrinter &Asm, MCSection *StrSection,
+            MCSection *OffsetSection = nullptr,
+            bool UseRelativeOffsets = false);
 
   bool empty() const { return Pool.empty(); }
+
+  unsigned size() const { return Pool.size(); }
+
+  unsigned getNumIndexedStrings() const { return NumIndexedStrings; }
+
+  /// Get a reference to an entry in the string pool.
+  EntryRef getEntry(AsmPrinter &Asm, StringRef Str);
+
+  /// Same as getEntry, except that you can use EntryRef::getIndex to obtain a
+  /// unique ID of this entry (e.g., for use in indexed forms like
+  /// DW_FORM_strx).
+  EntryRef getIndexedEntry(AsmPrinter &Asm, StringRef Str);
 };
-}
-#endif
+
+} // end namespace llvm
+
+#endif // LLVM_LIB_CODEGEN_ASMPRINTER_DWARFSTRINGPOOL_H

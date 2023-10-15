@@ -1,9 +1,8 @@
 //=- ARMScheduleA8.td - ARM Cortex-A8 Scheduling Definitions -*- tablegen -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -1065,11 +1064,11 @@ def CortexA8Itineraries : ProcessorItineraries<
 // Cortex-A8 machine model for scheduling and other instruction cost heuristics.
 def CortexA8Model : SchedMachineModel {
   let IssueWidth = 2; // 2 micro-ops are dispatched per cycle.
-  let MinLatency = -1; // OperandCycles are interpreted as MinLatency.
   let LoadLatency = 2; // Optimistic load latency assuming bypass.
                        // This is overriden by OperandCycles if the
                        // Itineraries are queried instead.
   let MispredictPenalty = 13; // Based on estimate of pipeline depth.
+  let CompleteModel = 0;
 
   let Itineraries = CortexA8Itineraries;
 }

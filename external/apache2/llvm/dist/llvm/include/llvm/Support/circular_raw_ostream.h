@@ -1,9 +1,8 @@
 //===-- llvm/Support/circular_raw_ostream.h - Buffered streams --*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,8 +16,7 @@
 
 #include "llvm/Support/raw_ostream.h"
 
-namespace llvm 
-{
+namespace llvm {
   /// circular_raw_ostream - A raw_ostream which *can* save its data
   /// to a circular buffer, or can pass it through directly to an
   /// underlying stream if specified with a buffer of zero.
@@ -29,12 +27,12 @@ namespace llvm
     /// stream and is responsible for cleanup, memory management
     /// issues, etc.
     ///
-    static const bool TAKE_OWNERSHIP = true;
+    static constexpr bool TAKE_OWNERSHIP = true;
 
     /// REFERENCE_ONLY - Tell this stream it should not manage the
     /// held stream.
     ///
-    static const bool REFERENCE_ONLY = false;
+    static constexpr bool REFERENCE_ONLY = false;
 
   private:
     /// TheStream - The real stream we output to. We set it to be
@@ -107,34 +105,25 @@ namespace llvm
     /// management of it, etc.
     ///
     circular_raw_ostream(raw_ostream &Stream, const char *Header,
-                         size_t BuffSize = 0, bool Owns = REFERENCE_ONLY) 
-        : raw_ostream(/*unbuffered*/true),
-            TheStream(nullptr),
-            OwnsStream(Owns),
-            BufferSize(BuffSize),
-            BufferArray(nullptr),
-            Filled(false),
-            Banner(Header) {
+                         size_t BuffSize = 0, bool Owns = REFERENCE_ONLY)
+        : raw_ostream(/*unbuffered*/ true), TheStream(nullptr),
+          OwnsStream(Owns), BufferSize(BuffSize), BufferArray(nullptr),
+          Filled(false), Banner(Header) {
       if (BufferSize != 0)
         BufferArray = new char[BufferSize];
       Cur = BufferArray;
       setStream(Stream, Owns);
     }
-    explicit circular_raw_ostream()
-        : raw_ostream(/*unbuffered*/true),
-            TheStream(nullptr),
-            OwnsStream(REFERENCE_ONLY),
-            BufferArray(nullptr),
-            Filled(false),
-            Banner("") {
-      Cur = BufferArray;
-    }
 
-    ~circular_raw_ostream() {
+    ~circular_raw_ostream() override {
       flush();
       flushBufferWithBanner();
       releaseStream();
       delete[] BufferArray;
+    }
+
+    bool is_displayed() const override {
+      return TheStream->is_displayed();
     }
 
     /// setStream - Tell the circular_raw_ostream to output a
@@ -166,6 +155,5 @@ namespace llvm
     }
   };
 } // end llvm namespace
-
 
 #endif

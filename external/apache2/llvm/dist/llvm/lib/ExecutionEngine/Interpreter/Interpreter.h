@@ -1,9 +1,8 @@
 //===-- Interpreter.h ------------------------------------------*- C++ -*--===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,7 +15,6 @@
 
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstVisitor.h"
@@ -26,7 +24,6 @@
 namespace llvm {
 
 class IntrinsicLowering;
-struct FunctionInfo;
 template<typename T> class generic_gep_type_iterator;
 class ConstantExpr;
 typedef generic_gep_type_iterator<User::const_op_iterator> gep_type_iterator;
@@ -42,12 +39,9 @@ class AllocaHolder {
 public:
   AllocaHolder() {}
 
-  // Make this type move-only. Define explicit move special members for MSVC.
-  AllocaHolder(AllocaHolder &&RHS) : Allocations(std::move(RHS.Allocations)) {}
-  AllocaHolder &operator=(AllocaHolder &&RHS) {
-    Allocations = std::move(RHS.Allocations);
-    return *this;
-  }
+  // Make this type move-only.
+  AllocaHolder(AllocaHolder &&) = default;
+  AllocaHolder &operator=(AllocaHolder &&RHS) = default;
 
   ~AllocaHolder() {
     for (void *Allocation : Allocations)
@@ -66,36 +60,19 @@ struct ExecutionContext {
   Function             *CurFunction;// The currently executing function
   BasicBlock           *CurBB;      // The currently executing BB
   BasicBlock::iterator  CurInst;    // The next instruction to execute
-  CallSite             Caller;     // Holds the call that called subframes.
-                                   // NULL if main func or debugger invoked fn
+  CallBase             *Caller;     // Holds the call that called subframes.
+                                    // NULL if main func or debugger invoked fn
   std::map<Value *, GenericValue> Values; // LLVM values used in this invocation
   std::vector<GenericValue>  VarArgs; // Values passed through an ellipsis
   AllocaHolder Allocas;            // Track memory allocated by alloca
 
   ExecutionContext() : CurFunction(nullptr), CurBB(nullptr), CurInst(nullptr) {}
-
-  ExecutionContext(ExecutionContext &&O)
-      : CurFunction(O.CurFunction), CurBB(O.CurBB), CurInst(O.CurInst),
-        Caller(O.Caller), Values(std::move(O.Values)),
-        VarArgs(std::move(O.VarArgs)), Allocas(std::move(O.Allocas)) {}
-
-  ExecutionContext &operator=(ExecutionContext &&O) {
-    CurFunction = O.CurFunction;
-    CurBB = O.CurBB;
-    CurInst = O.CurInst;
-    Caller = O.Caller;
-    Values = std::move(O.Values);
-    VarArgs = std::move(O.VarArgs);
-    Allocas = std::move(O.Allocas);
-    return *this;
-  }
 };
 
 // Interpreter - This class represents the entirety of the interpreter.
 //
 class Interpreter : public ExecutionEngine, public InstVisitor<Interpreter> {
   GenericValue ExitValue;          // The return value of the called function
-  DataLayout TD;
   IntrinsicLowering *IL;
 
   // The runtime stack of executing code.  The top of the stack is the current
@@ -108,7 +85,7 @@ class Interpreter : public ExecutionEngine, public InstVisitor<Interpreter> {
 
 public:
   explicit Interpreter(std::unique_ptr<Module> M);
-  ~Interpreter();
+  ~Interpreter() override;
 
   /// runAtExitHandlers - Run any functions registered by the program's calls to
   /// atexit(3), which we intercept and store in AtExitHandlers.
@@ -127,7 +104,7 @@ public:
   /// run - Start execution with the specified function and arguments.
   ///
   GenericValue runFunction(Function *F,
-                           const std::vector<GenericValue> &ArgValues) override;
+                           ArrayRef<GenericValue> ArgValues) override;
 
   void *getPointerToNamedFunction(StringRef Name,
                                   bool AbortOnFailure = true) override {
@@ -137,7 +114,7 @@ public:
 
   // Methods used to execute code:
   // Place a call on the stack
-  void callFunction(Function *F, const std::vector<GenericValue> &ArgVals);
+  void callFunction(Function *F, ArrayRef<GenericValue> ArgVals);
   void run();                // Execute instructions until nothing left to do
 
   // Opcode Implementations
@@ -146,6 +123,7 @@ public:
   void visitSwitchInst(SwitchInst &I);
   void visitIndirectBrInst(IndirectBrInst &I);
 
+  void visitUnaryOperator(UnaryOperator &I);
   void visitBinaryOperator(BinaryOperator &I);
   void visitICmpInst(ICmpInst &I);
   void visitFCmpInst(FCmpInst &I);
@@ -153,8 +131,8 @@ public:
   void visitLoadInst(LoadInst &I);
   void visitStoreInst(StoreInst &I);
   void visitGetElementPtrInst(GetElementPtrInst &I);
-  void visitPHINode(PHINode &PN) { 
-    llvm_unreachable("PHI nodes already handled!"); 
+  void visitPHINode(PHINode &PN) {
+    llvm_unreachable("PHI nodes already handled!");
   }
   void visitTruncInst(TruncInst &I);
   void visitZExtInst(ZExtInst &I);
@@ -170,10 +148,11 @@ public:
   void visitBitCastInst(BitCastInst &I);
   void visitSelectInst(SelectInst &I);
 
-
-  void visitCallSite(CallSite CS);
-  void visitCallInst(CallInst &I) { visitCallSite (CallSite (&I)); }
-  void visitInvokeInst(InvokeInst &I) { visitCallSite (CallSite (&I)); }
+  void visitVAStartInst(VAStartInst &I);
+  void visitVAEndInst(VAEndInst &I);
+  void visitVACopyInst(VACopyInst &I);
+  void visitIntrinsicInst(IntrinsicInst &I);
+  void visitCallBase(CallBase &I);
   void visitUnreachableInst(UnreachableInst &I);
 
   void visitShl(BinaryOperator &I);
@@ -194,7 +173,7 @@ public:
   }
 
   GenericValue callExternalFunction(Function *F,
-                                    const std::vector<GenericValue> &ArgVals);
+                                    ArrayRef<GenericValue> ArgVals);
   void exitCalled(GenericValue GV);
 
   void addAtExitHandler(Function *F) {
@@ -245,7 +224,7 @@ private:  // Helper functions
                                    ExecutionContext &SF);
   GenericValue executeBitCastInst(Value *SrcVal, Type *DstTy,
                                   ExecutionContext &SF);
-  GenericValue executeCastOperation(Instruction::CastOps opcode, Value *SrcVal, 
+  GenericValue executeCastOperation(Instruction::CastOps opcode, Value *SrcVal,
                                     Type *Ty, ExecutionContext &SF);
   void popStackAndReturnValueToCaller(Type *RetTy, GenericValue Result);
 

@@ -1,9 +1,8 @@
-//===--- DeltaAlgorithm.h - A Set Minimization Algorithm -------*- C++ -*--===//
+//===- DeltaAlgorithm.h - A Set Minimization Algorithm ---------*- C++ -*--===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_ADT_DELTAALGORITHM_H
@@ -35,10 +34,10 @@ namespace llvm {
 /// predicate.
 class DeltaAlgorithm {
 public:
-  typedef unsigned change_ty;
+  using change_ty = unsigned;
   // FIXME: Use a decent data structure.
-  typedef std::set<change_ty> changeset_ty;
-  typedef std::vector<changeset_ty> changesetlist_ty;
+  using changeset_ty = std::set<change_ty>;
+  using changesetlist_ty = std::vector<changeset_ty>;
 
 private:
   /// Cache of failed test results. Successful test results are never cached
@@ -55,7 +54,7 @@ private:
   /// Split - Partition a set of changes \p S into one or two subsets.
   void Split(const changeset_ty &S, changesetlist_ty &Res);
 
-  /// Delta - Minimize a set of \p Changes which has been partioned into
+  /// Delta - Minimize a set of \p Changes which has been partitioned into
   /// smaller sets, by attempting to remove individual subsets.
   changeset_ty Delta(const changeset_ty &Changes,
                      const changesetlist_ty &Sets);
@@ -68,7 +67,7 @@ private:
   /// \return - True on success.
   bool Search(const changeset_ty &Changes, const changesetlist_ty &Sets,
               changeset_ty &Res);
-              
+
 protected:
   /// UpdatedSearchState - Callback used when the search state changes.
   virtual void UpdatedSearchState(const changeset_ty &Changes,
@@ -76,6 +75,8 @@ protected:
 
   /// ExecuteOneTest - Execute a single test predicate on the change set \p S.
   virtual bool ExecuteOneTest(const changeset_ty &S) = 0;
+
+  DeltaAlgorithm& operator=(const DeltaAlgorithm&) = default;
 
 public:
   virtual ~DeltaAlgorithm();
@@ -88,4 +89,4 @@ public:
 
 } // end namespace llvm
 
-#endif
+#endif // LLVM_ADT_DELTAALGORITHM_H

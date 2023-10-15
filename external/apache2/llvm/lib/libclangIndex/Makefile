@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.5 2013/11/28 14:19:59 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:16 joerg Exp $
 
 LIB=	clangIndex
 
@@ -7,6 +7,13 @@ LIB=	clangIndex
 .PATH: ${CLANG_SRCDIR}/lib/Index
 
 SRCS+=	CommentToXML.cpp \
+	FileIndexRecord.cpp \
+	IndexBody.cpp \
+	IndexDecl.cpp \
+	IndexingAction.cpp \
+	IndexingContext.cpp \
+	IndexSymbol.cpp \
+	IndexTypeSourceInfo.cpp \
 	USRGeneration.cpp
 
 .if defined(HOSTLIB)

@@ -1,9 +1,8 @@
 /*===-- jitprofiling.c - JIT (Just-In-Time) Profiling API----------*- C -*-===*
  *
- *                     The LLVM Compiler Infrastructure
- *
- * This file is distributed under the University of Illinois Open Source
- * License. See LICENSE.TXT for details.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===----------------------------------------------------------------------===*
  *
@@ -22,10 +21,10 @@
 #include <windows.h>
 #pragma optimize("", off)
 #else  /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-#include <pthread.h>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <stdint.h>
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-#include <malloc.h>
 #include <stdlib.h>
 
 #include "jitprofiling.h"
@@ -371,7 +370,7 @@ static int loadiJIT_Funcs()
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
     FUNC_NotifyEvent = (TPNotify)GetProcAddress(m_libHandle, "NotifyEvent");
 #else  /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-    FUNC_NotifyEvent = (TPNotify)dlsym(m_libHandle, "NotifyEvent");
+    FUNC_NotifyEvent = (TPNotify)(intptr_t)dlsym(m_libHandle, "NotifyEvent");
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
     if (!FUNC_NotifyEvent) 
     {
@@ -382,7 +381,7 @@ static int loadiJIT_Funcs()
 #if ITT_PLATFORM==ITT_PLATFORM_WIN
     FUNC_Initialize = (TPInitialize)GetProcAddress(m_libHandle, "Initialize");
 #else  /* ITT_PLATFORM==ITT_PLATFORM_WIN */
-    FUNC_Initialize = (TPInitialize)dlsym(m_libHandle, "Initialize");
+    FUNC_Initialize = (TPInitialize)(intptr_t)dlsym(m_libHandle, "Initialize");
 #endif /* ITT_PLATFORM==ITT_PLATFORM_WIN */
     if (!FUNC_Initialize) 
     {

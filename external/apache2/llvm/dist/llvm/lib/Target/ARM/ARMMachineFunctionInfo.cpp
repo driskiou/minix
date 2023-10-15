@@ -1,24 +1,20 @@
-//===-- ARMMachineFuctionInfo.cpp - ARM machine function info -------------===//
+//===-- ARMMachineFunctionInfo.cpp - ARM machine function info ------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "ARMMachineFunctionInfo.h"
+#include "ARMSubtarget.h"
 
 using namespace llvm;
 
-void ARMFunctionInfo::anchor() { }
+void ARMFunctionInfo::anchor() {}
 
 ARMFunctionInfo::ARMFunctionInfo(MachineFunction &MF)
-    : isThumb(MF.getTarget().getSubtarget<ARMSubtarget>().isThumb()),
-      hasThumb2(MF.getTarget().getSubtarget<ARMSubtarget>().hasThumb2()),
-      StByValParamsPadding(0), ArgRegsSaveSize(0), HasStackFrame(false),
-      RestoreSPFromFP(false), LRSpilledForFarJump(false),
-      FramePtrSpillOffset(0), GPRCS1Offset(0), GPRCS2Offset(0), DPRCSOffset(0),
-      GPRCS1Size(0), GPRCS2Size(0), DPRCSSize(0), JumpTableUId(0),
-      PICLabelUId(0), VarArgsFrameIndex(0), HasITBlocks(false),
-      GlobalBaseReg(0) {}
+    : isThumb(MF.getSubtarget<ARMSubtarget>().isThumb()),
+      hasThumb2(MF.getSubtarget<ARMSubtarget>().hasThumb2()),
+      IsCmseNSEntry(MF.getFunction().hasFnAttribute("cmse_nonsecure_entry")),
+      IsCmseNSCall(MF.getFunction().hasFnAttribute("cmse_nonsecure_call")) {}

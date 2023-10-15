@@ -1,17 +1,15 @@
 //===--- ARMEHABIPrinter.h - ARM EHABI Unwind Information Printer ----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_TOOLS_LLVM_READOBJ_ARMEHABIPRINTER_H
 #define LLVM_TOOLS_LLVM_READOBJ_ARMEHABIPRINTER_H
 
-#include "Error.h"
-#include "StreamWriter.h"
+#include "llvm-readobj.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFTypes.h"
@@ -19,6 +17,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/type_traits.h"
 
 namespace llvm {
@@ -26,7 +25,7 @@ namespace ARM {
 namespace EHABI {
 
 class OpcodeDecoder {
-  StreamWriter &SW;
+  ScopedPrinter &SW;
   raw_ostream &OS;
 
   struct RingEntry {
@@ -34,7 +33,7 @@ class OpcodeDecoder {
     uint8_t Value;
     void (OpcodeDecoder::*Routine)(const uint8_t *Opcodes, unsigned &OI);
   };
-  static const RingEntry Ring[];
+  static ArrayRef<RingEntry> ring();
 
   void Decode_00xxxxxx(const uint8_t *Opcodes, unsigned &OI);
   void Decode_01xxxxxx(const uint8_t *Opcodes, unsigned &OI);
@@ -63,47 +62,52 @@ class OpcodeDecoder {
   void PrintRegisters(uint32_t Mask, StringRef Prefix);
 
 public:
-  OpcodeDecoder(StreamWriter &SW) : SW(SW), OS(SW.getOStream()) {}
+  OpcodeDecoder(ScopedPrinter &SW) : SW(SW), OS(SW.getOStream()) {}
   void Decode(const uint8_t *Opcodes, off_t Offset, size_t Length);
 };
 
-const OpcodeDecoder::RingEntry OpcodeDecoder::Ring[] = {
-  { 0xc0, 0x00, &OpcodeDecoder::Decode_00xxxxxx },
-  { 0xc0, 0x40, &OpcodeDecoder::Decode_01xxxxxx },
-  { 0xf0, 0x80, &OpcodeDecoder::Decode_1000iiii_iiiiiiii },
-  { 0xff, 0x9d, &OpcodeDecoder::Decode_10011101 },
-  { 0xff, 0x9f, &OpcodeDecoder::Decode_10011111 },
-  { 0xf0, 0x90, &OpcodeDecoder::Decode_1001nnnn },
-  { 0xf8, 0xa0, &OpcodeDecoder::Decode_10100nnn },
-  { 0xf8, 0xa8, &OpcodeDecoder::Decode_10101nnn },
-  { 0xff, 0xb0, &OpcodeDecoder::Decode_10110000 },
-  { 0xff, 0xb1, &OpcodeDecoder::Decode_10110001_0000iiii },
-  { 0xff, 0xb2, &OpcodeDecoder::Decode_10110010_uleb128 },
-  { 0xff, 0xb3, &OpcodeDecoder::Decode_10110011_sssscccc },
-  { 0xfc, 0xb4, &OpcodeDecoder::Decode_101101nn },
-  { 0xf8, 0xb8, &OpcodeDecoder::Decode_10111nnn },
-  { 0xff, 0xc6, &OpcodeDecoder::Decode_11000110_sssscccc },
-  { 0xff, 0xc7, &OpcodeDecoder::Decode_11000111_0000iiii },
-  { 0xff, 0xc8, &OpcodeDecoder::Decode_11001000_sssscccc },
-  { 0xff, 0xc9, &OpcodeDecoder::Decode_11001001_sssscccc },
-  { 0xc8, 0xc8, &OpcodeDecoder::Decode_11001yyy },
-  { 0xf8, 0xc0, &OpcodeDecoder::Decode_11000nnn },
-  { 0xf8, 0xd0, &OpcodeDecoder::Decode_11010nnn },
-  { 0xc0, 0xc0, &OpcodeDecoder::Decode_11xxxyyy },
-};
+inline ArrayRef<OpcodeDecoder::RingEntry> OpcodeDecoder::ring() {
+  static const OpcodeDecoder::RingEntry Ring[] = {
+      {0xc0, 0x00, &OpcodeDecoder::Decode_00xxxxxx},
+      {0xc0, 0x40, &OpcodeDecoder::Decode_01xxxxxx},
+      {0xf0, 0x80, &OpcodeDecoder::Decode_1000iiii_iiiiiiii},
+      {0xff, 0x9d, &OpcodeDecoder::Decode_10011101},
+      {0xff, 0x9f, &OpcodeDecoder::Decode_10011111},
+      {0xf0, 0x90, &OpcodeDecoder::Decode_1001nnnn},
+      {0xf8, 0xa0, &OpcodeDecoder::Decode_10100nnn},
+      {0xf8, 0xa8, &OpcodeDecoder::Decode_10101nnn},
+      {0xff, 0xb0, &OpcodeDecoder::Decode_10110000},
+      {0xff, 0xb1, &OpcodeDecoder::Decode_10110001_0000iiii},
+      {0xff, 0xb2, &OpcodeDecoder::Decode_10110010_uleb128},
+      {0xff, 0xb3, &OpcodeDecoder::Decode_10110011_sssscccc},
+      {0xfc, 0xb4, &OpcodeDecoder::Decode_101101nn},
+      {0xf8, 0xb8, &OpcodeDecoder::Decode_10111nnn},
+      {0xff, 0xc6, &OpcodeDecoder::Decode_11000110_sssscccc},
+      {0xff, 0xc7, &OpcodeDecoder::Decode_11000111_0000iiii},
+      {0xff, 0xc8, &OpcodeDecoder::Decode_11001000_sssscccc},
+      {0xff, 0xc9, &OpcodeDecoder::Decode_11001001_sssscccc},
+      {0xc8, 0xc8, &OpcodeDecoder::Decode_11001yyy},
+      {0xf8, 0xc0, &OpcodeDecoder::Decode_11000nnn},
+      {0xf8, 0xd0, &OpcodeDecoder::Decode_11010nnn},
+      {0xc0, 0xc0, &OpcodeDecoder::Decode_11xxxyyy},
+  };
+  return makeArrayRef(Ring);
+}
 
-void OpcodeDecoder::Decode_00xxxxxx(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_00xxxxxx(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; vsp = vsp + %u\n", Opcode,
                            ((Opcode & 0x3f) << 2) + 4);
 }
-void OpcodeDecoder::Decode_01xxxxxx(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_01xxxxxx(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; vsp = vsp - %u\n", Opcode,
                            ((Opcode & 0x3f) << 2) + 4);
 }
-void OpcodeDecoder::Decode_1000iiii_iiiiiiii(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_1000iiii_iiiiiiii(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
 
@@ -115,36 +119,42 @@ void OpcodeDecoder::Decode_1000iiii_iiiiiiii(const uint8_t *Opcodes,
     PrintGPR(GPRMask);
   OS << '\n';
 }
-void OpcodeDecoder::Decode_10011101(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10011101(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; reserved (ARM MOVrr)\n", Opcode);
 }
-void OpcodeDecoder::Decode_10011111(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10011111(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; reserved (WiMMX MOVrr)\n", Opcode);
 }
-void OpcodeDecoder::Decode_1001nnnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_1001nnnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; vsp = r%u\n", Opcode, (Opcode & 0x0f));
 }
-void OpcodeDecoder::Decode_10100nnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10100nnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; pop ", Opcode);
   PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4));
   OS << '\n';
 }
-void OpcodeDecoder::Decode_10101nnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10101nnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; pop ", Opcode);
   PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4) | (1 << 14));
   OS << '\n';
 }
-void OpcodeDecoder::Decode_10110000(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10110000(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; finish\n", Opcode);
 }
-void OpcodeDecoder::Decode_10110001_0000iiii(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_10110001_0000iiii(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
 
@@ -155,8 +165,8 @@ void OpcodeDecoder::Decode_10110001_0000iiii(const uint8_t *Opcodes,
     PrintGPR((Opcode1 & 0x0f));
   OS << '\n';
 }
-void OpcodeDecoder::Decode_10110010_uleb128(const uint8_t *Opcodes,
-                                            unsigned &OI) {
+inline void OpcodeDecoder::Decode_10110010_uleb128(const uint8_t *Opcodes,
+                                                   unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X ", Opcode);
 
@@ -172,8 +182,8 @@ void OpcodeDecoder::Decode_10110010_uleb128(const uint8_t *Opcodes,
 
   OS << format("; vsp = vsp + %" PRIu64 "\n", 0x204 + (Value << 2));
 }
-void OpcodeDecoder::Decode_10110011_sssscccc(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_10110011_sssscccc(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
@@ -182,18 +192,20 @@ void OpcodeDecoder::Decode_10110011_sssscccc(const uint8_t *Opcodes,
   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "d");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_101101nn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_101101nn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; spare\n", Opcode);
 }
-void OpcodeDecoder::Decode_10111nnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_10111nnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; pop ", Opcode);
   PrintRegisters((((1 << ((Opcode & 0x07) + 1)) - 1) << 8), "d");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11000110_sssscccc(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_11000110_sssscccc(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
@@ -202,8 +214,8 @@ void OpcodeDecoder::Decode_11000110_sssscccc(const uint8_t *Opcodes,
   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "wR");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11000111_0000iiii(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_11000111_0000iiii(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
   SW.startLine()
@@ -213,8 +225,8 @@ void OpcodeDecoder::Decode_11000111_0000iiii(const uint8_t *Opcodes,
       PrintRegisters(Opcode1 & 0x0f, "wCGR");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11001000_sssscccc(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_11001000_sssscccc(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
@@ -223,8 +235,8 @@ void OpcodeDecoder::Decode_11001000_sssscccc(const uint8_t *Opcodes,
   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "d");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11001001_sssscccc(const uint8_t *Opcodes,
-                                             unsigned &OI) {
+inline void OpcodeDecoder::Decode_11001001_sssscccc(const uint8_t *Opcodes,
+                                                    unsigned &OI) {
   uint8_t Opcode0 = Opcodes[OI++ ^ 3];
   uint8_t Opcode1 = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
@@ -233,28 +245,32 @@ void OpcodeDecoder::Decode_11001001_sssscccc(const uint8_t *Opcodes,
   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "d");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11001yyy(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_11001yyy(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; spare\n", Opcode);
 }
-void OpcodeDecoder::Decode_11000nnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_11000nnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; pop ", Opcode);
   PrintRegisters((((1 << ((Opcode & 0x07) + 1)) - 1) << 10), "wR");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11010nnn(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_11010nnn(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; pop ", Opcode);
   PrintRegisters((((1 << ((Opcode & 0x07) + 1)) - 1) << 8), "d");
   OS << '\n';
 }
-void OpcodeDecoder::Decode_11xxxyyy(const uint8_t *Opcodes, unsigned &OI) {
+inline void OpcodeDecoder::Decode_11xxxyyy(const uint8_t *Opcodes,
+                                           unsigned &OI) {
   uint8_t Opcode = Opcodes[OI++ ^ 3];
   SW.startLine() << format("0x%02X      ; spare\n", Opcode);
 }
 
-void OpcodeDecoder::PrintGPR(uint16_t GPRMask) {
+inline void OpcodeDecoder::PrintGPR(uint16_t GPRMask) {
   static const char *GPRRegisterNames[16] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10",
     "fp", "ip", "sp", "lr", "pc"
@@ -273,7 +289,7 @@ void OpcodeDecoder::PrintGPR(uint16_t GPRMask) {
   OS << '}';
 }
 
-void OpcodeDecoder::PrintRegisters(uint32_t VFPMask, StringRef Prefix) {
+inline void OpcodeDecoder::PrintRegisters(uint32_t VFPMask, StringRef Prefix) {
   OS << '{';
   bool Comma = false;
   for (unsigned RI = 0, RE = 32; RI < RE; ++RI) {
@@ -287,13 +303,13 @@ void OpcodeDecoder::PrintRegisters(uint32_t VFPMask, StringRef Prefix) {
   OS << '}';
 }
 
-void OpcodeDecoder::Decode(const uint8_t *Opcodes, off_t Offset, size_t Length) {
+inline void OpcodeDecoder::Decode(const uint8_t *Opcodes, off_t Offset,
+                                  size_t Length) {
   for (unsigned OCI = Offset; OCI < Length + Offset; ) {
     bool Decoded = false;
-    for (unsigned REI = 0, REE = array_lengthof(Ring);
-         REI != REE && !Decoded; ++REI) {
-      if ((Opcodes[OCI ^ 3] & Ring[REI].Mask) == Ring[REI].Value) {
-        (this->*Ring[REI].Routine)(Opcodes, OCI);
+    for (const auto &RE : ring()) {
+      if ((Opcodes[OCI ^ 3] & RE.Mask) == RE.Value) {
+        (this->*RE.Routine)(Opcodes, OCI);
         Decoded = true;
         break;
       }
@@ -305,37 +321,40 @@ void OpcodeDecoder::Decode(const uint8_t *Opcodes, off_t Offset, size_t Length) 
 
 template <typename ET>
 class PrinterContext {
-  StreamWriter &SW;
-  const object::ELFFile<ET> *ELF;
+  typedef typename ET::Sym Elf_Sym;
+  typedef typename ET::Shdr Elf_Shdr;
+  typedef typename ET::Rel Elf_Rel;
+  typedef typename ET::Word Elf_Word;
 
-  typedef typename object::ELFFile<ET>::Elf_Sym Elf_Sym;
-  typedef typename object::ELFFile<ET>::Elf_Shdr Elf_Shdr;
-
-  typedef typename object::ELFFile<ET>::Elf_Rel_Iter Elf_Rel_iterator;
-  typedef typename object::ELFFile<ET>::Elf_Sym_Iter Elf_Sym_iterator;
-  typedef typename object::ELFFile<ET>::Elf_Shdr_Iter Elf_Shdr_iterator;
+  ScopedPrinter &SW;
+  const object::ELFFile<ET> &ELF;
+  StringRef FileName;
+  const Elf_Shdr *Symtab;
+  ArrayRef<Elf_Word> ShndxTable;
 
   static const size_t IndexTableEntrySize;
 
   static uint64_t PREL31(uint32_t Address, uint32_t Place) {
     uint64_t Location = Address & 0x7fffffff;
-    if (Location & 0x04000000)
+    if (Location & 0x40000000)
       Location |= (uint64_t) ~0x7fffffff;
     return Location + Place;
   }
 
-  ErrorOr<StringRef> FunctionAtAddress(unsigned Section, uint64_t Address) const;
+  ErrorOr<StringRef> FunctionAtAddress(uint64_t Address,
+                                       Optional<unsigned> SectionIndex) const;
   const Elf_Shdr *FindExceptionTable(unsigned IndexTableIndex,
                                      off_t IndexTableOffset) const;
 
   void PrintIndexTable(unsigned SectionIndex, const Elf_Shdr *IT) const;
-  void PrintExceptionTable(const Elf_Shdr *IT, const Elf_Shdr *EHT,
+  void PrintExceptionTable(const Elf_Shdr &EHT,
                            uint64_t TableEntryOffset) const;
   void PrintOpcodes(const uint8_t *Entry, size_t Length, off_t Offset) const;
 
 public:
-  PrinterContext(StreamWriter &Writer, const object::ELFFile<ET> *File)
-    : SW(Writer), ELF(File) {}
+  PrinterContext(ScopedPrinter &SW, const object::ELFFile<ET> &ELF,
+                 StringRef FileName, const Elf_Shdr *Symtab)
+      : SW(SW), ELF(ELF), FileName(FileName), Symtab(Symtab) {}
 
   void PrintUnwindInformation() const;
 };
@@ -344,18 +363,36 @@ template <typename ET>
 const size_t PrinterContext<ET>::IndexTableEntrySize = 8;
 
 template <typename ET>
-ErrorOr<StringRef> PrinterContext<ET>::FunctionAtAddress(unsigned Section,
-                                                         uint64_t Address) const {
-  for (Elf_Sym_iterator SI = ELF->begin_symbols(), SE = ELF->end_symbols();
-       SI != SE; ++SI)
-    if (SI->st_shndx == Section && SI->st_value == Address &&
-        SI->getType() == ELF::STT_FUNC)
-      return ELF->getSymbolName(SI);
-  return readobj_error::unknown_symbol;
+ErrorOr<StringRef>
+PrinterContext<ET>::FunctionAtAddress(uint64_t Address,
+                                      Optional<unsigned> SectionIndex) const {
+  if (!Symtab)
+    return inconvertibleErrorCode();
+  auto StrTableOrErr = ELF.getStringTableForSymtab(*Symtab);
+  if (!StrTableOrErr)
+    reportError(StrTableOrErr.takeError(), FileName);
+  StringRef StrTable = *StrTableOrErr;
+
+  for (const Elf_Sym &Sym : unwrapOrError(FileName, ELF.symbols(Symtab))) {
+    if (SectionIndex && *SectionIndex != Sym.st_shndx)
+      continue;
+
+    if (Sym.st_value == Address && Sym.getType() == ELF::STT_FUNC) {
+      auto NameOrErr = Sym.getName(StrTable);
+      if (!NameOrErr) {
+        // TODO: Actually report errors helpfully.
+        consumeError(NameOrErr.takeError());
+        return inconvertibleErrorCode();
+      }
+      return *NameOrErr;
+    }
+  }
+
+  return inconvertibleErrorCode();
 }
 
 template <typename ET>
-const typename object::ELFFile<ET>::Elf_Shdr *
+const typename ET::Shdr *
 PrinterContext<ET>::FindExceptionTable(unsigned IndexSectionIndex,
                                        off_t IndexTableOffset) const {
   /// Iterate through the sections, searching for the relocation section
@@ -366,33 +403,51 @@ PrinterContext<ET>::FindExceptionTable(unsigned IndexSectionIndex,
   /// handling table.  Use this symbol to recover the actual exception handling
   /// table.
 
-  for (Elf_Shdr_iterator SI = ELF->begin_sections(), SE = ELF->end_sections();
-       SI != SE; ++SI) {
-    if (SI->sh_type == ELF::SHT_REL && SI->sh_info == IndexSectionIndex) {
-      for (Elf_Rel_iterator RI = ELF->begin_rel(&*SI), RE = ELF->end_rel(&*SI);
-           RI != RE; ++RI) {
-        if (RI->r_offset == static_cast<unsigned>(IndexTableOffset)) {
-          typename object::ELFFile<ET>::Elf_Rela RelA;
-          RelA.r_offset = RI->r_offset;
-          RelA.r_info = RI->r_info;
-          RelA.r_addend = 0;
+  for (const Elf_Shdr &Sec : unwrapOrError(FileName, ELF.sections())) {
+    if (Sec.sh_type != ELF::SHT_REL || Sec.sh_info != IndexSectionIndex)
+      continue;
 
-          std::pair<const Elf_Shdr *, const Elf_Sym *> Symbol =
-            ELF->getRelocationSymbol(&(*SI), &RelA);
+    auto SymTabOrErr = ELF.getSection(Sec.sh_link);
+    if (!SymTabOrErr)
+      reportError(SymTabOrErr.takeError(), FileName);
+    const Elf_Shdr *SymTab = *SymTabOrErr;
 
-          return ELF->getSection(Symbol.second);
-        }
-      }
+    for (const Elf_Rel &R : unwrapOrError(FileName, ELF.rels(Sec))) {
+      if (R.r_offset != static_cast<unsigned>(IndexTableOffset))
+        continue;
+
+      typename ET::Rela RelA;
+      RelA.r_offset = R.r_offset;
+      RelA.r_info = R.r_info;
+      RelA.r_addend = 0;
+
+      const Elf_Sym *Symbol =
+          unwrapOrError(FileName, ELF.getRelocationSymbol(RelA, SymTab));
+
+      auto Ret = ELF.getSection(*Symbol, SymTab, ShndxTable);
+      if (!Ret)
+        report_fatal_error(errorToErrorCode(Ret.takeError()).message());
+      return *Ret;
     }
   }
   return nullptr;
 }
 
 template <typename ET>
-void PrinterContext<ET>::PrintExceptionTable(const Elf_Shdr *IT,
-                                             const Elf_Shdr *EHT,
+static const typename ET::Shdr *
+findSectionContainingAddress(const object::ELFFile<ET> &Obj, StringRef FileName,
+                             uint64_t Address) {
+  for (const typename ET::Shdr &Sec : unwrapOrError(FileName, Obj.sections()))
+    if (Address >= Sec.sh_addr && Address < Sec.sh_addr + Sec.sh_size)
+      return &Sec;
+  return nullptr;
+}
+
+template <typename ET>
+void PrinterContext<ET>::PrintExceptionTable(const Elf_Shdr &EHT,
                                              uint64_t TableEntryOffset) const {
-  ErrorOr<ArrayRef<uint8_t> > Contents = ELF->getSectionContents(EHT);
+  // TODO: handle failure.
+  Expected<ArrayRef<uint8_t>> Contents = ELF.getSectionContents(EHT);
   if (!Contents)
     return;
 
@@ -441,10 +496,14 @@ void PrinterContext<ET>::PrintExceptionTable(const Elf_Shdr *IT,
     }
   } else {
     SW.printString("Model", StringRef("Generic"));
-
-    uint64_t Address = PREL31(Word, EHT->sh_addr);
+    const bool IsRelocatable = ELF.getHeader().e_type == ELF::ET_REL;
+    uint64_t Address = IsRelocatable
+                           ? PREL31(Word, EHT.sh_addr)
+                           : PREL31(Word, EHT.sh_addr + TableEntryOffset);
     SW.printHex("PersonalityRoutineAddress", Address);
-    if (ErrorOr<StringRef> Name = FunctionAtAddress(EHT->sh_link, Address))
+    Optional<unsigned> SecIndex =
+        IsRelocatable ? Optional<unsigned>(EHT.sh_link) : None;
+    if (ErrorOr<StringRef> Name = FunctionAtAddress(Address, SecIndex))
       SW.printString("PersonalityRoutineName", *Name);
   }
 }
@@ -459,7 +518,8 @@ void PrinterContext<ET>::PrintOpcodes(const uint8_t *Entry,
 template <typename ET>
 void PrinterContext<ET>::PrintIndexTable(unsigned SectionIndex,
                                          const Elf_Shdr *IT) const {
-  ErrorOr<ArrayRef<uint8_t> > Contents = ELF->getSectionContents(IT);
+  // TODO: handle failure.
+  Expected<ArrayRef<uint8_t>> Contents = ELF.getSectionContents(*IT);
   if (!Contents)
     return;
 
@@ -476,6 +536,7 @@ void PrinterContext<ET>::PrintIndexTable(unsigned SectionIndex,
   const support::ulittle32_t *Data =
     reinterpret_cast<const support::ulittle32_t *>(Contents->data());
   const unsigned Entries = IT->sh_size / IndexTableEntrySize;
+  const bool IsRelocatable = ELF.getHeader().e_type == ELF::ET_REL;
 
   ListScope E(SW, "Entries");
   for (unsigned Entry = 0; Entry < Entries; ++Entry) {
@@ -491,9 +552,31 @@ void PrinterContext<ET>::PrintIndexTable(unsigned SectionIndex,
       continue;
     }
 
-    const uint64_t Offset = PREL31(Word0, IT->sh_addr);
-    SW.printHex("FunctionAddress", Offset);
-    if (ErrorOr<StringRef> Name = FunctionAtAddress(IT->sh_link, Offset))
+    // FIXME: For a relocatable object ideally we might want to:
+    // 1) Find a relocation for the offset of Word0.
+    // 2) Verify this relocation is of an expected type (R_ARM_PREL31) and
+    //    verify the symbol index.
+    // 3) Resolve the relocation using it's symbol value, addend etc.
+    // Currently the code assumes that Word0 contains an addend of a
+    // R_ARM_PREL31 REL relocation that references a section symbol. RELA
+    // relocations are not supported and it works because addresses of sections
+    // are nulls in relocatable objects.
+    //
+    // For a non-relocatable object, Word0 contains a place-relative signed
+    // offset to the referenced entity.
+    const uint64_t Address =
+        IsRelocatable
+            ? PREL31(Word0, IT->sh_addr)
+            : PREL31(Word0, IT->sh_addr + Entry * IndexTableEntrySize);
+    SW.printHex("FunctionAddress", Address);
+
+    // In a relocatable output we might have many .ARM.exidx sections linked to
+    // their code sections via the sh_link field. For a non-relocatable ELF file
+    // the sh_link field is not reliable, because we have one .ARM.exidx section
+    // normally, but might have many code sections.
+    Optional<unsigned> SecIndex =
+        IsRelocatable ? Optional<unsigned>(IT->sh_link) : None;
+    if (ErrorOr<StringRef> Name = FunctionAtAddress(Address, SecIndex))
       SW.printString("FunctionName", *Name);
 
     if (Word1 == EXIDX_CANTUNWIND) {
@@ -509,16 +592,30 @@ void PrinterContext<ET>::PrintIndexTable(unsigned SectionIndex,
 
       PrintOpcodes(Contents->data() + Entry * IndexTableEntrySize + 4, 3, 1);
     } else {
-      const Elf_Shdr *EHT =
-        FindExceptionTable(SectionIndex, Entry * IndexTableEntrySize + 4);
+      const Elf_Shdr *EHT;
+      uint64_t TableEntryAddress;
+      if (IsRelocatable) {
+        TableEntryAddress = PREL31(Word1, IT->sh_addr);
+        EHT = FindExceptionTable(SectionIndex, Entry * IndexTableEntrySize + 4);
+      } else {
+        TableEntryAddress =
+            PREL31(Word1, IT->sh_addr + Entry * IndexTableEntrySize + 4);
+        EHT = findSectionContainingAddress(ELF, FileName, TableEntryAddress);
+      }
 
-      if (ErrorOr<StringRef> Name = ELF->getSectionName(EHT))
-        SW.printString("ExceptionHandlingTable", *Name);
+      if (EHT)
+        // TODO: handle failure.
+        if (Expected<StringRef> Name = ELF.getSectionName(*EHT))
+          SW.printString("ExceptionHandlingTable", *Name);
 
-      uint64_t TableEntryOffset = PREL31(Word1, IT->sh_addr);
-      SW.printHex("TableEntryOffset", TableEntryOffset);
-
-      PrintExceptionTable(IT, EHT, TableEntryOffset);
+      SW.printHex(IsRelocatable ? "TableEntryOffset" : "TableEntryAddress",
+                  TableEntryAddress);
+      if (EHT) {
+        if (IsRelocatable)
+          PrintExceptionTable(*EHT, TableEntryAddress);
+        else
+          PrintExceptionTable(*EHT, TableEntryAddress - EHT->sh_addr);
+      }
     }
   }
 }
@@ -528,20 +625,19 @@ void PrinterContext<ET>::PrintUnwindInformation() const {
   DictScope UI(SW, "UnwindInformation");
 
   int SectionIndex = 0;
-  for (Elf_Shdr_iterator SI = ELF->begin_sections(), SE = ELF->end_sections();
-       SI != SE; ++SI, ++SectionIndex) {
-    if (SI->sh_type == ELF::SHT_ARM_EXIDX) {
-      const Elf_Shdr *IT = &(*SI);
-
+  for (const Elf_Shdr &Sec : unwrapOrError(FileName, ELF.sections())) {
+    if (Sec.sh_type == ELF::SHT_ARM_EXIDX) {
       DictScope UIT(SW, "UnwindIndexTable");
 
       SW.printNumber("SectionIndex", SectionIndex);
-      if (ErrorOr<StringRef> SectionName = ELF->getSectionName(IT))
+      // TODO: handle failure.
+      if (Expected<StringRef> SectionName = ELF.getSectionName(Sec))
         SW.printString("SectionName", *SectionName);
-      SW.printHex("SectionOffset", IT->sh_offset);
+      SW.printHex("SectionOffset", Sec.sh_offset);
 
-      PrintIndexTable(SectionIndex, IT);
+      PrintIndexTable(SectionIndex, &Sec);
     }
+    ++SectionIndex;
   }
 }
 }
@@ -549,4 +645,3 @@ void PrinterContext<ET>::PrintUnwindInformation() const {
 }
 
 #endif
-

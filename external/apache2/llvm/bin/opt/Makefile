@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.15 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:49 joerg Exp $
 
 PROG_CXX=	opt
 NOMAN=		yes
@@ -12,45 +12,62 @@ SRCS=	AnalysisWrappers.cpp \
 	GraphPrinters.cpp \
 	NewPMDriver.cpp \
 	PassPrinters.cpp \
-	Passes.cpp \
 	PrintSCC.cpp \
 	opt.cpp
 
 LLVM_LIBS+= \
+	TransformsAggressiveInstCombine \
+	Passes \
 	ObjCARC \
 	ipo \
+	FrontendOpenMP \
+	Linker \
+	Object \
 	IRReader \
 	AsmParser \
 	BitReader \
+	BitstreamReader \
 	BitWriter \
 	AArch64CodeGen \
 	AArch64TargetInfo \
+	AArch64AsmParser \
 	AArch64MCTargetDesc \
-	AArch64AsmPrinter \
 	AArch64Utils \
+	AMDGPUCodeGen \
+	AMDGPUTargetInfo \
+	AMDGPUMCTargetDesc \
+	AMDGPUAsmParser \
+	AMDGPUUtils \
 	ARMCodeGen \
 	ARMTargetInfo \
+	ARMAsmParser \
 	ARMMCTargetDesc \
-	ARMAsmPrinter \
+	ARMUtils \
 	MipsCodeGen \
 	MipsTargetInfo \
+	MipsAsmParser \
 	MipsMCTargetDesc \
-	MipsAsmPrinter \
 	PowerPCCodeGen \
 	PowerPCTargetInfo \
+	PowerPCAsmParser \
 	PowerPCMCTargetDesc \
-	PowerPCAsmPrinter \
 	SparcCodeGen \
 	SparcTargetInfo \
+	SparcAsmParser \
 	SparcMCTargetDesc \
-	SparcAsmPrinter \
 	X86CodeGen \
+	X86AsmParser \
 	X86MCTargetDesc \
 	X86TargetInfo \
-	X86Utils \
-	X86AsmPrinter \
+	TransformsCFGuard \
+	MIRParser \
+	GlobalISel \
+	TransformsCoroutines \
 	MCDisassembler \
 	AsmPrinter \
+	DebugInfoCodeView \
+	DebugInfoDWARF \
+	DebugInfoMSF \
 	Object \
 	MCParser \
 	SelectionDAG \
@@ -61,12 +78,14 @@ LLVM_LIBS+= \
 	Instrumentation \
 	ScalarOpts \
 	ProfileData \
-	Analysis \
 	MC \
 	TransformsUtils \
-	ipa \
+	Analysis \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Support \
+	Demangle
 
 LDADD+=	-lz
 DPADD+=	${LIBZ}

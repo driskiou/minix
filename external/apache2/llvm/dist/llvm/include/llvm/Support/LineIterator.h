@@ -1,24 +1,25 @@
 //===- LineIterator.h - Iterator to read a text buffer's lines --*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_SUPPORT_LINEITERATOR_H
 #define LLVM_SUPPORT_LINEITERATOR_H
 
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include <iterator>
 
 namespace llvm {
 
 class MemoryBuffer;
 
-/// \brief A forward iterator which reads text lines from a buffer.
+/// A forward iterator which reads text lines from a buffer.
 ///
 /// This class provides a forward iterator interface for reading one line at
 /// a time from a buffer. When default constructed the iterator will be the
@@ -29,33 +30,42 @@ class MemoryBuffer;
 /// character.
 ///
 /// Note that this iterator requires the buffer to be nul terminated.
-class line_iterator
-    : public std::iterator<std::forward_iterator_tag, StringRef> {
-  const MemoryBuffer *Buffer;
-  char CommentMarker;
-  bool SkipBlanks;
+class line_iterator {
+  Optional<MemoryBufferRef> Buffer;
+  char CommentMarker = '\0';
+  bool SkipBlanks = true;
 
-  unsigned LineNumber;
+  unsigned LineNumber = 1;
   StringRef CurrentLine;
 
 public:
-  /// \brief Default construct an "end" iterator.
-  line_iterator() : Buffer(nullptr) {}
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = StringRef;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type *;
+  using reference = value_type &;
 
-  /// \brief Construct a new iterator around some memory buffer.
+  /// Default construct an "end" iterator.
+  line_iterator() = default;
+
+  /// Construct a new iterator around an unowned memory buffer.
+  explicit line_iterator(const MemoryBufferRef &Buffer, bool SkipBlanks = true,
+                         char CommentMarker = '\0');
+
+  /// Construct a new iterator around some memory buffer.
   explicit line_iterator(const MemoryBuffer &Buffer, bool SkipBlanks = true,
                          char CommentMarker = '\0');
 
-  /// \brief Return true if we've reached EOF or are an "end" iterator.
+  /// Return true if we've reached EOF or are an "end" iterator.
   bool is_at_eof() const { return !Buffer; }
 
-  /// \brief Return true if we're an "end" iterator or have reached EOF.
+  /// Return true if we're an "end" iterator or have reached EOF.
   bool is_at_end() const { return is_at_eof(); }
 
-  /// \brief Return the current line number. May return any number at EOF.
+  /// Return the current line number. May return any number at EOF.
   int64_t line_number() const { return LineNumber; }
 
-  /// \brief Advance to the next (non-empty, non-comment) line.
+  /// Advance to the next (non-empty, non-comment) line.
   line_iterator &operator++() {
     advance();
     return *this;
@@ -66,7 +76,7 @@ public:
     return tmp;
   }
 
-  /// \brief Get the current line as a \c StringRef.
+  /// Get the current line as a \c StringRef.
   StringRef operator*() const { return CurrentLine; }
   const StringRef *operator->() const { return &CurrentLine; }
 
@@ -80,7 +90,7 @@ public:
   }
 
 private:
-  /// \brief Advance the iterator to the next line.
+  /// Advance the iterator to the next line.
   void advance();
 };
 }

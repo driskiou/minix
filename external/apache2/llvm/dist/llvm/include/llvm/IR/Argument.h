@@ -1,9 +1,8 @@
 //===-- llvm/Argument.h - Definition of the Argument class ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -21,107 +20,157 @@
 
 namespace llvm {
 
-template<typename ValueSubClass, typename ItemParentClass>
-  class SymbolTableListTraits;
-
-/// \brief LLVM Argument representation
-///
 /// This class represents an incoming formal argument to a Function. A formal
 /// argument, since it is ``formal'', does not contain an actual value but
 /// instead represents the type, argument number, and attributes of an argument
 /// for a specific function. When used in the body of said function, the
 /// argument of course represents the value of the actual argument that the
 /// function was called with.
-class Argument : public Value, public ilist_node<Argument> {
-  virtual void anchor();
+class Argument final : public Value {
   Function *Parent;
+  unsigned ArgNo;
 
-  friend class SymbolTableListTraits<Argument, Function>;
+  friend class Function;
   void setParent(Function *parent);
 
 public:
-  /// \brief Constructor.
-  ///
-  /// If \p F is specified, the argument is inserted at the end of the argument
-  /// list for \p F.
-  explicit Argument(Type *Ty, const Twine &Name = "", Function *F = nullptr);
+  /// Argument constructor.
+  explicit Argument(Type *Ty, const Twine &Name = "", Function *F = nullptr,
+                    unsigned ArgNo = 0);
 
   inline const Function *getParent() const { return Parent; }
   inline       Function *getParent()       { return Parent; }
 
-  /// \brief Return the index of this formal argument in its containing
-  /// function.
+  /// Return the index of this formal argument in its containing function.
   ///
   /// For example in "void foo(int a, float b)" a is 0 and b is 1.
-  unsigned getArgNo() const;
+  unsigned getArgNo() const {
+    assert(Parent && "can't get number of unparented arg");
+    return ArgNo;
+  }
 
-  /// \brief Return true if this argument has the nonnull attribute on it in
-  /// its containing function. Also returns true if at least one byte is known
-  /// to be dereferenceable and the pointer is in addrspace(0).
-  bool hasNonNullAttr() const;
+  /// Return true if this argument has the nonnull attribute. Also returns true
+  /// if at least one byte is known to be dereferenceable and the pointer is in
+  /// addrspace(0).
+  /// If AllowUndefOrPoison is true, respect the semantics of nonnull attribute
+  /// and return true even if the argument can be undef or poison.
+  bool hasNonNullAttr(bool AllowUndefOrPoison = true) const;
 
-  /// \brief If this argument has the dereferenceable attribute on it in its
-  /// containing function, return the number of bytes known to be
-  /// dereferenceable. Otherwise, zero is returned.
+  /// If this argument has the dereferenceable attribute, return the number of
+  /// bytes known to be dereferenceable. Otherwise, zero is returned.
   uint64_t getDereferenceableBytes() const;
 
-  /// \brief Return true if this argument has the byval attribute on it in its
-  /// containing function.
+  /// If this argument has the dereferenceable_or_null attribute, return the
+  /// number of bytes known to be dereferenceable. Otherwise, zero is returned.
+  uint64_t getDereferenceableOrNullBytes() const;
+
+  /// Return true if this argument has the byval attribute.
   bool hasByValAttr() const;
 
-  /// \brief Return true if this argument has the byval attribute or inalloca
-  /// attribute on it in its containing function.  These attributes both
-  /// represent arguments being passed by value.
-  bool hasByValOrInAllocaAttr() const;
+  /// Return true if this argument has the byref attribute.
+  bool hasByRefAttr() const;
 
-  /// \brief If this is a byval or inalloca argument, return its alignment.
+  /// Return true if this argument has the swiftself attribute.
+  bool hasSwiftSelfAttr() const;
+
+  /// Return true if this argument has the swifterror attribute.
+  bool hasSwiftErrorAttr() const;
+
+  /// Return true if this argument has the byval, inalloca, or preallocated
+  /// attribute. These attributes represent arguments being passed by value,
+  /// with an associated copy between the caller and callee
+  bool hasPassPointeeByValueCopyAttr() const;
+
+  /// If this argument satisfies has hasPassPointeeByValueAttr, return the
+  /// in-memory ABI size copied to the stack for the call. Otherwise, return 0.
+  uint64_t getPassPointeeByValueCopySize(const DataLayout &DL) const;
+
+  /// Return true if this argument has the byval, sret, inalloca, preallocated,
+  /// or byref attribute. These attributes represent arguments being passed by
+  /// value (which may or may not involve a stack copy)
+  bool hasPointeeInMemoryValueAttr() const;
+
+  /// If hasPointeeInMemoryValueAttr returns true, the in-memory ABI type is
+  /// returned. Otherwise, nullptr.
+  Type *getPointeeInMemoryValueType() const;
+
+  /// If this is a byval or inalloca argument, return its alignment.
+  /// FIXME: Remove this function once transition to Align is over.
+  /// Use getParamAlign() instead.
   unsigned getParamAlignment() const;
 
-  /// \brief Return true if this argument has the nest attribute on it in its
-  /// containing function.
+  /// If this is a byval or inalloca argument, return its alignment.
+  MaybeAlign getParamAlign() const;
+
+  MaybeAlign getParamStackAlign() const;
+
+  /// If this is a byval argument, return its type.
+  Type *getParamByValType() const;
+
+  /// If this is an sret argument, return its type.
+  Type *getParamStructRetType() const;
+
+  /// If this is a byref argument, return its type.
+  Type *getParamByRefType() const;
+
+  /// If this is an inalloca argument, return its type.
+  Type *getParamInAllocaType() const;
+
+  /// Return true if this argument has the nest attribute.
   bool hasNestAttr() const;
 
-  /// \brief Return true if this argument has the noalias attribute on it in its
-  /// containing function.
+  /// Return true if this argument has the noalias attribute.
   bool hasNoAliasAttr() const;
 
-  /// \brief Return true if this argument has the nocapture attribute on it in
-  /// its containing function.
+  /// Return true if this argument has the nocapture attribute.
   bool hasNoCaptureAttr() const;
 
-  /// \brief Return true if this argument has the sret attribute on it in its
-  /// containing function.
+  /// Return true if this argument has the nofree attribute.
+  bool hasNoFreeAttr() const;
+
+  /// Return true if this argument has the sret attribute.
   bool hasStructRetAttr() const;
 
-  /// \brief Return true if this argument has the returned attribute on it in
-  /// its containing function.
+  /// Return true if this argument has the inreg attribute.
+  bool hasInRegAttr() const;
+
+  /// Return true if this argument has the returned attribute.
   bool hasReturnedAttr() const;
 
-  /// \brief Return true if this argument has the readonly or readnone attribute
-  /// on it in its containing function.
+  /// Return true if this argument has the readonly or readnone attribute.
   bool onlyReadsMemory() const;
 
-  /// \brief Return true if this argument has the inalloca attribute on it in
-  /// its containing function.
+  /// Return true if this argument has the inalloca attribute.
   bool hasInAllocaAttr() const;
 
-  /// \brief Return true if this argument has the zext attribute on it in its
-  /// containing function.
+  /// Return true if this argument has the preallocated attribute.
+  bool hasPreallocatedAttr() const;
+
+  /// Return true if this argument has the zext attribute.
   bool hasZExtAttr() const;
 
-  /// \brief Return true if this argument has the sext attribute on it in its
-  /// containing function.
+  /// Return true if this argument has the sext attribute.
   bool hasSExtAttr() const;
 
-  /// \brief Add a Attribute to an argument.
-  void addAttr(AttributeSet AS);
+  /// Add attributes to an argument.
+  void addAttrs(AttrBuilder &B);
 
-  /// \brief Remove a Attribute from an argument.
-  void removeAttr(AttributeSet AS);
+  void addAttr(Attribute::AttrKind Kind);
 
-  /// \brief Method for support type inquiry through isa, cast, and
-  /// dyn_cast.
-  static inline bool classof(const Value *V) {
+  void addAttr(Attribute Attr);
+
+  /// Remove attributes from an argument.
+  void removeAttr(Attribute::AttrKind Kind);
+
+  void removeAttrs(const AttrBuilder &B);
+
+  /// Check if an argument has a given attribute.
+  bool hasAttribute(Attribute::AttrKind Kind) const;
+
+  Attribute getAttribute(Attribute::AttrKind Kind) const;
+
+  /// Method for support type inquiry through isa, cast, and dyn_cast.
+  static bool classof(const Value *V) {
     return V->getValueID() == ArgumentVal;
   }
 };

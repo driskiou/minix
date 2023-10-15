@@ -1,6 +1,11 @@
-add_llvm_library(LLVMMCDisassembler
+add_llvm_component_library(LLVMMCDisassembler
   Disassembler.cpp
-  MCRelocationInfo.cpp
-  MCExternalSymbolizer.cpp
   MCDisassembler.cpp
+  MCExternalSymbolizer.cpp
+  MCRelocationInfo.cpp
+  MCSymbolizer.cpp
+
+  LINK_COMPONENTS
+  MC
+  Support
   )

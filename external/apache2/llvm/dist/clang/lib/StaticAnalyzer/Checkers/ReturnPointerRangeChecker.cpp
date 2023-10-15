@@ -1,9 +1,8 @@
 //== ReturnPointerRangeChecker.cpp ------------------------------*- C++ -*--==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,18 +11,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/DynamicExtent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
 
 using namespace clang;
 using namespace ento;
 
 namespace {
-class ReturnPointerRangeChecker : 
+class ReturnPointerRangeChecker :
     public Checker< check::PreStmt<ReturnStmt> > {
   mutable std::unique_ptr<BuiltinBug> BT;
 
@@ -39,8 +39,8 @@ void ReturnPointerRangeChecker::checkPreStmt(const ReturnStmt *RS,
   const Expr *RetE = RS->getRetValue();
   if (!RetE)
     return;
- 
-  SVal V = state->getSVal(RetE, C.getLocationContext());
+
+  SVal V = C.getSVal(RetE);
   const MemRegion *R = V.getAsRegion();
 
   const ElementRegion *ER = dyn_cast_or_null<ElementRegion>(R);
@@ -52,26 +52,30 @@ void ReturnPointerRangeChecker::checkPreStmt(const ReturnStmt *RS,
   // pointer casts.
   if (Idx.isZeroConstant())
     return;
+
   // FIXME: All of this out-of-bounds checking should eventually be refactored
   // into a common place.
+  DefinedOrUnknownSVal ElementCount = getDynamicElementCount(
+      state, ER->getSuperRegion(), C.getSValBuilder(), ER->getValueType());
 
-  DefinedOrUnknownSVal NumElements
-    = C.getStoreManager().getSizeInElements(state, ER->getSuperRegion(),
-                                           ER->getValueType());
+  // We assume that the location after the last element in the array is used as
+  // end() iterator. Reporting on these would return too many false positives.
+  if (Idx == ElementCount)
+    return;
 
-  ProgramStateRef StInBound = state->assumeInBound(Idx, NumElements, true);
-  ProgramStateRef StOutBound = state->assumeInBound(Idx, NumElements, false);
+  ProgramStateRef StInBound = state->assumeInBound(Idx, ElementCount, true);
+  ProgramStateRef StOutBound = state->assumeInBound(Idx, ElementCount, false);
   if (StOutBound && !StInBound) {
-    ExplodedNode *N = C.generateSink(StOutBound);
+    ExplodedNode *N = C.generateErrorNode(StOutBound);
 
     if (!N)
       return;
-  
+
     // FIXME: This bug correspond to CWE-466.  Eventually we should have bug
     // types explicitly reference such exploit categories (when applicable).
     if (!BT)
       BT.reset(new BuiltinBug(
-          this, "Return of pointer value outside of expected range",
+          this, "Buffer overflow",
           "Returned pointer value points outside the original object "
           "(potential buffer overflow)"));
 
@@ -80,14 +84,18 @@ void ReturnPointerRangeChecker::checkPreStmt(const ReturnStmt *RS,
     // reference is outside the range.
 
     // Generate a report for this bug.
-    BugReport *report = 
-      new BugReport(*BT, BT->getDescription(), N);
+    auto report =
+        std::make_unique<PathSensitiveBugReport>(*BT, BT->getDescription(), N);
 
     report->addRange(RetE->getSourceRange());
-    C.emitReport(report);
+    C.emitReport(std::move(report));
   }
 }
 
 void ento::registerReturnPointerRangeChecker(CheckerManager &mgr) {
   mgr.registerChecker<ReturnPointerRangeChecker>();
+}
+
+bool ento::shouldRegisterReturnPointerRangeChecker(const CheckerManager &mgr) {
+  return true;
 }

@@ -185,7 +185,7 @@ ldr r2, [r2]
 
 These instructions preserve the condition code which is important if the spill
 is between a cmp and a bcc instruction. However, we can use the (potentially)
-cheaper sequnce if we know it's ok to clobber the condition register.
+cheaper sequence if we know it's ok to clobber the condition register.
 
 add r2, sp, #255 * 4
 add r2, #132
@@ -232,13 +232,13 @@ Make use of hi register variants of cmp: tCMPhir / tCMPZhir.
 //===---------------------------------------------------------------------===//
 
 Thumb1 immediate field sometimes keep pre-scaled values. See
-Thumb1RegisterInfo::eliminateFrameIndex. This is inconsistent from ARM and
+ThumbRegisterInfo::eliminateFrameIndex. This is inconsistent from ARM and
 Thumb2.
 
 //===---------------------------------------------------------------------===//
 
 Rather than having tBR_JTr print a ".align 2" and constant island pass pad it,
-add a target specific ALIGN instruction instead. That way, GetInstSizeInBytes
+add a target specific ALIGN instruction instead. That way, getInstSizeInBytes
 won't have to over-estimate. It can also be used for loop alignment pass.
 
 //===---------------------------------------------------------------------===//

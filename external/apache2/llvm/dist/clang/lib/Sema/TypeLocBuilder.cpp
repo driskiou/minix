@@ -1,9 +1,8 @@
 //===--- TypeLocBuilder.cpp - Type Source Info collector ------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -52,7 +51,7 @@ void TypeLocBuilder::grow(size_t NewCapacity) {
          &Buffer[Index],
          Capacity - Index);
 
-  if (Buffer != InlineBuffer.buffer)
+  if (Buffer != InlineBuffer)
     delete[] Buffer;
 
   Buffer = NewBuffer;
@@ -115,11 +114,39 @@ TypeLoc TypeLocBuilder::pushImpl(QualType T, size_t LocalSize, unsigned LocalAli
       NumBytesAtAlign4 += LocalSize;
     }
   } else if (LocalAlignment == 8) {
-    if (!NumBytesAtAlign8 && NumBytesAtAlign4 % 8 != 0) {
-      // No existing padding and misaligned members; add in 4 bytes padding
-      memmove(&Buffer[Index - 4], &Buffer[Index], NumBytesAtAlign4);
-      Index -= 4;
+    if (NumBytesAtAlign8 == 0) {
+      // We have not seen any 8-byte aligned element yet. We insert a padding
+      // only if the new Index is not 8-byte-aligned.
+      if ((Index - LocalSize) % 8 != 0) {
+        memmove(&Buffer[Index - 4], &Buffer[Index], NumBytesAtAlign4);
+        Index -= 4;
+      }
+    } else {
+      unsigned Padding = NumBytesAtAlign4 % 8;
+      if (Padding == 0) {
+        if (LocalSize % 8 == 0) {
+          // Everything is set: there's no padding and we don't need to add
+          // any.
+        } else {
+          assert(LocalSize % 8 == 4);
+          // No existing padding; add in 4 bytes padding
+          memmove(&Buffer[Index - 4], &Buffer[Index], NumBytesAtAlign4);
+          Index -= 4;
+        }
+      } else {
+        assert(Padding == 4);
+        if (LocalSize % 8 == 0) {
+          // Everything is set: there's 4 bytes padding and we don't need
+          // to add any.
+        } else {
+          assert(LocalSize % 8 == 4);
+          // There are 4 bytes padding, but we don't need any; remove it.
+          memmove(&Buffer[Index + 4], &Buffer[Index], NumBytesAtAlign4);
+          Index += 4;
+        }
+      }
     }
+
     // Forget about any padding.
     NumBytesAtAlign4 = 0;
     NumBytesAtAlign8 += LocalSize;

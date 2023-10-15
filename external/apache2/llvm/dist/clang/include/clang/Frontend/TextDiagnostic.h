@@ -1,9 +1,8 @@
 //===--- TextDiagnostic.h - Text Diagnostic Pretty-Printing -----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,7 +19,7 @@
 
 namespace clang {
 
-/// \brief Class to encapsulate the logic for formatting and printing a textual
+/// Class to encapsulate the logic for formatting and printing a textual
 /// diagnostic message.
 ///
 /// This class provides an interface for building and emitting a textual
@@ -40,9 +39,9 @@ public:
                  const LangOptions &LangOpts,
                  DiagnosticOptions *DiagOpts);
 
-  virtual ~TextDiagnostic();
-  
-  /// \brief Print the diagonstic level to a raw_ostream.
+  ~TextDiagnostic() override;
+
+  /// Print the diagonstic level to a raw_ostream.
   ///
   /// This is a static helper that handles colorizing the level and formatting
   /// it into an arbitrary output stream. This is used internally by the
@@ -51,10 +50,9 @@ public:
   /// TextDiagnostic logic requires.
   static void printDiagnosticLevel(raw_ostream &OS,
                                    DiagnosticsEngine::Level Level,
-                                   bool ShowColors,
-                                   bool CLFallbackMode = false);
+                                   bool ShowColors);
 
-  /// \brief Pretty-print a diagnostic message to a raw_ostream.
+  /// Pretty-print a diagnostic message to a raw_ostream.
   ///
   /// This is a static helper to handle the line wrapping, colorizing, and
   /// rendering of a diagnostic message to a particular ostream. It is
@@ -75,42 +73,35 @@ public:
                                      unsigned Columns, bool ShowColors);
 
 protected:
-  void emitDiagnosticMessage(SourceLocation Loc,PresumedLoc PLoc,
-                             DiagnosticsEngine::Level Level,
-                             StringRef Message,
+  void emitDiagnosticMessage(FullSourceLoc Loc, PresumedLoc PLoc,
+                             DiagnosticsEngine::Level Level, StringRef Message,
                              ArrayRef<CharSourceRange> Ranges,
-                             const SourceManager *SM,
                              DiagOrStoredDiag D) override;
 
-  void emitDiagnosticLoc(SourceLocation Loc, PresumedLoc PLoc,
+  void emitDiagnosticLoc(FullSourceLoc Loc, PresumedLoc PLoc,
                          DiagnosticsEngine::Level Level,
-                         ArrayRef<CharSourceRange> Ranges,
-                         const SourceManager &SM) override;
+                         ArrayRef<CharSourceRange> Ranges) override;
 
-  void emitCodeContext(SourceLocation Loc,
-                       DiagnosticsEngine::Level Level,
-                       SmallVectorImpl<CharSourceRange>& Ranges,
-                       ArrayRef<FixItHint> Hints,
-                       const SourceManager &SM) override {
-    emitSnippetAndCaret(Loc, Level, Ranges, Hints, SM);
+  void emitCodeContext(FullSourceLoc Loc, DiagnosticsEngine::Level Level,
+                       SmallVectorImpl<CharSourceRange> &Ranges,
+                       ArrayRef<FixItHint> Hints) override {
+    emitSnippetAndCaret(Loc, Level, Ranges, Hints);
   }
 
-  void emitIncludeLocation(SourceLocation Loc, PresumedLoc PLoc,
-                           const SourceManager &SM) override;
+  void emitIncludeLocation(FullSourceLoc Loc, PresumedLoc PLoc) override;
 
-  void emitImportLocation(SourceLocation Loc, PresumedLoc PLoc,
-                          StringRef ModuleName,
-                          const SourceManager &SM) override;
+  void emitImportLocation(FullSourceLoc Loc, PresumedLoc PLoc,
+                          StringRef ModuleName) override;
 
-  void emitBuildingModuleLocation(SourceLocation Loc, PresumedLoc PLoc,
-                                  StringRef ModuleName,
-                                  const SourceManager &SM) override;
+  void emitBuildingModuleLocation(FullSourceLoc Loc, PresumedLoc PLoc,
+                                  StringRef ModuleName) override;
 
 private:
-  void emitSnippetAndCaret(SourceLocation Loc, DiagnosticsEngine::Level Level,
-                           SmallVectorImpl<CharSourceRange>& Ranges,
-                           ArrayRef<FixItHint> Hints,
-                           const SourceManager &SM);
+  void emitFilename(StringRef Filename, const SourceManager &SM);
+
+  void emitSnippetAndCaret(FullSourceLoc Loc, DiagnosticsEngine::Level Level,
+                           SmallVectorImpl<CharSourceRange> &Ranges,
+                           ArrayRef<FixItHint> Hints);
 
   void emitSnippet(StringRef SourceLine);
 

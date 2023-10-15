@@ -1,9 +1,8 @@
 //===-- PPCScheduleP7.td - PPC P7 Scheduling Definitions ---*- tablegen -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -89,6 +88,10 @@ def P7Itineraries : ProcessorItineraries<
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                   [1, 1, 1]>,
+  InstrItinData<IIC_IntISEL,      [InstrStage<1, [P7_DU1], 0>,
+                                   InstrStage<1, [P7_FX1, P7_FX2], 0>,
+                                   InstrStage<1, [P7_BRU]>],
+                                  [1, 1, 1, 1]>,
   InstrItinData<IIC_IntCompare  , [InstrStage<1, [P7_DU1, P7_DU2,
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
@@ -110,6 +113,10 @@ def P7Itineraries : ProcessorItineraries<
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                   [4, 1, 1]>,
+  InstrItinData<IIC_IntMulHD    , [InstrStage<1, [P7_DU1, P7_DU2,
+                                                  P7_DU3, P7_DU4], 0>,
+                                   InstrStage<1, [P7_FX1, P7_FX2]>],
+                                  [4, 1, 1]>,
   InstrItinData<IIC_IntMulLI    , [InstrStage<1, [P7_DU1, P7_DU2,
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
@@ -119,6 +126,10 @@ def P7Itineraries : ProcessorItineraries<
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                    [1, 1, 1]>,
   InstrItinData<IIC_IntRotateD  , [InstrStage<1, [P7_DU1, P7_DU2,
+                                                  P7_DU3, P7_DU4], 0>,
+                                   InstrStage<1, [P7_FX1, P7_FX2]>],
+                                   [1, 1, 1]>,
+  InstrItinData<IIC_IntRotateDI , [InstrStage<1, [P7_DU1, P7_DU2,
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                    [1, 1, 1]>,
@@ -249,13 +260,13 @@ def P7Itineraries : ProcessorItineraries<
                                    InstrStage<1, [P7_LS1, P7_LS2], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                   [1, 1, 1]>,
-  InstrItinData<IIC_LdStSTDU    , [InstrStage<1, [P7_DU1], 0>,
+  InstrItinData<IIC_LdStSTU     , [InstrStage<1, [P7_DU1], 0>,
                                    InstrStage<1, [P7_DU2], 0>,
                                    InstrStage<1, [P7_LS1, P7_LS2], 0>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>,
                                    InstrStage<1, [P7_FX1, P7_FX2]>],
                                   [2, 1, 1, 1]>,
-  InstrItinData<IIC_LdStSTDUX   , [InstrStage<1, [P7_DU1], 0>,
+  InstrItinData<IIC_LdStSTUX    , [InstrStage<1, [P7_DU1], 0>,
                                    InstrStage<1, [P7_DU2], 0>,
                                    InstrStage<1, [P7_DU3], 0>,
                                    InstrStage<1, [P7_DU4], 0>,
@@ -308,6 +319,10 @@ def P7Itineraries : ProcessorItineraries<
                                    InstrStage<1, [P7_FX1]>],
                                   [4, 1]>, // mtctr
   InstrItinData<IIC_FPGeneral   , [InstrStage<1, [P7_DU1, P7_DU2,
+                                                  P7_DU3, P7_DU4], 0>,
+                                   InstrStage<1, [P7_VS1, P7_VS2]>],
+                                  [5, 1, 1]>,
+  InstrItinData<IIC_FPAddSub    , [InstrStage<1, [P7_DU1, P7_DU2,
                                                   P7_DU3, P7_DU4], 0>,
                                    InstrStage<1, [P7_VS1, P7_VS2]>],
                                   [5, 1, 1]>,
@@ -374,7 +389,6 @@ def P7Model : SchedMachineModel {
                        // branches), but the total internal issue bandwidth per
                        // cycle (from all queues) is 8.
 
-  let MinLatency = 0;  // Out-of-order dispatch.
   let LoadLatency = 3; // Optimistic load latency assuming bypass.
                        // This is overriden by OperandCycles if the
                        // Itineraries are queried instead.
@@ -382,6 +396,8 @@ def P7Model : SchedMachineModel {
 
   // Try to make sure we have at least 10 dispatch groups in a loop.
   let LoopMicroOpBufferSize = 40;
+
+  let CompleteModel = 0;
 
   let Itineraries = P7Itineraries;
 }

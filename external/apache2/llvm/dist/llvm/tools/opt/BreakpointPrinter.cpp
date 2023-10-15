@@ -1,14 +1,13 @@
 //===- BreakpointPrinter.cpp - Breakpoint location printer ----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief Breakpoint location printer.
+/// Breakpoint location printer.
 ///
 //===----------------------------------------------------------------------===//
 #include "BreakpointPrinter.h"
@@ -25,43 +24,33 @@ namespace {
 struct BreakpointPrinter : public ModulePass {
   raw_ostream &Out;
   static char ID;
-  DITypeIdentifierMap TypeIdentifierMap;
 
   BreakpointPrinter(raw_ostream &out) : ModulePass(ID), Out(out) {}
 
-  void getContextName(DIDescriptor Context, std::string &N) {
-    if (Context.isNameSpace()) {
-      DINameSpace NS(Context);
-      if (!NS.getName().empty()) {
-        getContextName(NS.getContext(), N);
-        N = N + NS.getName().str() + "::";
+  void getContextName(const DIScope *Context, std::string &N) {
+    if (auto *NS = dyn_cast<DINamespace>(Context)) {
+      if (!NS->getName().empty()) {
+        getContextName(NS->getScope(), N);
+        N = N + NS->getName().str() + "::";
       }
-    } else if (Context.isType()) {
-      DIType TY(Context);
-      if (!TY.getName().empty()) {
-        getContextName(TY.getContext().resolve(TypeIdentifierMap), N);
-        N = N + TY.getName().str() + "::";
+    } else if (auto *TY = dyn_cast<DIType>(Context)) {
+      if (!TY->getName().empty()) {
+        getContextName(TY->getScope(), N);
+        N = N + TY->getName().str() + "::";
       }
     }
   }
 
   bool runOnModule(Module &M) override {
-    TypeIdentifierMap.clear();
-    NamedMDNode *CU_Nodes = M.getNamedMetadata("llvm.dbg.cu");
-    if (CU_Nodes)
-      TypeIdentifierMap = generateDITypeIdentifierMap(CU_Nodes);
-
     StringSet<> Processed;
     if (NamedMDNode *NMD = M.getNamedMetadata("llvm.dbg.sp"))
       for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
         std::string Name;
-        DISubprogram SP(NMD->getOperand(i));
-        assert((!SP || SP.isSubprogram()) &&
-               "A MDNode in llvm.dbg.sp should be null or a DISubprogram.");
+        auto *SP = cast_or_null<DISubprogram>(NMD->getOperand(i));
         if (!SP)
           continue;
-        getContextName(SP.getContext().resolve(TypeIdentifierMap), Name);
-        Name = Name + SP.getDisplayName().str();
+        getContextName(SP->getScope(), Name);
+        Name = Name + SP->getName().str();
         if (!Name.empty() && Processed.insert(Name).second) {
           Out << Name << "\n";
         }

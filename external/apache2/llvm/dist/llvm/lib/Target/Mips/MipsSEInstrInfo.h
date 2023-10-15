@@ -1,9 +1,8 @@
 //===-- MipsSEInstrInfo.h - Mips32/64 Instruction Information ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -32,7 +31,7 @@ public:
   /// the destination along with the FrameIndex of the loaded stack slot.  If
   /// not, return 0.  This predicate must return 0 if the instruction has
   /// any side effects other than loading from the stack slot.
-  unsigned isLoadFromStackSlot(const MachineInstr *MI,
+  unsigned isLoadFromStackSlot(const MachineInstr &MI,
                                int &FrameIndex) const override;
 
   /// isStoreToStackSlot - If the specified machine instruction is a direct
@@ -40,47 +39,57 @@ public:
   /// the source reg along with the FrameIndex of the loaded stack slot.  If
   /// not, return 0.  This predicate must return 0 if the instruction has
   /// any side effects other than storing to the stack slot.
-  unsigned isStoreToStackSlot(const MachineInstr *MI,
+  unsigned isStoreToStackSlot(const MachineInstr &MI,
                               int &FrameIndex) const override;
 
-  void copyPhysReg(MachineBasicBlock &MBB,
-                   MachineBasicBlock::iterator MI, DebugLoc DL,
-                   unsigned DestReg, unsigned SrcReg,
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                   const DebugLoc &DL, MCRegister DestReg, MCRegister SrcReg,
                    bool KillSrc) const override;
 
   void storeRegToStack(MachineBasicBlock &MBB,
                        MachineBasicBlock::iterator MI,
-                       unsigned SrcReg, bool isKill, int FrameIndex,
+                       Register SrcReg, bool isKill, int FrameIndex,
                        const TargetRegisterClass *RC,
                        const TargetRegisterInfo *TRI,
                        int64_t Offset) const override;
 
   void loadRegFromStack(MachineBasicBlock &MBB,
                         MachineBasicBlock::iterator MI,
-                        unsigned DestReg, int FrameIndex,
+                        Register DestReg, int FrameIndex,
                         const TargetRegisterClass *RC,
                         const TargetRegisterInfo *TRI,
                         int64_t Offset) const override;
 
-  bool expandPostRAPseudo(MachineBasicBlock::iterator MI) const override;
+  bool expandPostRAPseudo(MachineInstr &MI) const override;
+
+  bool isBranchWithImm(unsigned Opc) const override;
 
   unsigned getOppositeBranchOpc(unsigned Opc) const override;
 
   /// Adjust SP by Amount bytes.
   void adjustStackPtr(unsigned SP, int64_t Amount, MachineBasicBlock &MBB,
-                      MachineBasicBlock::iterator I) const;
+                      MachineBasicBlock::iterator I) const override;
 
   /// Emit a series of instructions to load an immediate. If NewImm is a
   /// non-NULL parameter, the last instruction is not emitted, but instead
   /// its immediate operand is returned in NewImm.
   unsigned loadImmediate(int64_t Imm, MachineBasicBlock &MBB,
-                         MachineBasicBlock::iterator II, DebugLoc DL,
+                         MachineBasicBlock::iterator II, const DebugLoc &DL,
                          unsigned *NewImm) const;
+
+protected:
+  /// If the specific machine instruction is a instruction that moves/copies
+  /// value from one register to another register return destination and source
+  /// registers as machine operands.
+  Optional<DestSourcePair>
+  isCopyInstrImpl(const MachineInstr &MI) const override;
 
 private:
   unsigned getAnalyzableBrOpc(unsigned Opc) const override;
 
   void expandRetRA(MachineBasicBlock &MBB, MachineBasicBlock::iterator I) const;
+
+  void expandERet(MachineBasicBlock &MBB, MachineBasicBlock::iterator I) const;
 
   std::pair<bool, bool> compareOpndSize(unsigned Opc,
                                         const MachineFunction &MF) const;
@@ -106,9 +115,11 @@ private:
                       unsigned CvtOpc, unsigned MovOpc, bool IsI64) const;
 
   void expandExtractElementF64(MachineBasicBlock &MBB,
-                               MachineBasicBlock::iterator I, bool FP64) const;
+                               MachineBasicBlock::iterator I, bool isMicroMips,
+                               bool FP64) const;
   void expandBuildPairF64(MachineBasicBlock &MBB,
-                          MachineBasicBlock::iterator I, bool FP64) const;
+                          MachineBasicBlock::iterator I, bool isMicroMips,
+                          bool FP64) const;
   void expandEhReturn(MachineBasicBlock &MBB,
                       MachineBasicBlock::iterator I) const;
 };

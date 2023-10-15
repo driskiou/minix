@@ -1,9 +1,8 @@
 //===-- SelectionDAGPrinter.cpp - Implement SelectionDAG::viewGraph() -----===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,20 +10,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CodeGen/SelectionDAG.h"
 #include "ScheduleDAGSDNodes.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/DebugInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetRegisterInfo.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "dag-printer"
@@ -73,16 +70,23 @@ namespace llvm {
     }
 
     static std::string getGraphName(const SelectionDAG *G) {
-      return G->getMachineFunction().getName();
+      return std::string(G->getMachineFunction().getName());
     }
 
     static bool renderGraphFromBottomUp() {
       return true;
     }
 
-    static bool hasNodeAddressLabel(const SDNode *Node,
-                                    const SelectionDAG *Graph) {
-      return true;
+    static std::string getNodeIdentifierLabel(const SDNode *Node,
+                                              const SelectionDAG *Graph) {
+      std::string R;
+      raw_string_ostream OS(R);
+#ifndef NDEBUG
+      OS << 't' << Node->PersistentId;
+#else
+      OS << static_cast<const void *>(Node);
+#endif
+      return R;
     }
 
     /// If you want to override the dot attributes printed for a particular
@@ -160,6 +164,20 @@ void SelectionDAG::viewGraph() {
   viewGraph("");
 }
 
+/// Just dump dot graph to a user-provided path and title.
+/// This doesn't open the dot viewer program and
+/// helps visualization when outside debugging session.
+/// FileName expects absolute path. If provided
+/// without any path separators then the file
+/// will be created in the current directory.
+/// Error will be emitted if the path is insane.
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void SelectionDAG::dumpDotGraph(const Twine &FileName,
+                                                 const Twine &Title) {
+  dumpDotGraphToFile(this, FileName, Title);
+}
+#endif
+
 /// clearGraphAttrs - Clear all previously defined node graph attributes.
 /// Intended to be used from a debugging tool (eg. gdb).
 void SelectionDAG::clearGraphAttrs() {
@@ -186,7 +204,7 @@ void SelectionDAG::setGraphAttrs(const SDNode *N, const char *Attrs) {
 
 /// getGraphAttrs - Get graph attributes for a node. (eg. "color=red".)
 /// Used from getNodeAttributes.
-const std::string SelectionDAG::getGraphAttrs(const SDNode *N) const {
+std::string SelectionDAG::getGraphAttrs(const SDNode *N) const {
 #ifndef NDEBUG
   std::map<const SDNode *, std::string>::const_iterator I =
     NodeGraphAttrs.find(N);
@@ -224,7 +242,7 @@ bool SelectionDAG::setSubgraphColorHelper(SDNode *N, const char *Color, DenseSet
   if (level >= 20) {
     if (!printed) {
       printed = true;
-      DEBUG(dbgs() << "setSubgraphColor hit max level\n");
+      LLVM_DEBUG(dbgs() << "setSubgraphColor hit max level\n");
     }
     return true;
   }

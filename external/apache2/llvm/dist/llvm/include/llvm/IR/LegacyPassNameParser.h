@@ -1,9 +1,8 @@
 //===- LegacyPassNameParser.h -----------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -41,14 +40,12 @@ namespace llvm {
 //
 class PassNameParser : public PassRegistrationListener,
                        public cl::parser<const PassInfo*> {
-  cl::Option *Opt;
 public:
-  PassNameParser();
-  virtual ~PassNameParser();
+  PassNameParser(cl::Option &O);
+  ~PassNameParser() override;
 
-  void initialize(cl::Option &O) {
-    Opt = &O;
-    cl::parser<const PassInfo*>::initialize(O);
+  void initialize() {
+    cl::parser<const PassInfo*>::initialize();
 
     // Add all of the passes to the map that got initialized before 'this' did.
     enumeratePasses();
@@ -62,20 +59,20 @@ public:
   inline bool ignorablePass(const PassInfo *P) const {
     // Ignore non-selectable and non-constructible passes!  Ignore
     // non-optimizations.
-    return P->getPassArgument() == nullptr || *P->getPassArgument() == 0 ||
-           P->getNormalCtor() == nullptr || ignorablePassImpl(P);
+    return P->getPassArgument().empty() || P->getNormalCtor() == nullptr ||
+           ignorablePassImpl(P);
   }
 
   // Implement the PassRegistrationListener callbacks used to populate our map
   //
   void passRegistered(const PassInfo *P) override {
-    if (ignorablePass(P) || !Opt) return;
-    if (findOption(P->getPassArgument()) != getNumOptions()) {
+    if (ignorablePass(P)) return;
+    if (findOption(P->getPassArgument().data()) != getNumOptions()) {
       errs() << "Two passes with the same argument (-"
            << P->getPassArgument() << ") attempted to be registered!\n";
       llvm_unreachable(nullptr);
     }
-    addLiteralOption(P->getPassArgument(), P, P->getPassName());
+    addLiteralOption(P->getPassArgument().data(), P, P->getPassName().data());
   }
   void passEnumerate(const PassInfo *P) override { passRegistered(P); }
 
@@ -83,56 +80,15 @@ public:
   // default implementation to sort the table before we print...
   void printOptionInfo(const cl::Option &O, size_t GlobalWidth) const override {
     PassNameParser *PNP = const_cast<PassNameParser*>(this);
-    array_pod_sort(PNP->Values.begin(), PNP->Values.end(), ValLessThan);
+    array_pod_sort(PNP->Values.begin(), PNP->Values.end(), ValCompare);
     cl::parser<const PassInfo*>::printOptionInfo(O, GlobalWidth);
   }
 
 private:
-  // ValLessThan - Provide a sorting comparator for Values elements...
-  static int ValLessThan(const PassNameParser::OptionInfo *VT1,
-                         const PassNameParser::OptionInfo *VT2) {
-    return std::strcmp(VT1->Name, VT2->Name);
-  }
-};
-
-///===----------------------------------------------------------------------===//
-/// FilteredPassNameParser class - Make use of the pass registration
-/// mechanism to automatically add a command line argument to opt for
-/// each pass that satisfies a filter criteria.  Filter should return
-/// true for passes to be registered as command-line options.
-///
-template<typename Filter>
-class FilteredPassNameParser : public PassNameParser {
-private:
-  Filter filter;
-
-public:
-  bool ignorablePassImpl(const PassInfo *P) const override {
-    return !filter(*P);
-  }
-};
-
-///===----------------------------------------------------------------------===//
-/// PassArgFilter - A filter for use with PassNameFilterParser that only
-/// accepts a Pass whose Arg matches certain strings.
-///
-/// Use like this:
-///
-/// extern const char AllowedPassArgs[] = "-anders_aa -dse";
-///
-/// static cl::list<
-///   const PassInfo*,
-///   bool,
-///   FilteredPassNameParser<PassArgFilter<AllowedPassArgs> > >
-/// PassList(cl::desc("Passes available:"));
-///
-/// Only the -anders_aa and -dse options will be available to the user.
-///
-template<const char *Args>
-class PassArgFilter {
-public:
-  bool operator()(const PassInfo &P) const {
-    return(std::strstr(Args, P.getPassArgument()));
+  // ValCompare - Provide a sorting comparator for Values elements...
+  static int ValCompare(const PassNameParser::OptionInfo *VT1,
+                        const PassNameParser::OptionInfo *VT2) {
+    return VT1->Name.compare(VT2->Name);
   }
 };
 

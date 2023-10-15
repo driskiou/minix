@@ -1,9 +1,8 @@
 //===-- llvm/LineEditor/LineEditor.h - line editor --------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,6 +14,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace llvm {
@@ -119,7 +119,7 @@ private:
   };
 
   struct ListCompleterConcept : CompleterConcept {
-    ~ListCompleterConcept();
+    ~ListCompleterConcept() override;
     CompletionAction complete(StringRef Buffer, size_t Pos) const override;
     static std::string getCommonPrefix(const std::vector<Completion> &Comps);
     virtual std::vector<Completion> getCompletions(StringRef Buffer,
@@ -137,7 +137,7 @@ private:
 
   template <typename T>
   struct ListCompleterModel : ListCompleterConcept {
-    ListCompleterModel(T Value) : Value(Value) {}
+    ListCompleterModel(T Value) : Value(std::move(Value)) {}
     std::vector<Completion> getCompletions(StringRef Buffer,
                                            size_t Pos) const override {
       return Value(Buffer, Pos);

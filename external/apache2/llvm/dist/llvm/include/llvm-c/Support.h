@@ -1,9 +1,9 @@
 /*===-- llvm-c/Support.h - Support C Interface --------------------*- C -*-===*\
 |*                                                                            *|
-|*                     The LLVM Compiler Infrastructure                       *|
-|*                                                                            *|
-|* This file is distributed under the University of Illinois Open Source      *|
-|* License. See LICENSE.TXT for details.                                      *|
+|* Part of the LLVM Project, under the Apache License v2.0 with LLVM          *|
+|* Exceptions.                                                                *|
+|* See https://llvm.org/LICENSE.txt for license information.                  *|
+|* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    *|
 |*                                                                            *|
 |*===----------------------------------------------------------------------===*|
 |*                                                                            *|
@@ -14,30 +14,11 @@
 #ifndef LLVM_C_SUPPORT_H
 #define LLVM_C_SUPPORT_H
 
-#include "llvm/Support/DataTypes.h"
+#include "llvm-c/DataTypes.h"
+#include "llvm-c/ExternC.h"
+#include "llvm-c/Types.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/**
- * @defgroup LLVMCSupportTypes Types and Enumerations
- *
- * @{
- */
-
-typedef int LLVMBool;
-
-/**
- * Used to pass regions of memory through LLVM interfaces.
- *
- * @see llvm::MemoryBuffer
- */
-typedef struct LLVMOpaqueMemoryBuffer *LLVMMemoryBufferRef;
-
-/**
- * @}
- */
+LLVM_C_EXTERN_C_BEGIN
 
 /**
  * This function permanently loads the dynamic library at the given path.
@@ -58,8 +39,24 @@ LLVMBool LLVMLoadLibraryPermanently(const char* Filename);
 void LLVMParseCommandLineOptions(int argc, const char *const *argv,
                                  const char *Overview);
 
-#ifdef __cplusplus
-}
-#endif
+/**
+ * This function will search through all previously loaded dynamic
+ * libraries for the symbol \p symbolName. If it is found, the address of
+ * that symbol is returned. If not, null is returned.
+ *
+ * @see sys::DynamicLibrary::SearchForAddressOfSymbol()
+ */
+void *LLVMSearchForAddressOfSymbol(const char *symbolName);
+
+/**
+ * This functions permanently adds the symbol \p symbolName with the
+ * value \p symbolValue.  These symbols are searched before any
+ * libraries.
+ *
+ * @see sys::DynamicLibrary::AddSymbol()
+ */
+void LLVMAddSymbol(const char *symbolName, void *symbolValue);
+
+LLVM_C_EXTERN_C_END
 
 #endif

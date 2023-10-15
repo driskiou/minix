@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.13 2015/01/29 20:41:35 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:09 joerg Exp $
 
 LIB=	LLVMMipsMCTargetDesc
 
@@ -14,6 +14,7 @@ SRCS+=	MipsABIFlagsSection.cpp \
 	MipsAsmBackend.cpp \
 	MipsELFObjectWriter.cpp \
 	MipsELFStreamer.cpp \
+	MipsInstPrinter.cpp \
 	MipsMCAsmInfo.cpp \
 	MipsMCCodeEmitter.cpp \
 	MipsMCExpr.cpp \

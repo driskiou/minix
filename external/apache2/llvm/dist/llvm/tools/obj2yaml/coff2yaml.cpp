@@ -1,15 +1,19 @@
 //===------ utils/obj2yaml.cpp - obj2yaml conversion tool -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "obj2yaml.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/DebugInfo/CodeView/DebugChecksumsSubsection.h"
+#include "llvm/DebugInfo/CodeView/DebugStringTableSubsection.h"
+#include "llvm/DebugInfo/CodeView/StringsAndChecksums.h"
 #include "llvm/Object/COFF.h"
-#include "llvm/Object/COFFYAML.h"
+#include "llvm/ObjectYAML/COFFYAML.h"
+#include "llvm/ObjectYAML/CodeViewYAMLTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/YAMLTraits.h"
 
@@ -34,17 +38,12 @@ public:
 }
 
 COFFDumper::COFFDumper(const object::COFFObjectFile &Obj) : Obj(Obj) {
-  const object::pe32_header *PE32Header = nullptr;
-  Obj.getPE32Header(PE32Header);
-  if (PE32Header) {
+  if (const object::pe32_header *PE32Header = Obj.getPE32Header())
     dumpOptionalHeader(PE32Header);
-  } else {
-    const object::pe32plus_header *PE32PlusHeader = nullptr;
-    Obj.getPE32PlusHeader(PE32PlusHeader);
-    if (PE32PlusHeader) {
-      dumpOptionalHeader(PE32PlusHeader);
-    }
-  }
+  else if (const object::pe32plus_header *PE32PlusHeader =
+               Obj.getPE32PlusHeader())
+    dumpOptionalHeader(PE32PlusHeader);
+
   dumpHeader();
   dumpSections(Obj.getNumberOfSections());
   dumpSymbols(Obj.getNumberOfSymbols());
@@ -52,8 +51,6 @@ COFFDumper::COFFDumper(const object::COFFObjectFile &Obj) : Obj(Obj) {
 
 template <typename T> void COFFDumper::dumpOptionalHeader(T OptionalHeader) {
   YAMLObj.OptionalHeader = COFFYAML::PEHeader();
-  YAMLObj.OptionalHeader->Header.AddressOfEntryPoint =
-      OptionalHeader->AddressOfEntryPoint;
   YAMLObj.OptionalHeader->Header.AddressOfEntryPoint =
       OptionalHeader->AddressOfEntryPoint;
   YAMLObj.OptionalHeader->Header.ImageBase = OptionalHeader->ImageBase;
@@ -85,8 +82,8 @@ template <typename T> void COFFDumper::dumpOptionalHeader(T OptionalHeader) {
       OptionalHeader->SizeOfHeapCommit;
   unsigned I = 0;
   for (auto &DestDD : YAMLObj.OptionalHeader->DataDirectories) {
-    const object::data_directory *DD;
-    if (Obj.getDataDirectory(I++, DD))
+    const object::data_directory *DD = Obj.getDataDirectory(I++);
+    if (!DD)
       continue;
     DestDD = COFF::DataDirectory();
     DestDD->RelativeVirtualAddress = DD->RelativeVirtualAddress;
@@ -99,28 +96,119 @@ void COFFDumper::dumpHeader() {
   YAMLObj.Header.Characteristics = Obj.getCharacteristics();
 }
 
+static void
+initializeFileAndStringTable(const llvm::object::COFFObjectFile &Obj,
+                             codeview::StringsAndChecksumsRef &SC) {
+
+  ExitOnError Err("invalid .debug$S section");
+  // Iterate all .debug$S sections looking for the checksums and string table.
+  // Exit as soon as both sections are found.
+  for (const auto &S : Obj.sections()) {
+    if (SC.hasStrings() && SC.hasChecksums())
+      break;
+
+    Expected<StringRef> SectionNameOrErr = S.getName();
+    if (!SectionNameOrErr) {
+      consumeError(SectionNameOrErr.takeError());
+      continue;
+    }
+
+    ArrayRef<uint8_t> sectionData;
+    if ((*SectionNameOrErr) != ".debug$S")
+      continue;
+
+    const object::coff_section *COFFSection = Obj.getCOFFSection(S);
+
+    cantFail(Obj.getSectionContents(COFFSection, sectionData));
+
+    BinaryStreamReader Reader(sectionData, support::little);
+    uint32_t Magic;
+
+    Err(Reader.readInteger(Magic));
+    assert(Magic == COFF::DEBUG_SECTION_MAGIC && "Invalid .debug$S section!");
+
+    codeview::DebugSubsectionArray Subsections;
+    Err(Reader.readArray(Subsections, Reader.bytesRemaining()));
+
+    SC.initialize(Subsections);
+  }
+}
+
 void COFFDumper::dumpSections(unsigned NumSections) {
   std::vector<COFFYAML::Section> &YAMLSections = YAMLObj.Sections;
+  codeview::StringsAndChecksumsRef SC;
+  initializeFileAndStringTable(Obj, SC);
+
+  ExitOnError Err("invalid section table");
+  StringMap<bool> SymbolUnique;
+  for (const auto &S : Obj.symbols()) {
+    StringRef Name = Err(Obj.getSymbolName(Obj.getCOFFSymbol(S)));
+    StringMap<bool>::iterator It;
+    bool Inserted;
+    std::tie(It, Inserted) = SymbolUnique.insert(std::make_pair(Name, true));
+    if (!Inserted)
+      It->second = false;
+  }
+
   for (const auto &ObjSection : Obj.sections()) {
     const object::coff_section *COFFSection = Obj.getCOFFSection(ObjSection);
     COFFYAML::Section NewYAMLSection;
-    ObjSection.getName(NewYAMLSection.Name);
+
+    if (Expected<StringRef> NameOrErr = ObjSection.getName())
+      NewYAMLSection.Name = *NameOrErr;
+    else
+      consumeError(NameOrErr.takeError());
+
     NewYAMLSection.Header.Characteristics = COFFSection->Characteristics;
-    NewYAMLSection.Header.VirtualAddress = ObjSection.getAddress();
+    NewYAMLSection.Header.VirtualAddress = COFFSection->VirtualAddress;
     NewYAMLSection.Header.VirtualSize = COFFSection->VirtualSize;
-    NewYAMLSection.Alignment = ObjSection.getAlignment();
+    NewYAMLSection.Header.NumberOfLineNumbers =
+        COFFSection->NumberOfLinenumbers;
+    NewYAMLSection.Header.NumberOfRelocations =
+        COFFSection->NumberOfRelocations;
+    NewYAMLSection.Header.PointerToLineNumbers =
+        COFFSection->PointerToLinenumbers;
+    NewYAMLSection.Header.PointerToRawData = COFFSection->PointerToRawData;
+    NewYAMLSection.Header.PointerToRelocations =
+        COFFSection->PointerToRelocations;
+    NewYAMLSection.Header.SizeOfRawData = COFFSection->SizeOfRawData;
+    uint32_t Shift = (COFFSection->Characteristics >> 20) & 0xF;
+    NewYAMLSection.Alignment = (1U << Shift) >> 1;
+    assert(NewYAMLSection.Alignment <= 8192);
 
     ArrayRef<uint8_t> sectionData;
     if (!ObjSection.isBSS())
-      Obj.getSectionContents(COFFSection, sectionData);
+      cantFail(Obj.getSectionContents(COFFSection, sectionData));
     NewYAMLSection.SectionData = yaml::BinaryRef(sectionData);
+
+    if (NewYAMLSection.Name == ".debug$S")
+      NewYAMLSection.DebugS = CodeViewYAML::fromDebugS(sectionData, SC);
+    else if (NewYAMLSection.Name == ".debug$T")
+      NewYAMLSection.DebugT = CodeViewYAML::fromDebugT(sectionData,
+                                                       NewYAMLSection.Name);
+    else if (NewYAMLSection.Name == ".debug$P")
+      NewYAMLSection.DebugP = CodeViewYAML::fromDebugT(sectionData,
+                                                       NewYAMLSection.Name);
+    else if (NewYAMLSection.Name == ".debug$H")
+      NewYAMLSection.DebugH = CodeViewYAML::fromDebugH(sectionData);
 
     std::vector<COFFYAML::Relocation> Relocations;
     for (const auto &Reloc : ObjSection.relocations()) {
       const object::coff_relocation *reloc = Obj.getCOFFRelocation(Reloc);
       COFFYAML::Relocation Rel;
       object::symbol_iterator Sym = Reloc.getSymbol();
-      Sym->getName(Rel.SymbolName);
+      Expected<StringRef> SymbolNameOrErr = Sym->getName();
+      if (!SymbolNameOrErr) {
+       std::string Buf;
+       raw_string_ostream OS(Buf);
+       logAllUnhandledErrors(SymbolNameOrErr.takeError(), OS);
+       OS.flush();
+       report_fatal_error(Buf);
+      }
+      if (SymbolUnique.lookup(*SymbolNameOrErr))
+        Rel.SymbolName = *SymbolNameOrErr;
+      else
+        Rel.SymbolTableIndex = reloc->SymbolTableIndex;
       Rel.VirtualAddress = reloc->VirtualAddress;
       Rel.Type = reloc->Type;
       Relocations.push_back(Rel);
@@ -188,11 +276,13 @@ dumpCLRTokenDefinition(COFFYAML::Symbol *Sym,
 }
 
 void COFFDumper::dumpSymbols(unsigned NumSymbols) {
+  ExitOnError Err("invalid symbol table");
+
   std::vector<COFFYAML::Symbol> &Symbols = YAMLObj.Symbols;
   for (const auto &S : Obj.symbols()) {
     object::COFFSymbolRef Symbol = Obj.getCOFFSymbol(S);
     COFFYAML::Symbol Sym;
-    Obj.getSymbolName(Symbol, Sym.Name);
+    Sym.Name = Err(Obj.getSymbolName(Symbol));
     Sym.SimpleType = COFF::SymbolBaseType(Symbol.getBaseType());
     Sym.ComplexType = COFF::SymbolComplexType(Symbol.getComplexType());
     Sym.Header.StorageClass = Symbol.getStorageClass();
@@ -271,5 +361,5 @@ std::error_code coff2yaml(raw_ostream &Out, const object::COFFObjectFile &Obj) {
   yaml::Output Yout(Out);
   Yout << Dumper.getYAMLObj();
 
-  return object::object_error::success;
+  return std::error_code();
 }

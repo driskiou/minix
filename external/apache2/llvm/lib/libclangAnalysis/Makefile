@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.13 2015/01/29 20:41:36 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:56 joerg Exp $
 
 LIB=	clangAnalysis
 
@@ -8,25 +8,29 @@ LIB=	clangAnalysis
 
 SRCS+=	AnalysisDeclContext.cpp \
 	BodyFarm.cpp \
+	CalledOnceCheck.cpp \
+	CallGraph.cpp \
 	CFG.cpp \
 	CFGReachabilityAnalysis.cpp \
 	CFGStmtMap.cpp \
-	CallGraph.cpp \
+	CloneDetection.cpp \
 	CocoaConventions.cpp \
 	CodeInjector.cpp \
+	ConstructionContext.cpp \
 	Consumed.cpp \
 	Dominators.cpp \
-	FormatString.cpp \
+	ExprMutationAnalyzer.cpp \
+	IssueHash.cpp \
 	LiveVariables.cpp \
+	MacroExpansionContext.cpp \
 	ObjCNoReturn.cpp \
+	PathDiagnostic.cpp \
 	PostOrderCFGView.cpp \
 	ProgramPoint.cpp \
-	PrintfFormatString.cpp \
-	PseudoConstantAnalysis.cpp \
 	ReachableCode.cpp \
-	ScanfFormatString.cpp \
-	ThreadSafety.cpp \
+	RetainSummaryManager.cpp \
 	ThreadSafetyCommon.cpp \
+	ThreadSafety.cpp \
 	ThreadSafetyLogical.cpp \
 	ThreadSafetyTIL.cpp \
 	UninitializedValues.cpp

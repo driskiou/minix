@@ -1,16 +1,16 @@
-//===-- RegisterScavenging.h - Machine register scavenging ------*- C++ -*-===//
+//===- RegisterScavenging.h - Machine register scavenging -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares the machine register scavenger class. It can provide
-// information such as unused register at any point in a machine basic block.
-// It also provides a mechanism to make registers availbale by evicting them
-// to spill slots.
+/// \file
+/// This file declares the machine register scavenger class. It can provide
+/// information such as unused register at any point in a machine basic block.
+/// It also provides a mechanism to make registers available by evicting them
+/// to spill slots.
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,50 +18,49 @@
 #define LLVM_CODEGEN_REGISTERSCAVENGING_H
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/LiveRegUnits.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/MC/LaneBitmask.h"
 
 namespace llvm {
 
-class MachineRegisterInfo;
-class TargetRegisterInfo;
+class MachineInstr;
 class TargetInstrInfo;
 class TargetRegisterClass;
+class TargetRegisterInfo;
 
 class RegScavenger {
   const TargetRegisterInfo *TRI;
   const TargetInstrInfo *TII;
   MachineRegisterInfo* MRI;
-  MachineBasicBlock *MBB;
+  MachineBasicBlock *MBB = nullptr;
   MachineBasicBlock::iterator MBBI;
-  unsigned NumRegUnits;
+  unsigned NumRegUnits = 0;
 
-  /// Tracking - True if RegScavenger is currently tracking the liveness of 
-  /// registers.
-  bool Tracking;
+  /// True if RegScavenger is currently tracking the liveness of registers.
+  bool Tracking = false;
 
   /// Information on scavenged registers (held in a spill slot).
   struct ScavengedInfo {
-    ScavengedInfo(int FI = -1) : FrameIndex(FI), Reg(0), Restore(nullptr) {}
+    ScavengedInfo(int FI = -1) : FrameIndex(FI) {}
 
     /// A spill slot used for scavenging a register post register allocation.
     int FrameIndex;
 
     /// If non-zero, the specific register is currently being
     /// scavenged. That is, it is spilled to this scavenging stack slot.
-    unsigned Reg;
+    Register Reg;
 
     /// The instruction that restores the scavenged register from stack.
-    const MachineInstr *Restore;
+    const MachineInstr *Restore = nullptr;
   };
 
   /// A vector of information on scavenged registers.
   SmallVector<ScavengedInfo, 2> Scavenged;
 
-  /// RegUnitsAvailable - The current state of each reg unit immediatelly
-  /// before MBBI. One bit per register unit. If bit is not set it means any
-  /// register containing that register unit is currently being used.
-  BitVector RegUnitsAvailable;
+  LiveRegUnits LiveUnits;
 
   // These BitVectors are only used internally to forward(). They are members
   // to avoid frequent reallocations.
@@ -69,57 +68,56 @@ class RegScavenger {
   BitVector TmpRegUnits;
 
 public:
-  RegScavenger()
-    : MBB(nullptr), NumRegUnits(0), Tracking(false) {}
+  RegScavenger() = default;
 
-  /// enterBasicBlock - Start tracking liveness from the begin of the specific
-  /// basic block.
-  void enterBasicBlock(MachineBasicBlock *mbb);
+  /// Start tracking liveness from the begin of basic block \p MBB.
+  void enterBasicBlock(MachineBasicBlock &MBB);
 
-  /// initRegState - allow resetting register state info for multiple
-  /// passes over/within the same function.
-  void initRegState();
+  /// Start tracking liveness from the end of basic block \p MBB.
+  /// Use backward() to move towards the beginning of the block. This is
+  /// preferred to enterBasicBlock() and forward() because it does not depend
+  /// on the presence of kill flags.
+  void enterBasicBlockEnd(MachineBasicBlock &MBB);
 
-  /// forward - Move the internal MBB iterator and update register states.
+  /// Move the internal MBB iterator and update register states.
   void forward();
 
-  /// forward - Move the internal MBB iterator and update register states until
+  /// Move the internal MBB iterator and update register states until
   /// it has processed the specific iterator.
   void forward(MachineBasicBlock::iterator I) {
     if (!Tracking && MBB->begin() != I) forward();
     while (MBBI != I) forward();
   }
 
-  /// Invert the behavior of forward() on the current instruction (undo the
-  /// changes to the available registers made by forward()).
-  void unprocess();
+  /// Update internal register state and move MBB iterator backwards.
+  /// Contrary to unprocess() this method gives precise results even in the
+  /// absence of kill flags.
+  void backward();
 
-  /// Unprocess instructions until you reach the provided iterator.
-  void unprocess(MachineBasicBlock::iterator I) {
-    while (MBBI != I) unprocess();
+  /// Call backward() as long as the internal iterator does not point to \p I.
+  void backward(MachineBasicBlock::iterator I) {
+    while (MBBI != I)
+      backward();
   }
 
-  /// skipTo - Move the internal MBB iterator but do not update register states.
+  /// Move the internal MBB iterator but do not update register states.
   void skipTo(MachineBasicBlock::iterator I) {
     if (I == MachineBasicBlock::iterator(nullptr))
       Tracking = false;
     MBBI = I;
   }
 
-  MachineBasicBlock::iterator getCurrentPosition() const {
-    return MBBI;
-  }
-  
-  /// isRegUsed - return if a specific register is currently used.
-  bool isRegUsed(unsigned Reg, bool includeReserved = true) const;
+  MachineBasicBlock::iterator getCurrentPosition() const { return MBBI; }
 
-  /// getRegsAvailable - Return all available registers in the register class
-  /// in Mask.
+  /// Return if a specific register is currently used.
+  bool isRegUsed(Register Reg, bool includeReserved = true) const;
+
+  /// Return all available registers in the register class in Mask.
   BitVector getRegsAvailable(const TargetRegisterClass *RC);
 
-  /// FindUnusedReg - Find a unused register of the specified register class.
+  /// Find an unused register of the specified register class.
   /// Return 0 if none is found.
-  unsigned FindUnusedReg(const TargetRegisterClass *RegClass) const;
+  Register FindUnusedReg(const TargetRegisterClass *RC) const;
 
   /// Add a scavenging frame index.
   void addScavengingFrameIndex(int FI) {
@@ -144,51 +142,89 @@ public:
         A.push_back(I->FrameIndex);
   }
 
-  /// scavengeRegister - Make a register of the specific register class
+  /// Make a register of the specific register class
   /// available and do the appropriate bookkeeping. SPAdj is the stack
   /// adjustment due to call frame, it's passed along to eliminateFrameIndex().
   /// Returns the scavenged register.
-  unsigned scavengeRegister(const TargetRegisterClass *RegClass,
-                            MachineBasicBlock::iterator I, int SPAdj);
-  unsigned scavengeRegister(const TargetRegisterClass *RegClass, int SPAdj) {
-    return scavengeRegister(RegClass, MBBI, SPAdj);
+  /// This is deprecated as it depends on the quality of the kill flags being
+  /// present; Use scavengeRegisterBackwards() instead!
+  ///
+  /// If \p AllowSpill is false, fail if a spill is required to make the
+  /// register available, and return NoRegister.
+  Register scavengeRegister(const TargetRegisterClass *RC,
+                            MachineBasicBlock::iterator I, int SPAdj,
+                            bool AllowSpill = true);
+  Register scavengeRegister(const TargetRegisterClass *RegClass, int SPAdj,
+                            bool AllowSpill = true) {
+    return scavengeRegister(RegClass, MBBI, SPAdj, AllowSpill);
   }
 
-  /// setRegUsed - Tell the scavenger a register is used.
+  /// Make a register of the specific register class available from the current
+  /// position backwards to the place before \p To. If \p RestoreAfter is true
+  /// this includes the instruction following the current position.
+  /// SPAdj is the stack adjustment due to call frame, it's passed along to
+  /// eliminateFrameIndex().
+  /// Returns the scavenged register.
   ///
-  void setRegUsed(unsigned Reg);
+  /// If \p AllowSpill is false, fail if a spill is required to make the
+  /// register available, and return NoRegister.
+  Register scavengeRegisterBackwards(const TargetRegisterClass &RC,
+                                     MachineBasicBlock::iterator To,
+                                     bool RestoreAfter, int SPAdj,
+                                     bool AllowSpill = true);
+
+  /// Tell the scavenger a register is used.
+  void setRegUsed(Register Reg, LaneBitmask LaneMask = LaneBitmask::getAll());
+
 private:
-  /// isReserved - Returns true if a register is reserved. It is never "unused".
-  bool isReserved(unsigned Reg) const { return MRI->isReserved(Reg); }
+  /// Returns true if a register is reserved. It is never "unused".
+  bool isReserved(Register Reg) const { return MRI->isReserved(Reg); }
 
   /// setUsed / setUnused - Mark the state of one or a number of register units.
   ///
-  void setUsed(BitVector &RegUnits) {
-    RegUnitsAvailable.reset(RegUnits);
+  void setUsed(const BitVector &RegUnits) {
+    LiveUnits.addUnits(RegUnits);
   }
-  void setUnused(BitVector &RegUnits) {
-    RegUnitsAvailable |= RegUnits;
+  void setUnused(const BitVector &RegUnits) {
+    LiveUnits.removeUnits(RegUnits);
   }
 
   /// Processes the current instruction and fill the KillRegUnits and
   /// DefRegUnits bit vectors.
   void determineKillsAndDefs();
-  
+
   /// Add all Reg Units that Reg contains to BV.
-  void addRegUnits(BitVector &BV, unsigned Reg);
-  
-  /// findSurvivorReg - Return the candidate register that is unused for the
-  /// longest after StartMI. UseMI is set to the instruction where the search
-  /// stopped.
+  void addRegUnits(BitVector &BV, MCRegister Reg);
+
+  /// Remove all Reg Units that \p Reg contains from \p BV.
+  void removeRegUnits(BitVector &BV, MCRegister Reg);
+
+  /// Return the candidate register that is unused for the longest after
+  /// StartMI. UseMI is set to the instruction where the search stopped.
   ///
   /// No more than InstrLimit instructions are inspected.
-  unsigned findSurvivorReg(MachineBasicBlock::iterator StartMI,
+  Register findSurvivorReg(MachineBasicBlock::iterator StartMI,
                            BitVector &Candidates,
                            unsigned InstrLimit,
                            MachineBasicBlock::iterator &UseMI);
 
+  /// Initialize RegisterScavenger.
+  void init(MachineBasicBlock &MBB);
+
+  /// Mark live-in registers of basic block as used.
+  void setLiveInsUsed(const MachineBasicBlock &MBB);
+
+  /// Spill a register after position \p After and reload it before position
+  /// \p UseMI.
+  ScavengedInfo &spill(Register Reg, const TargetRegisterClass &RC, int SPAdj,
+                       MachineBasicBlock::iterator Before,
+                       MachineBasicBlock::iterator &UseMI);
 };
 
-} // End llvm namespace
+/// Replaces all frame index virtual registers with physical registers. Uses the
+/// register scavenger to find an appropriate register to use.
+void scavengeFrameVirtualRegs(MachineFunction &MF, RegScavenger &RS);
 
-#endif
+} // end namespace llvm
+
+#endif // LLVM_CODEGEN_REGISTERSCAVENGING_H

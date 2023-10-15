@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.14 2013/10/14 01:37:39 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:57 joerg Exp $
 
 LIB=	clangStaticAnalyzerCore
 
@@ -6,44 +6,51 @@ LIB=	clangStaticAnalyzerCore
 
 .PATH: ${CLANG_SRCDIR}/lib/StaticAnalyzer/Core
 
-SRCS+=	APSIntType.cpp \
-	AnalysisManager.cpp \
+SRCS+=	AnalysisManager.cpp \
 	AnalyzerOptions.cpp \
+	APSIntType.cpp \
 	BasicValueFactory.cpp \
 	BlockCounter.cpp \
 	BugReporter.cpp \
 	BugReporterVisitors.cpp \
 	CallEvent.cpp \
-	Checker.cpp \
 	CheckerContext.cpp \
+	Checker.cpp \
 	CheckerHelpers.cpp \
 	CheckerManager.cpp \
-	CheckerRegistry.cpp \
+	CheckerRegistryData.cpp \
 	CommonBugCategories.cpp \
 	ConstraintManager.cpp \
 	CoreEngine.cpp \
+	DynamicExtent.cpp \
+	DynamicType.cpp \
 	Environment.cpp \
 	ExplodedGraph.cpp \
-	ExprEngine.cpp \
-	ExprEngineC.cpp \
-	ExprEngineCXX.cpp \
 	ExprEngineCallAndReturn.cpp \
+	ExprEngineC.cpp \
+	ExprEngine.cpp \
+	ExprEngineCXX.cpp \
 	ExprEngineObjC.cpp \
 	FunctionSummary.cpp \
 	HTMLDiagnostics.cpp \
+	LoopUnrolling.cpp \
+	LoopWidening.cpp \
 	MemRegion.cpp \
-	PathDiagnostic.cpp \
 	PlistDiagnostics.cpp \
 	ProgramState.cpp \
 	RangeConstraintManager.cpp \
+	RangedConstraintManager.cpp \
 	RegionStore.cpp \
+	SarifDiagnostics.cpp \
 	SimpleConstraintManager.cpp \
 	SimpleSValBuilder.cpp \
+	SMTConstraintManager.cpp \
 	Store.cpp \
 	SValBuilder.cpp \
 	SVals.cpp \
-	SubEngine.cpp \
-	SymbolManager.cpp
+	SymbolManager.cpp \
+	TextDiagnostics.cpp \
+	WorkList.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>

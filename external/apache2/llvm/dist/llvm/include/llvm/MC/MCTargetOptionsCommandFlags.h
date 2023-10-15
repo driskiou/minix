@@ -1,9 +1,8 @@
 //===-- MCTargetOptionsCommandFlags.h --------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,45 +14,44 @@
 #ifndef LLVM_MC_MCTARGETOPTIONSCOMMANDFLAGS_H
 #define LLVM_MC_MCTARGETOPTIONSCOMMANDFLAGS_H
 
-#include "llvm/MC/MCTargetOptions.h"
-#include "llvm/Support/CommandLine.h"
-using namespace llvm;
+#include "llvm/ADT/Optional.h"
+#include <string>
 
-cl::opt<MCTargetOptions::AsmInstrumentation> AsmInstrumentation(
-    "asm-instrumentation", cl::desc("Instrumentation of inline assembly and "
-                                    "assembly source files"),
-    cl::init(MCTargetOptions::AsmInstrumentationNone),
-    cl::values(clEnumValN(MCTargetOptions::AsmInstrumentationNone, "none",
-                          "no instrumentation at all"),
-               clEnumValN(MCTargetOptions::AsmInstrumentationAddress, "address",
-                          "instrument instructions with memory arguments"),
-               clEnumValEnd));
+namespace llvm {
 
-cl::opt<bool> RelaxAll("mc-relax-all",
-                       cl::desc("When used with filetype=obj, "
-                                "relax all fixups in the emitted object file"));
+class MCTargetOptions;
 
-cl::opt<int> DwarfVersion("dwarf-version", cl::desc("Dwarf version"),
-                          cl::init(0));
+namespace mc {
 
-cl::opt<bool> ShowMCInst("asm-show-inst",
-                         cl::desc("Emit internal instruction representation to "
-                                  "assembly file"));
+bool getRelaxAll();
+Optional<bool> getExplicitRelaxAll();
 
-cl::opt<std::string>
-ABIName("target-abi", cl::Hidden,
-        cl::desc("The name of the ABI to be targeted from the backend."),
-        cl::init(""));
+bool getIncrementalLinkerCompatible();
 
-static inline MCTargetOptions InitMCTargetOptionsFromFlags() {
-  MCTargetOptions Options;
-  Options.SanitizeAddress =
-      (AsmInstrumentation == MCTargetOptions::AsmInstrumentationAddress);
-  Options.MCRelaxAll = RelaxAll;
-  Options.DwarfVersion = DwarfVersion;
-  Options.ShowMCInst = ShowMCInst;
-  Options.ABIName = ABIName;
-  return Options;
-}
+int getDwarfVersion();
+
+bool getDwarf64();
+
+bool getShowMCInst();
+
+bool getFatalWarnings();
+
+bool getNoWarn();
+
+bool getNoDeprecatedWarn();
+
+std::string getABIName();
+
+/// Create this object with static storage to register mc-related command
+/// line options.
+struct RegisterMCTargetOptionsFlags {
+  RegisterMCTargetOptionsFlags();
+};
+
+MCTargetOptions InitMCTargetOptionsFromFlags();
+
+} // namespace mc
+
+} // namespace llvm
 
 #endif

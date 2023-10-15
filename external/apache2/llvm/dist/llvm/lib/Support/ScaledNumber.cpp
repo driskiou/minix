@@ -1,9 +1,8 @@
 //==- lib/Support/ScaledNumber.cpp - Support for scaled numbers -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,7 +12,9 @@
 
 #include "llvm/Support/ScaledNumber.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 using namespace llvm::ScaledNumbers;
@@ -181,7 +182,7 @@ static std::string toStringAPFloat(uint64_t D, int E, unsigned Precision) {
 
   // Build the float and print it.
   uint64_t RawBits[2] = {D, AdjustedE};
-  APFloat Float(APFloat::x87DoubleExtended, APInt(80, RawBits));
+  APFloat Float(APFloat::x87DoubleExtended(), APInt(80, RawBits));
   SmallVector<char, 24> Chars;
   Float.toString(Chars, Precision, 0);
   return std::string(Chars.begin(), Chars.end());

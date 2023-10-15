@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.6 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:47 joerg Exp $
 
 PROG_CXX=	llvm-ar
 NOMAN=		yes
@@ -10,32 +10,32 @@ NOMAN=		yes
 SRCS=	llvm-ar.cpp
 
 LLVM_LIBS+= \
+	ToolDriversDlltool \
+	ToolDrivers \
 	AArch64AsmParser \
 	AArch64MCTargetDesc \
-	AArch64AsmPrinter \
 	AArch64TargetInfo \
 	AArch64Utils \
+	AMDGPUMCTargetDesc \
+	AMDGPUTargetInfo \
+	AMDGPUAsmParser \
+	AMDGPUUtils \
 	ARMAsmParser \
 	ARMMCTargetDesc \
-	ARMAsmPrinter \
 	ARMTargetInfo \
+	ARMUtils \
 	MipsAsmParser \
 	MipsMCTargetDesc \
-	MipsAsmPrinter \
 	MipsTargetInfo \
 	PowerPCAsmParser \
 	PowerPCMCTargetDesc \
-	PowerPCAsmPrinter \
 	PowerPCTargetInfo \
 	SparcTargetInfo \
 	SparcMCTargetDesc \
 	SparcAsmParser \
-	SparcAsmPrinter \
 	X86AsmParser \
 	X86CodeGen \
 	X86MCTargetDesc \
-	X86AsmPrinter \
-	X86Utils \
 	X86TargetInfo \
 	CodeGen \
 	MCDisassembler \
@@ -43,8 +43,13 @@ LLVM_LIBS+= \
 	MCParser \
 	MC \
 	BitReader \
+	BitstreamReader \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Option \
+	Support \
+	Demangle
 
 LDADD+=	-lz
 DPADD+=	${LIBZ}

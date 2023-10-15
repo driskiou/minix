@@ -1,9 +1,8 @@
 //===- RWMutex.cpp - Reader/Writer Mutual Exclusion Lock --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,44 +10,39 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Config/config.h"
+#include "llvm/Support/Allocator.h"
 #include "llvm/Support/RWMutex.h"
-#include <cstring>
+#include "llvm/Config/config.h"
 
-//===----------------------------------------------------------------------===//
-//=== WARNING: Implementation here must contain only TRULY operating system
-//===          independent code.
-//===----------------------------------------------------------------------===//
+#if defined(LLVM_USE_RW_MUTEX_IMPL)
+using namespace llvm;
+using namespace sys;
 
 #if !defined(LLVM_ENABLE_THREADS) || LLVM_ENABLE_THREADS == 0
 // Define all methods as no-ops if threading is explicitly disabled
-namespace llvm {
-using namespace sys;
-RWMutexImpl::RWMutexImpl() { }
-RWMutexImpl::~RWMutexImpl() { }
-bool RWMutexImpl::reader_acquire() { return true; }
-bool RWMutexImpl::reader_release() { return true; }
-bool RWMutexImpl::writer_acquire() { return true; }
-bool RWMutexImpl::writer_release() { return true; }
-}
+
+RWMutexImpl::RWMutexImpl() = default;
+RWMutexImpl::~RWMutexImpl() = default;
+
+bool RWMutexImpl::lock_shared() { return true; }
+bool RWMutexImpl::unlock_shared() { return true; }
+bool RWMutexImpl::lock() { return true; }
+bool RWMutexImpl::unlock() { return true; }
+
 #else
 
 #if defined(HAVE_PTHREAD_H) && defined(HAVE_PTHREAD_RWLOCK_INIT)
 
 #include <cassert>
+#include <cstdlib>
 #include <pthread.h>
-#include <stdlib.h>
-
-namespace llvm {
-using namespace sys;
 
 // Construct a RWMutex using pthread calls
 RWMutexImpl::RWMutexImpl()
-  : data_(nullptr)
 {
   // Declare the pthread_rwlock data structures
   pthread_rwlock_t* rwlock =
-    static_cast<pthread_rwlock_t*>(malloc(sizeof(pthread_rwlock_t)));
+    static_cast<pthread_rwlock_t*>(safe_malloc(sizeof(pthread_rwlock_t)));
 
 #ifdef __APPLE__
   // Workaround a bug/mis-feature in Darwin's pthread_rwlock_init.
@@ -74,7 +68,7 @@ RWMutexImpl::~RWMutexImpl()
 }
 
 bool
-RWMutexImpl::reader_acquire()
+RWMutexImpl::lock_shared()
 {
   pthread_rwlock_t* rwlock = static_cast<pthread_rwlock_t*>(data_);
   assert(rwlock != nullptr);
@@ -84,7 +78,7 @@ RWMutexImpl::reader_acquire()
 }
 
 bool
-RWMutexImpl::reader_release()
+RWMutexImpl::unlock_shared()
 {
   pthread_rwlock_t* rwlock = static_cast<pthread_rwlock_t*>(data_);
   assert(rwlock != nullptr);
@@ -94,7 +88,7 @@ RWMutexImpl::reader_release()
 }
 
 bool
-RWMutexImpl::writer_acquire()
+RWMutexImpl::lock()
 {
   pthread_rwlock_t* rwlock = static_cast<pthread_rwlock_t*>(data_);
   assert(rwlock != nullptr);
@@ -104,7 +98,7 @@ RWMutexImpl::writer_acquire()
 }
 
 bool
-RWMutexImpl::writer_release()
+RWMutexImpl::unlock()
 {
   pthread_rwlock_t* rwlock = static_cast<pthread_rwlock_t*>(data_);
   assert(rwlock != nullptr);
@@ -113,13 +107,30 @@ RWMutexImpl::writer_release()
   return errorcode == 0;
 }
 
+#else
+
+RWMutexImpl::RWMutexImpl() : data_(new MutexImpl(false)) { }
+
+RWMutexImpl::~RWMutexImpl() {
+  delete static_cast<MutexImpl *>(data_);
 }
 
-#elif defined(LLVM_ON_UNIX)
-#include "Unix/RWMutex.inc"
-#elif defined( LLVM_ON_WIN32)
-#include "Windows/RWMutex.inc"
-#else
-#warning Neither LLVM_ON_UNIX nor LLVM_ON_WIN32 was set in Support/Mutex.cpp
+bool RWMutexImpl::lock_shared() {
+  return static_cast<MutexImpl *>(data_)->acquire();
+}
+
+bool RWMutexImpl::unlock_shared() {
+  return static_cast<MutexImpl *>(data_)->release();
+}
+
+bool RWMutexImpl::lock() {
+  return static_cast<MutexImpl *>(data_)->acquire();
+}
+
+bool RWMutexImpl::unlock() {
+  return static_cast<MutexImpl *>(data_)->release();
+}
+
+#endif
 #endif
 #endif

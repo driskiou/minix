@@ -1,9 +1,8 @@
 //===-- CommandFlags.h - Command Line Flags Interface -----------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,285 +15,161 @@
 #ifndef LLVM_CODEGEN_COMMANDFLAGS_H
 #define LLVM_CODEGEN_COMMANDFLAGS_H
 
+#include "llvm/ADT/FloatingPointMode.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/MC/MCTargetOptionsCommandFlags.h"
 #include "llvm/Support/CodeGen.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include <string>
-using namespace llvm;
+#include <vector>
 
-cl::opt<std::string>
-MArch("march", cl::desc("Architecture to generate code for (see --version)"));
+namespace llvm {
 
-cl::opt<std::string>
-MCPU("mcpu",
-     cl::desc("Target a specific cpu type (-mcpu=help for details)"),
-     cl::value_desc("cpu-name"),
-     cl::init(""));
+class Module;
 
-cl::list<std::string>
-MAttrs("mattr",
-       cl::CommaSeparated,
-       cl::desc("Target specific attributes (-mattr=help for details)"),
-       cl::value_desc("a1,+a2,-a3,..."));
+namespace codegen {
 
-cl::opt<Reloc::Model>
-RelocModel("relocation-model",
-           cl::desc("Choose relocation model"),
-           cl::init(Reloc::Default),
-           cl::values(
-              clEnumValN(Reloc::Default, "default",
-                      "Target default relocation model"),
-              clEnumValN(Reloc::Static, "static",
-                      "Non-relocatable code"),
-              clEnumValN(Reloc::PIC_, "pic",
-                      "Fully relocatable, position independent code"),
-              clEnumValN(Reloc::DynamicNoPIC, "dynamic-no-pic",
-                      "Relocatable external references, non-relocatable code"),
-              clEnumValEnd));
+std::string getMArch();
 
-cl::opt<ThreadModel::Model>
-TMModel("thread-model",
-        cl::desc("Choose threading model"),
-        cl::init(ThreadModel::POSIX),
-        cl::values(clEnumValN(ThreadModel::POSIX, "posix",
-                              "POSIX thread model"),
-                   clEnumValN(ThreadModel::Single, "single",
-                              "Single thread model"),
-                   clEnumValEnd));
+std::string getMCPU();
 
-cl::opt<llvm::CodeModel::Model>
-CMModel("code-model",
-        cl::desc("Choose code model"),
-        cl::init(CodeModel::Default),
-        cl::values(clEnumValN(CodeModel::Default, "default",
-                              "Target default code model"),
-                   clEnumValN(CodeModel::Small, "small",
-                              "Small code model"),
-                   clEnumValN(CodeModel::Kernel, "kernel",
-                              "Kernel code model"),
-                   clEnumValN(CodeModel::Medium, "medium",
-                              "Medium code model"),
-                   clEnumValN(CodeModel::Large, "large",
-                              "Large code model"),
-                   clEnumValEnd));
+std::vector<std::string> getMAttrs();
 
-cl::opt<TargetMachine::CodeGenFileType>
-FileType("filetype", cl::init(TargetMachine::CGFT_AssemblyFile),
-  cl::desc("Choose a file type (not all types are supported by all targets):"),
-  cl::values(
-             clEnumValN(TargetMachine::CGFT_AssemblyFile, "asm",
-                        "Emit an assembly ('.s') file"),
-             clEnumValN(TargetMachine::CGFT_ObjectFile, "obj",
-                        "Emit a native object ('.o') file"),
-             clEnumValN(TargetMachine::CGFT_Null, "null",
-                        "Emit nothing, for performance testing"),
-             clEnumValEnd));
+Reloc::Model getRelocModel();
+Optional<Reloc::Model> getExplicitRelocModel();
 
-cl::opt<bool>
-EnableFPMAD("enable-fp-mad",
-            cl::desc("Enable less precise MAD instructions to be generated"),
-            cl::init(false));
+ThreadModel::Model getThreadModel();
 
-cl::opt<bool>
-DisableFPElim("disable-fp-elim",
-              cl::desc("Disable frame pointer elimination optimization"),
-              cl::init(false));
+CodeModel::Model getCodeModel();
+Optional<CodeModel::Model> getExplicitCodeModel();
 
-cl::opt<bool>
-EnableUnsafeFPMath("enable-unsafe-fp-math",
-                cl::desc("Enable optimizations that may decrease FP precision"),
-                cl::init(false));
+llvm::ExceptionHandling getExceptionModel();
 
-cl::opt<bool>
-EnableNoInfsFPMath("enable-no-infs-fp-math",
-                cl::desc("Enable FP math optimizations that assume no +-Infs"),
-                cl::init(false));
+CodeGenFileType getFileType();
+Optional<CodeGenFileType> getExplicitFileType();
 
-cl::opt<bool>
-EnableNoNaNsFPMath("enable-no-nans-fp-math",
-                   cl::desc("Enable FP math optimizations that assume no NaNs"),
-                   cl::init(false));
+CodeGenFileType getFileType();
 
-cl::opt<bool>
-EnableHonorSignDependentRoundingFPMath("enable-sign-dependent-rounding-fp-math",
-      cl::Hidden,
-      cl::desc("Force codegen to assume rounding mode can change dynamically"),
-      cl::init(false));
+FramePointerKind getFramePointerUsage();
 
-cl::opt<bool>
-GenerateSoftFloatCalls("soft-float",
-                    cl::desc("Generate software floating point library calls"),
-                    cl::init(false));
+bool getEnableUnsafeFPMath();
 
-cl::opt<llvm::FloatABI::ABIType>
-FloatABIForCalls("float-abi",
-                 cl::desc("Choose float ABI type"),
-                 cl::init(FloatABI::Default),
-                 cl::values(
-                     clEnumValN(FloatABI::Default, "default",
-                                "Target default float ABI type"),
-                     clEnumValN(FloatABI::Soft, "soft",
-                                "Soft float ABI (implied by -soft-float)"),
-                     clEnumValN(FloatABI::Hard, "hard",
-                                "Hard float ABI (uses FP registers)"),
-                     clEnumValEnd));
+bool getEnableNoInfsFPMath();
 
-cl::opt<llvm::FPOpFusion::FPOpFusionMode>
-FuseFPOps("fp-contract",
-          cl::desc("Enable aggressive formation of fused FP ops"),
-          cl::init(FPOpFusion::Standard),
-          cl::values(
-              clEnumValN(FPOpFusion::Fast, "fast",
-                         "Fuse FP ops whenever profitable"),
-              clEnumValN(FPOpFusion::Standard, "on",
-                         "Only fuse 'blessed' FP ops."),
-              clEnumValN(FPOpFusion::Strict, "off",
-                         "Only fuse FP ops when the result won't be effected."),
-              clEnumValEnd));
+bool getEnableNoNaNsFPMath();
 
-cl::opt<bool>
-DontPlaceZerosInBSS("nozero-initialized-in-bss",
-              cl::desc("Don't place zero-initialized symbols into bss section"),
-              cl::init(false));
+bool getEnableNoSignedZerosFPMath();
 
-cl::opt<bool>
-EnableGuaranteedTailCallOpt("tailcallopt",
-  cl::desc("Turn fastcc calls into tail calls by (potentially) changing ABI."),
-  cl::init(false));
+bool getEnableNoTrappingFPMath();
 
-cl::opt<bool>
-DisableTailCalls("disable-tail-calls",
-                 cl::desc("Never emit tail calls"),
-                 cl::init(false));
+DenormalMode::DenormalModeKind getDenormalFPMath();
+DenormalMode::DenormalModeKind getDenormalFP32Math();
 
-cl::opt<unsigned>
-OverrideStackAlignment("stack-alignment",
-                       cl::desc("Override default stack alignment"),
-                       cl::init(0));
+bool getEnableHonorSignDependentRoundingFPMath();
 
-cl::opt<std::string>
-TrapFuncName("trap-func", cl::Hidden,
-        cl::desc("Emit a call to trap function rather than a trap instruction"),
-        cl::init(""));
+llvm::FloatABI::ABIType getFloatABIForCalls();
 
-cl::opt<bool>
-EnablePIE("enable-pie",
-          cl::desc("Assume the creation of a position independent executable."),
-          cl::init(false));
+llvm::FPOpFusion::FPOpFusionMode getFuseFPOps();
 
-cl::opt<bool>
-UseCtors("use-ctors",
-             cl::desc("Use .ctors instead of .init_array."),
-             cl::init(false));
+bool getDontPlaceZerosInBSS();
 
-cl::opt<std::string> StopAfter("stop-after",
-                            cl::desc("Stop compilation after a specific pass"),
-                            cl::value_desc("pass-name"),
-                                      cl::init(""));
-cl::opt<std::string> StartAfter("start-after",
-                          cl::desc("Resume compilation after a specific pass"),
-                          cl::value_desc("pass-name"),
-                          cl::init(""));
+bool getEnableGuaranteedTailCallOpt();
 
-cl::opt<bool> DataSections("data-sections",
-                           cl::desc("Emit data into separate sections"),
-                           cl::init(false));
+bool getEnableAIXExtendedAltivecABI();
 
-cl::opt<bool>
-FunctionSections("function-sections",
-                 cl::desc("Emit functions into separate sections"),
-                 cl::init(false));
+bool getDisableTailCalls();
 
-cl::opt<llvm::JumpTable::JumpTableType>
-JTableType("jump-table-type",
-          cl::desc("Choose the type of Jump-Instruction Table for jumptable."),
-          cl::init(JumpTable::Single),
-          cl::values(
-              clEnumValN(JumpTable::Single, "single",
-                         "Create a single table for all jumptable functions"),
-              clEnumValN(JumpTable::Arity, "arity",
-                         "Create one table per number of parameters."),
-              clEnumValN(JumpTable::Simplified, "simplified",
-                         "Create one table per simplified function type."),
-              clEnumValN(JumpTable::Full, "full",
-                         "Create one table per unique function type."),
-              clEnumValEnd));
+bool getStackSymbolOrdering();
 
-cl::opt<bool>
-FCFI("fcfi",
-     cl::desc("Apply forward-edge control-flow integrity"),
-     cl::init(false));
+unsigned getOverrideStackAlignment();
 
-cl::opt<llvm::CFIntegrity>
-CFIType("cfi-type",
-        cl::desc("Choose the type of Control-Flow Integrity check to add"),
-        cl::init(CFIntegrity::Sub),
-        cl::values(
-            clEnumValN(CFIntegrity::Sub, "sub",
-                       "Subtract the pointer from the table base, then mask."),
-            clEnumValN(CFIntegrity::Ror, "ror",
-                       "Use rotate to check the offset from a table base."),
-            clEnumValN(CFIntegrity::Add, "add",
-                       "Mask out the high bits and add to an aligned base."),
-            clEnumValEnd));
+bool getStackRealign();
 
-cl::opt<bool>
-CFIEnforcing("cfi-enforcing",
-             cl::desc("Enforce CFI or pass the violation to a function."),
-             cl::init(false));
+std::string getTrapFuncName();
 
-// Note that this option is linked to the cfi-enforcing option above: if
-// cfi-enforcing is set, then the cfi-func-name option is entirely ignored. If
-// cfi-enforcing is false and no cfi-func-name is set, then a default function
-// will be generated that ignores all CFI violations. The expected signature for
-// functions called with CFI violations is
-//
-// void (i8*, i8*)
-//
-// The first pointer is a C string containing the name of the function in which
-// the violation occurs, and the second pointer is the pointer that violated
-// CFI.
-cl::opt<std::string>
-CFIFuncName("cfi-func-name", cl::desc("The name of the CFI function to call"),
-            cl::init(""));
+bool getUseCtors();
 
-// Common utility function tightly tied to the options listed here. Initializes
-// a TargetOptions object with CodeGen flags and returns it.
-static inline TargetOptions InitTargetOptionsFromCodeGenFlags() {
-  TargetOptions Options;
-  Options.LessPreciseFPMADOption = EnableFPMAD;
-  Options.NoFramePointerElim = DisableFPElim;
-  Options.AllowFPOpFusion = FuseFPOps;
-  Options.UnsafeFPMath = EnableUnsafeFPMath;
-  Options.NoInfsFPMath = EnableNoInfsFPMath;
-  Options.NoNaNsFPMath = EnableNoNaNsFPMath;
-  Options.HonorSignDependentRoundingFPMathOption =
-      EnableHonorSignDependentRoundingFPMath;
-  Options.UseSoftFloat = GenerateSoftFloatCalls;
-  if (FloatABIForCalls != FloatABI::Default)
-    Options.FloatABIType = FloatABIForCalls;
-  Options.NoZerosInBSS = DontPlaceZerosInBSS;
-  Options.GuaranteedTailCallOpt = EnableGuaranteedTailCallOpt;
-  Options.DisableTailCalls = DisableTailCalls;
-  Options.StackAlignmentOverride = OverrideStackAlignment;
-  Options.TrapFuncName = TrapFuncName;
-  Options.PositionIndependentExecutable = EnablePIE;
-  Options.UseInitArray = !UseCtors;
-  Options.DataSections = DataSections;
-  Options.FunctionSections = FunctionSections;
+bool getRelaxELFRelocations();
 
-  Options.MCOptions = InitMCTargetOptionsFromFlags();
-  Options.JTType = JTableType;
-  Options.FCFI = FCFI;
-  Options.CFIType = CFIType;
-  Options.CFIEnforcing = CFIEnforcing;
-  Options.CFIFuncName = CFIFuncName;
+bool getDataSections();
+Optional<bool> getExplicitDataSections();
 
-  Options.ThreadModel = TMModel;
+bool getFunctionSections();
+Optional<bool> getExplicitFunctionSections();
 
-  return Options;
-}
+bool getIgnoreXCOFFVisibility();
 
-#endif
+bool getXCOFFTracebackTable();
+
+std::string getBBSections();
+
+unsigned getTLSSize();
+
+bool getEmulatedTLS();
+
+bool getUniqueSectionNames();
+
+bool getUniqueBasicBlockSectionNames();
+
+llvm::EABI getEABIVersion();
+
+llvm::DebuggerKind getDebuggerTuningOpt();
+
+bool getEnableStackSizeSection();
+
+bool getEnableAddrsig();
+
+bool getEmitCallSiteInfo();
+
+bool getEnableMachineFunctionSplitter();
+
+bool getEnableDebugEntryValues();
+
+bool getPseudoProbeForProfiling();
+
+bool getValueTrackingVariableLocations();
+
+bool getForceDwarfFrameSection();
+
+bool getXRayOmitFunctionIndex();
+
+bool getDebugStrictDwarf();
+
+/// Create this object with static storage to register codegen-related command
+/// line options.
+struct RegisterCodeGenFlags {
+  RegisterCodeGenFlags();
+};
+
+llvm::BasicBlockSection getBBSectionsMode(llvm::TargetOptions &Options);
+
+/// Common utility function tightly tied to the options listed here. Initializes
+/// a TargetOptions object with CodeGen flags and returns it.
+/// \p TheTriple is used to determine the default value for options if
+///    options are not explicitly specified. If those triple dependant options
+///    value do not have effect for your component, a default Triple() could be
+///    passed in.
+TargetOptions InitTargetOptionsFromCodeGenFlags(const llvm::Triple &TheTriple);
+
+std::string getCPUStr();
+
+std::string getFeaturesStr();
+
+std::vector<std::string> getFeatureList();
+
+void renderBoolStringAttr(AttrBuilder &B, StringRef Name, bool Val);
+
+/// Set function attributes of function \p F based on CPU, Features, and command
+/// line flags.
+void setFunctionAttributes(StringRef CPU, StringRef Features, Function &F);
+
+/// Set function attributes of functions in Module M based on CPU,
+/// Features, and command line flags.
+void setFunctionAttributes(StringRef CPU, StringRef Features, Module &M);
+} // namespace codegen
+} // namespace llvm
+
+#endif // LLVM_CODEGEN_COMMANDFLAGS_H

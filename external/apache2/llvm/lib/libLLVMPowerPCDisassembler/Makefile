@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2014/01/05 16:38:07 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:10 joerg Exp $
 
 LIB=	LLVMPowerPCDisassembler
 

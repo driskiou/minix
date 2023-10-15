@@ -1,9 +1,8 @@
 //===-- MSP430RegisterInfo.cpp - MSP430 Register Information --------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -37,20 +36,20 @@ MSP430RegisterInfo::MSP430RegisterInfo()
 
 const MCPhysReg*
 MSP430RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
-  const TargetFrameLowering *TFI = MF->getSubtarget().getFrameLowering();
-  const Function* F = MF->getFunction();
+  const MSP430FrameLowering *TFI = getFrameLowering(*MF);
+  const Function* F = &MF->getFunction();
   static const MCPhysReg CalleeSavedRegs[] = {
-    MSP430::FP, MSP430::R5, MSP430::R6, MSP430::R7,
-    MSP430::R8, MSP430::R9, MSP430::R10, MSP430::R11,
+    MSP430::R4, MSP430::R5, MSP430::R6, MSP430::R7,
+    MSP430::R8, MSP430::R9, MSP430::R10,
     0
   };
   static const MCPhysReg CalleeSavedRegsFP[] = {
     MSP430::R5, MSP430::R6, MSP430::R7,
-    MSP430::R8, MSP430::R9, MSP430::R10, MSP430::R11,
+    MSP430::R8, MSP430::R9, MSP430::R10,
     0
   };
   static const MCPhysReg CalleeSavedRegsIntr[] = {
-    MSP430::FP,  MSP430::R5,  MSP430::R6,  MSP430::R7,
+    MSP430::R4,  MSP430::R5,  MSP430::R6,  MSP430::R7,
     MSP430::R8,  MSP430::R9,  MSP430::R10, MSP430::R11,
     MSP430::R12, MSP430::R13, MSP430::R14, MSP430::R15,
     0
@@ -73,7 +72,7 @@ MSP430RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
 
 BitVector MSP430RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
-  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+  const MSP430FrameLowering *TFI = getFrameLowering(MF);
 
   // Mark 4 special registers with subregisters as reserved.
   Reserved.set(MSP430::PCB);
@@ -87,8 +86,8 @@ BitVector MSP430RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 
   // Mark frame pointer as reserved if needed.
   if (TFI->hasFP(MF)) {
-    Reserved.set(MSP430::FPB);
-    Reserved.set(MSP430::FP);
+    Reserved.set(MSP430::R4B);
+    Reserved.set(MSP430::R4);
   }
 
   return Reserved;
@@ -109,25 +108,25 @@ MSP430RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   MachineInstr &MI = *II;
   MachineBasicBlock &MBB = *MI.getParent();
   MachineFunction &MF = *MBB.getParent();
-  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+  const MSP430FrameLowering *TFI = getFrameLowering(MF);
   DebugLoc dl = MI.getDebugLoc();
   int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
 
-  unsigned BasePtr = (TFI->hasFP(MF) ? MSP430::FP : MSP430::SP);
-  int Offset = MF.getFrameInfo()->getObjectOffset(FrameIndex);
+  unsigned BasePtr = (TFI->hasFP(MF) ? MSP430::R4 : MSP430::SP);
+  int Offset = MF.getFrameInfo().getObjectOffset(FrameIndex);
 
   // Skip the saved PC
   Offset += 2;
 
   if (!TFI->hasFP(MF))
-    Offset += MF.getFrameInfo()->getStackSize();
+    Offset += MF.getFrameInfo().getStackSize();
   else
     Offset += 2; // Skip the saved FP
 
   // Fold imm into offset
   Offset += MI.getOperand(FIOperandNum + 1).getImm();
 
-  if (MI.getOpcode() == MSP430::ADD16ri) {
+  if (MI.getOpcode() == MSP430::ADDframe) {
     // This is actually "load effective address" of the stack slot
     // instruction. We have only two-address instructions, thus we need to
     // expand it into mov + add
@@ -140,7 +139,7 @@ MSP430RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
       return;
 
     // We need to materialize the offset via add instruction.
-    unsigned DstReg = MI.getOperand(0).getReg();
+    Register DstReg = MI.getOperand(0).getReg();
     if (Offset < 0)
       BuildMI(MBB, std::next(II), dl, TII.get(MSP430::SUB16ri), DstReg)
         .addReg(DstReg).addImm(-Offset);
@@ -155,8 +154,7 @@ MSP430RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   MI.getOperand(FIOperandNum + 1).ChangeToImmediate(Offset);
 }
 
-unsigned MSP430RegisterInfo::getFrameRegister(const MachineFunction &MF) const {
-  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
-
-  return TFI->hasFP(MF) ? MSP430::FP : MSP430::SP;
+Register MSP430RegisterInfo::getFrameRegister(const MachineFunction &MF) const {
+  const MSP430FrameLowering *TFI = getFrameLowering(MF);
+  return TFI->hasFP(MF) ? MSP430::R4 : MSP430::SP;
 }

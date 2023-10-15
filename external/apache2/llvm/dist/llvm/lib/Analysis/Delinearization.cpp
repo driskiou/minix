@@ -1,9 +1,8 @@
 //===---- Delinearization.cpp - MultiDimensional Index Delinearization ----===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,19 +13,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/IR/Constants.h"
+#include "llvm/Analysis/Delinearization.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -55,46 +56,20 @@ public:
   void print(raw_ostream &O, const Module *M = nullptr) const override;
 };
 
-} // end anonymous namespace
-
-void Delinearization::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesAll();
-  AU.addRequired<LoopInfo>();
-  AU.addRequired<ScalarEvolution>();
-}
-
-bool Delinearization::runOnFunction(Function &F) {
-  this->F = &F;
-  SE = &getAnalysis<ScalarEvolution>();
-  LI = &getAnalysis<LoopInfo>();
-  return false;
-}
-
-static Value *getPointerOperand(Instruction &Inst) {
-  if (LoadInst *Load = dyn_cast<LoadInst>(&Inst))
-    return Load->getPointerOperand();
-  else if (StoreInst *Store = dyn_cast<StoreInst>(&Inst))
-    return Store->getPointerOperand();
-  else if (GetElementPtrInst *Gep = dyn_cast<GetElementPtrInst>(&Inst))
-    return Gep->getPointerOperand();
-  return nullptr;
-}
-
-void Delinearization::print(raw_ostream &O, const Module *) const {
+void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
+                          ScalarEvolution *SE) {
   O << "Delinearization on function " << F->getName() << ":\n";
-  for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
-    Instruction *Inst = &(*I);
-
+  for (Instruction &Inst : instructions(F)) {
     // Only analyze loads and stores.
-    if (!isa<StoreInst>(Inst) && !isa<LoadInst>(Inst) &&
-        !isa<GetElementPtrInst>(Inst))
+    if (!isa<StoreInst>(&Inst) && !isa<LoadInst>(&Inst) &&
+        !isa<GetElementPtrInst>(&Inst))
       continue;
 
-    const BasicBlock *BB = Inst->getParent();
+    const BasicBlock *BB = Inst.getParent();
     // Delinearize the memory access as analyzed in all the surrounding loops.
     // Do not analyze memory accesses outside loops.
     for (Loop *L = LI->getLoopFor(BB); L != nullptr; L = L->getParentLoop()) {
-      const SCEV *AccessFn = SE->getSCEVAtScope(getPointerOperand(*Inst), L);
+      const SCEV *AccessFn = SE->getSCEVAtScope(getPointerOperand(&Inst), L);
 
       const SCEVUnknown *BasePointer =
           dyn_cast<SCEVUnknown>(SE->getPointerBase(AccessFn));
@@ -102,20 +77,14 @@ void Delinearization::print(raw_ostream &O, const Module *) const {
       if (!BasePointer)
         break;
       AccessFn = SE->getMinusSCEV(AccessFn, BasePointer);
-      const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(AccessFn);
-
-      // Do not try to delinearize memory accesses that are not AddRecs.
-      if (!AR)
-        break;
-
 
       O << "\n";
-      O << "Inst:" << *Inst << "\n";
+      O << "Inst:" << Inst << "\n";
       O << "In Loop with Header: " << L->getHeader()->getName() << "\n";
-      O << "AddRec: " << *AR << "\n";
+      O << "AccessFunction: " << *AccessFn << "\n";
 
       SmallVector<const SCEV *, 3> Subscripts, Sizes;
-      AR->delinearize(*SE, Subscripts, Sizes, SE->getElementSize(Inst));
+      SE->delinearize(AccessFn, Subscripts, Sizes, SE->getElementSize(&Inst));
       if (Subscripts.size() == 0 || Sizes.size() == 0 ||
           Subscripts.size() != Sizes.size()) {
         O << "failed to delinearize\n";
@@ -137,11 +106,39 @@ void Delinearization::print(raw_ostream &O, const Module *) const {
   }
 }
 
+} // end anonymous namespace
+
+void Delinearization::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesAll();
+  AU.addRequired<LoopInfoWrapperPass>();
+  AU.addRequired<ScalarEvolutionWrapperPass>();
+}
+
+bool Delinearization::runOnFunction(Function &F) {
+  this->F = &F;
+  SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+  return false;
+}
+
+void Delinearization::print(raw_ostream &O, const Module *) const {
+  printDelinearization(O, F, LI, SE);
+}
+
 char Delinearization::ID = 0;
 static const char delinearization_name[] = "Delinearization";
 INITIALIZE_PASS_BEGIN(Delinearization, DL_NAME, delinearization_name, true,
                       true)
-INITIALIZE_PASS_DEPENDENCY(LoopInfo)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(Delinearization, DL_NAME, delinearization_name, true, true)
 
 FunctionPass *llvm::createDelinearizationPass() { return new Delinearization; }
+
+DelinearizationPrinterPass::DelinearizationPrinterPass(raw_ostream &OS)
+    : OS(OS) {}
+PreservedAnalyses DelinearizationPrinterPass::run(Function &F,
+                                                  FunctionAnalysisManager &AM) {
+  printDelinearization(OS, &F, &AM.getResult<LoopAnalysis>(F),
+                       &AM.getResult<ScalarEvolutionAnalysis>(F));
+  return PreservedAnalyses::all();
+}

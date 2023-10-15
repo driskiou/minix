@@ -1,9 +1,8 @@
 //==- AArch64RegisterInfo.h - AArch64 Register Information Impl --*- C++ -*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,26 +18,41 @@
 
 namespace llvm {
 
-class AArch64InstrInfo;
-class AArch64Subtarget;
 class MachineFunction;
 class RegScavenger;
 class TargetRegisterClass;
+class Triple;
 
-struct AArch64RegisterInfo : public AArch64GenRegisterInfo {
-private:
-  const AArch64InstrInfo *TII;
-  const AArch64Subtarget *STI;
+class AArch64RegisterInfo final : public AArch64GenRegisterInfo {
+  const Triple &TT;
 
 public:
-  AArch64RegisterInfo(const AArch64InstrInfo *tii, const AArch64Subtarget *sti);
+  AArch64RegisterInfo(const Triple &TT);
 
-  bool isReservedReg(const MachineFunction &MF, unsigned Reg) const;
+  // FIXME: This should be tablegen'd like getDwarfRegNum is
+  int getSEHRegNum(unsigned i) const {
+    return getEncodingValue(i);
+  }
+
+  bool isReservedReg(const MachineFunction &MF, MCRegister Reg) const;
+  bool isAnyArgRegReserved(const MachineFunction &MF) const;
+  void emitReservedArgRegCallError(const MachineFunction &MF) const;
+
+  void UpdateCustomCalleeSavedRegs(MachineFunction &MF) const;
+  void UpdateCustomCallPreservedMask(MachineFunction &MF,
+                                     const uint32_t **Mask) const;
+
+  static bool hasSVEArgsOrReturn(const MachineFunction *MF);
 
   /// Code Generation virtual methods...
+  const MCPhysReg *getCalleeSavedRegs(const MachineFunction *MF) const override;
+  const MCPhysReg *getDarwinCalleeSavedRegs(const MachineFunction *MF) const;
   const MCPhysReg *
-  getCalleeSavedRegs(const MachineFunction *MF = nullptr) const override;
-  const uint32_t *getCallPreservedMask(CallingConv::ID) const override;
+  getCalleeSavedRegsViaCopy(const MachineFunction *MF) const;
+  const uint32_t *getCallPreservedMask(const MachineFunction &MF,
+                                       CallingConv::ID) const override;
+  const uint32_t *getDarwinCallPreservedMask(const MachineFunction &MF,
+                                             CallingConv::ID) const;
 
   unsigned getCSRFirstUseCost() const override {
     // The cost will be compared against BlockFrequency where entry has the
@@ -47,9 +61,20 @@ public:
     return 5;
   }
 
+  const TargetRegisterClass *
+  getSubClassWithSubReg(const TargetRegisterClass *RC,
+                        unsigned Idx) const override;
+
   // Calls involved in thread-local variable lookup save more registers than
   // normal calls, so they need a different mask to represent this.
   const uint32_t *getTLSCallPreservedMask() const;
+
+  // Funclets on ARM64 Windows don't preserve any registers.
+  const uint32_t *getNoPreservedMask() const override;
+
+  // Unwinders may not preserve all Neon and SVE registers.
+  const uint32_t *
+  getCustomEHPadPreservedMask(const MachineFunction &MF) const override;
 
   /// getThisReturnPreservedMask - Returns a call preserved mask specific to the
   /// case that 'returned' is on an i64 first argument if the calling convention
@@ -59,9 +84,16 @@ public:
   ///
   /// Should return NULL in the case that the calling convention does not have
   /// this property
-  const uint32_t *getThisReturnPreservedMask(CallingConv::ID) const;
+  const uint32_t *getThisReturnPreservedMask(const MachineFunction &MF,
+                                             CallingConv::ID) const;
+
+  /// Stack probing calls preserve different CSRs to the normal CC.
+  const uint32_t *getWindowsStackProbePreservedMask() const;
 
   BitVector getReservedRegs(const MachineFunction &MF) const override;
+  bool isAsmClobberable(const MachineFunction &MF,
+                       MCRegister PhysReg) const override;
+  bool isConstantPhysReg(MCRegister PhysReg) const override;
   const TargetRegisterClass *
   getPointerRegClass(const MachineFunction &MF,
                      unsigned Kind = 0) const override;
@@ -73,12 +105,11 @@ public:
   bool requiresFrameIndexScavenging(const MachineFunction &MF) const override;
 
   bool needsFrameBaseReg(MachineInstr *MI, int64_t Offset) const override;
-  bool isFrameOffsetLegal(const MachineInstr *MI,
+  bool isFrameOffsetLegal(const MachineInstr *MI, Register BaseReg,
                           int64_t Offset) const override;
-  void materializeFrameBaseRegister(MachineBasicBlock *MBB, unsigned BaseReg,
-                                    int FrameIdx,
-                                    int64_t Offset) const override;
-  void resolveFrameIndex(MachineInstr &MI, unsigned BaseReg,
+  Register materializeFrameBaseRegister(MachineBasicBlock *MBB, int FrameIdx,
+                                        int64_t Offset) const override;
+  void resolveFrameIndex(MachineInstr &MI, Register BaseReg,
                          int64_t Offset) const override;
   void eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
                            unsigned FIOperandNum,
@@ -90,10 +121,22 @@ public:
   unsigned getBaseRegister() const;
 
   // Debug information queries.
-  unsigned getFrameRegister(const MachineFunction &MF) const override;
+  Register getFrameRegister(const MachineFunction &MF) const override;
 
   unsigned getRegPressureLimit(const TargetRegisterClass *RC,
                                MachineFunction &MF) const override;
+
+  unsigned getLocalAddressRegister(const MachineFunction &MF) const;
+  bool regNeedsCFI(unsigned Reg, unsigned &RegToUseForCFI) const;
+
+  /// SrcRC and DstRC will be morphed into NewRC if this returns true
+  bool shouldCoalesce(MachineInstr *MI, const TargetRegisterClass *SrcRC,
+                      unsigned SubReg, const TargetRegisterClass *DstRC,
+                      unsigned DstSubReg, const TargetRegisterClass *NewRC,
+                      LiveIntervals &LIS) const override;
+
+  void getOffsetOpcodes(const StackOffset &Offset,
+                        SmallVectorImpl<uint64_t> &Ops) const override;
 };
 
 } // end namespace llvm

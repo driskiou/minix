@@ -1,9 +1,8 @@
 //===-- PPCMCExpr.h - PPC specific MC expression classes --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,6 +22,8 @@ public:
     VK_PPC_LO,
     VK_PPC_HI,
     VK_PPC_HA,
+    VK_PPC_HIGH,
+    VK_PPC_HIGHA,
     VK_PPC_HIGHER,
     VK_PPC_HIGHERA,
     VK_PPC_HIGHEST,
@@ -32,34 +33,29 @@ public:
 private:
   const VariantKind Kind;
   const MCExpr *Expr;
-  bool IsDarwin;
 
-  int64_t EvaluateAsInt64(int64_t Value) const;
+  int64_t evaluateAsInt64(int64_t Value) const;
 
-  explicit PPCMCExpr(VariantKind _Kind, const MCExpr *_Expr,
-                     bool _IsDarwin)
-    : Kind(_Kind), Expr(_Expr), IsDarwin(_IsDarwin) {}
+  explicit PPCMCExpr(VariantKind Kind, const MCExpr *Expr)
+      : Kind(Kind), Expr(Expr) {}
 
 public:
   /// @name Construction
   /// @{
 
-  static const PPCMCExpr *Create(VariantKind Kind, const MCExpr *Expr,
-                                 bool isDarwin, MCContext &Ctx);
+  static const PPCMCExpr *create(VariantKind Kind, const MCExpr *Expr,
+                                 MCContext &Ctx);
 
-  static const PPCMCExpr *CreateLo(const MCExpr *Expr,
-                                   bool isDarwin, MCContext &Ctx) {
-    return Create(VK_PPC_LO, Expr, isDarwin, Ctx);
+  static const PPCMCExpr *createLo(const MCExpr *Expr, MCContext &Ctx) {
+    return create(VK_PPC_LO, Expr, Ctx);
   }
 
-  static const PPCMCExpr *CreateHi(const MCExpr *Expr,
-                                   bool isDarwin, MCContext &Ctx) {
-    return Create(VK_PPC_HI, Expr, isDarwin, Ctx);
+  static const PPCMCExpr *createHi(const MCExpr *Expr, MCContext &Ctx) {
+    return create(VK_PPC_HI, Expr, Ctx);
   }
 
-  static const PPCMCExpr *CreateHa(const MCExpr *Expr,
-                                   bool isDarwin, MCContext &Ctx) {
-    return Create(VK_PPC_HA, Expr, isDarwin, Ctx);
+  static const PPCMCExpr *createHa(const MCExpr *Expr, MCContext &Ctx) {
+    return create(VK_PPC_HA, Expr, Ctx);
   }
 
   /// @}
@@ -72,25 +68,21 @@ public:
   /// getSubExpr - Get the child of this expression.
   const MCExpr *getSubExpr() const { return Expr; }
 
-  /// isDarwinSyntax - True if expression is to be printed using Darwin syntax.
-  bool isDarwinSyntax() const { return IsDarwin; }
-
-
   /// @}
 
-  void PrintImpl(raw_ostream &OS) const override;
-  bool EvaluateAsRelocatableImpl(MCValue &Res,
+  void printImpl(raw_ostream &OS, const MCAsmInfo *MAI) const override;
+  bool evaluateAsRelocatableImpl(MCValue &Res,
                                  const MCAsmLayout *Layout,
                                  const MCFixup *Fixup) const override;
   void visitUsedExpr(MCStreamer &Streamer) const override;
-  const MCSection *FindAssociatedSection() const override {
-    return getSubExpr()->FindAssociatedSection();
+  MCFragment *findAssociatedFragment() const override {
+    return getSubExpr()->findAssociatedFragment();
   }
 
   // There are no TLS PPCMCExprs at the moment.
   void fixELFSymbolsInTLSFixups(MCAssembler &Asm) const override {}
 
-  bool EvaluateAsConstant(int64_t &Res) const;
+  bool evaluateAsConstant(int64_t &Res) const;
 
   static bool classof(const MCExpr *E) {
     return E->getKind() == MCExpr::Target;

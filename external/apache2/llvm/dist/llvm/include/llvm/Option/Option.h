@@ -1,9 +1,8 @@
-//===--- Option.h - Abstract Driver Options ---------------------*- C++ -*-===//
+//===- Option.h - Abstract Driver Options -----------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -12,15 +11,23 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Option/OptSpecifier.h"
 #include "llvm/Option/OptTable.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <cassert>
+#include <string>
 
 namespace llvm {
+
+class raw_ostream;
+
 namespace opt {
+
 class Arg;
 class ArgList;
+
 /// ArgStringList - Type used for constructing argv lists for subprocesses.
-typedef SmallVector<const char*, 16> ArgStringList;
+using ArgStringList = SmallVector<const char *, 16>;
 
 /// Base flags for all options. Custom flags may be added after.
 enum DriverFlag {
@@ -49,8 +56,10 @@ public:
     UnknownClass,
     FlagClass,
     JoinedClass,
+    ValuesClass,
     SeparateClass,
     RemainingArgsClass,
+    RemainingArgsJoinedClass,
     CommaJoinedClass,
     MultiArgClass,
     JoinedOrSeparateClass,
@@ -70,7 +79,6 @@ protected:
 
 public:
   Option(const OptTable::Info *Info, const OptTable *Owner);
-  ~Option();
 
   bool isValid() const {
     return Info != nullptr;
@@ -86,7 +94,7 @@ public:
     return OptionClass(Info->Kind);
   }
 
-  /// \brief Get the name of this option without any prefix.
+  /// Get the name of this option without any prefix.
   StringRef getName() const {
     assert(Info && "Must have a valid info!");
     return Info->Name;
@@ -104,7 +112,7 @@ public:
     return Owner->getOption(Info->AliasID);
   }
 
-  /// \brief Get the alias arguments as a \0 separated list.
+  /// Get the alias arguments as a \0 separated list.
   /// E.g. ["foo", "bar"] would be returned as "foo\0bar\0".
   const char *getAliasArgs() const {
     assert(Info && "Must have a valid info!");
@@ -114,17 +122,29 @@ public:
     return Info->AliasArgs;
   }
 
-  /// \brief Get the default prefix for this option.
+  /// Get the default prefix for this option.
   StringRef getPrefix() const {
     const char *Prefix = *Info->Prefixes;
     return Prefix ? Prefix : StringRef();
   }
 
-  /// \brief Get the name of this option with the default prefix.
+  /// Get the name of this option with the default prefix.
   std::string getPrefixedName() const {
-    std::string Ret = getPrefix();
+    std::string Ret(getPrefix());
     Ret += getName();
     return Ret;
+  }
+
+  /// Get the help text for this option.
+  StringRef getHelpText() const {
+    assert(Info && "Must have a valid info!");
+    return Info->HelpText;
+  }
+
+  /// Get the meta-variable list for this option.
+  StringRef getMetaVar() const {
+    assert(Info && "Must have a valid info!");
+    return Info->MetaVar;
   }
 
   unsigned getNumArgs() const { return Info->Param; }
@@ -147,10 +167,12 @@ public:
     case CommaJoinedClass:
       return RenderCommaJoinedStyle;
     case FlagClass:
+    case ValuesClass:
     case SeparateClass:
     case MultiArgClass:
     case JoinedOrSeparateClass:
     case RemainingArgsClass:
+    case RemainingArgsJoinedClass:
       return RenderSeparateStyle;
     }
     llvm_unreachable("Unexpected kind!");
@@ -191,15 +213,24 @@ public:
   /// Index to the position where argument parsing should resume
   /// (even if the argument is missing values).
   ///
-  /// \param ArgSize The number of bytes taken up by the matched Option prefix
-  ///                and name. This is used to determine where joined values
-  ///                start.
-  Arg *accept(const ArgList &Args, unsigned &Index, unsigned ArgSize) const;
+  /// \p CurArg The argument to be matched. It may be shorter than the
+  /// underlying storage to represent a Joined argument.
+  /// \p GroupedShortOption If true, we are handling the fallback case of
+  /// parsing a prefix of the current argument as a short option.
+  Arg *accept(const ArgList &Args, StringRef CurArg, bool GroupedShortOption,
+              unsigned &Index) const;
 
+private:
+  Arg *acceptInternal(const ArgList &Args, StringRef CurArg,
+                      unsigned &Index) const;
+
+public:
+  void print(raw_ostream &O) const;
   void dump() const;
 };
 
 } // end namespace opt
+
 } // end namespace llvm
 
-#endif
+#endif // LLVM_OPTION_OPTION_H

@@ -1,9 +1,8 @@
 //===- StripSymbols.cpp - Strip symbols and debug info from a module ------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,18 +19,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/IPO.h"
-#include "llvm/ADT/DenseMap.h"
+#include "llvm/Transforms/IPO/StripSymbols.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/TypeFinder.h"
 #include "llvm/IR/ValueSymbolTable.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/Local.h"
+
 using namespace llvm;
 
 namespace {
@@ -142,16 +144,18 @@ static bool OnlyUsedBy(Value *V, Value *Usr) {
 static void RemoveDeadConstant(Constant *C) {
   assert(C->use_empty() && "Constant is not dead!");
   SmallPtrSet<Constant*, 4> Operands;
-  for (unsigned i = 0, e = C->getNumOperands(); i != e; ++i)
-    if (OnlyUsedBy(C->getOperand(i), C))
-      Operands.insert(cast<Constant>(C->getOperand(i)));
+  for (Value *Op : C->operands())
+    if (OnlyUsedBy(Op, C))
+      Operands.insert(cast<Constant>(Op));
   if (GlobalVariable *GV = dyn_cast<GlobalVariable>(C)) {
     if (!GV->hasLocalLinkage()) return;   // Don't delete non-static globals.
     GV->eraseFromParent();
-  }
-  else if (!isa<Function>(C))
-    if (isa<CompositeType>(C->getType()))
+  } else if (!isa<Function>(C)) {
+    // FIXME: Why does the type of the constant matter here?
+    if (isa<StructType>(C->getType()) || isa<ArrayType>(C->getType()) ||
+        isa<VectorType>(C->getType()))
       C->destroyConstant();
+  }
 
   // If the constant referenced anything, see if we can delete it as well.
   for (Constant *O : Operands)
@@ -209,18 +213,18 @@ static bool StripSymbolNames(Module &M, bool PreserveDbgInfo) {
   findUsedValues(M.getGlobalVariable("llvm.used"), llvmUsedValues);
   findUsedValues(M.getGlobalVariable("llvm.compiler.used"), llvmUsedValues);
 
-  for (Module::global_iterator I = M.global_begin(), E = M.global_end();
-       I != E; ++I) {
-    if (I->hasLocalLinkage() && llvmUsedValues.count(I) == 0)
-      if (!PreserveDbgInfo || !I->getName().startswith("llvm.dbg"))
-        I->setName("");     // Internal symbols can't participate in linkage
+  for (GlobalVariable &GV : M.globals()) {
+    if (GV.hasLocalLinkage() && llvmUsedValues.count(&GV) == 0)
+      if (!PreserveDbgInfo || !GV.getName().startswith("llvm.dbg"))
+        GV.setName(""); // Internal symbols can't participate in linkage
   }
 
-  for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
-    if (I->hasLocalLinkage() && llvmUsedValues.count(I) == 0)
-      if (!PreserveDbgInfo || !I->getName().startswith("llvm.dbg"))
-        I->setName("");     // Internal symbols can't participate in linkage
-    StripSymtab(I->getValueSymbolTable(), PreserveDbgInfo);
+  for (Function &I : M) {
+    if (I.hasLocalLinkage() && llvmUsedValues.count(&I) == 0)
+      if (!PreserveDbgInfo || !I.getName().startswith("llvm.dbg"))
+        I.setName(""); // Internal symbols can't participate in linkage
+    if (auto *Symtab = I.getValueSymbolTable())
+      StripSymtab(*Symtab, PreserveDbgInfo);
   }
 
   // Remove all names from types.
@@ -230,6 +234,9 @@ static bool StripSymbolNames(Module &M, bool PreserveDbgInfo) {
 }
 
 bool StripSymbols::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+
   bool Changed = false;
   Changed |= StripDebugInfo(M);
   if (!OnlyDebugInfo)
@@ -238,10 +245,13 @@ bool StripSymbols::runOnModule(Module &M) {
 }
 
 bool StripNonDebugSymbols::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+
   return StripSymbolNames(M, true);
 }
 
-bool StripDebugDeclare::runOnModule(Module &M) {
+static bool stripDebugDeclareImpl(Module &M) {
 
   Function *Declare = M.getFunction("llvm.dbg.declare");
   std::vector<Constant*> DeadConstants;
@@ -279,14 +289,13 @@ bool StripDebugDeclare::runOnModule(Module &M) {
   return true;
 }
 
-/// Remove any debug info for global variables/functions in the given module for
-/// which said global variable/function no longer exists (i.e. is null).
-///
-/// Debugging information is encoded in llvm IR using metadata. This is designed
-/// such a way that debug info for symbols preserved even if symbols are
-/// optimized away by the optimizer. This special pass removes debug info for
-/// such symbols.
-bool StripDeadDebugInfo::runOnModule(Module &M) {
+bool StripDebugDeclare::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+  return stripDebugDeclareImpl(M);
+}
+
+static bool stripDeadDebugInfoImpl(Module &M) {
   bool Changed = false;
 
   LLVMContext &C = M.getContext();
@@ -302,66 +311,105 @@ bool StripDeadDebugInfo::runOnModule(Module &M) {
   // replace the current list of potentially dead global variables/functions
   // with the live list.
   SmallVector<Metadata *, 64> LiveGlobalVariables;
-  SmallVector<Metadata *, 64> LiveSubprograms;
-  DenseSet<const MDNode *> VisitedSet;
+  DenseSet<DIGlobalVariableExpression *> VisitedSet;
 
-  for (DICompileUnit DIC : F.compile_units()) {
-    assert(DIC.Verify() && "DIC must verify as a DICompileUnit.");
+  std::set<DIGlobalVariableExpression *> LiveGVs;
+  for (GlobalVariable &GV : M.globals()) {
+    SmallVector<DIGlobalVariableExpression *, 1> GVEs;
+    GV.getDebugInfo(GVEs);
+    for (auto *GVE : GVEs)
+      LiveGVs.insert(GVE);
+  }
 
-    // Create our live subprogram list.
-    DIArray SPs = DIC.getSubprograms();
-    bool SubprogramChange = false;
-    for (unsigned i = 0, e = SPs.getNumElements(); i != e; ++i) {
-      DISubprogram DISP(SPs.getElement(i));
-      assert(DISP.Verify() && "DISP must verify as a DISubprogram.");
+  std::set<DICompileUnit *> LiveCUs;
+  // Any CU referenced from a subprogram is live.
+  for (DISubprogram *SP : F.subprograms()) {
+    if (SP->getUnit())
+      LiveCUs.insert(SP->getUnit());
+  }
 
-      // Make sure we visit each subprogram only once.
-      if (!VisitedSet.insert(DISP).second)
-        continue;
-
-      // If the function referenced by DISP is not null, the function is live.
-      if (DISP.getFunction())
-        LiveSubprograms.push_back(DISP);
-      else
-        SubprogramChange = true;
-    }
-
+  bool HasDeadCUs = false;
+  for (DICompileUnit *DIC : F.compile_units()) {
     // Create our live global variable list.
-    DIArray GVs = DIC.getGlobalVariables();
     bool GlobalVariableChange = false;
-    for (unsigned i = 0, e = GVs.getNumElements(); i != e; ++i) {
-      DIGlobalVariable DIG(GVs.getElement(i));
-      assert(DIG.Verify() && "DIG must verify as DIGlobalVariable.");
+    for (auto *DIG : DIC->getGlobalVariables()) {
+      if (DIG->getExpression() && DIG->getExpression()->isConstant())
+        LiveGVs.insert(DIG);
 
       // Make sure we only visit each global variable only once.
       if (!VisitedSet.insert(DIG).second)
         continue;
 
-      // If the global variable referenced by DIG is not null, the global
-      // variable is live.
-      if (DIG.getGlobal())
+      // If a global variable references DIG, the global variable is live.
+      if (LiveGVs.count(DIG))
         LiveGlobalVariables.push_back(DIG);
       else
         GlobalVariableChange = true;
     }
 
-    // If we found dead subprograms or global variables, replace the current
-    // subprogram list/global variable list with our new live subprogram/global
-    // variable list.
-    if (SubprogramChange) {
-      DIC.replaceSubprograms(DIArray(MDNode::get(C, LiveSubprograms)));
-      Changed = true;
-    }
+    if (!LiveGlobalVariables.empty())
+      LiveCUs.insert(DIC);
+    else if (!LiveCUs.count(DIC))
+      HasDeadCUs = true;
 
+    // If we found dead global variables, replace the current global
+    // variable list with our new live global variable list.
     if (GlobalVariableChange) {
-      DIC.replaceGlobalVariables(DIArray(MDNode::get(C, LiveGlobalVariables)));
+      DIC->replaceGlobalVariables(MDTuple::get(C, LiveGlobalVariables));
       Changed = true;
     }
 
     // Reset lists for the next iteration.
-    LiveSubprograms.clear();
     LiveGlobalVariables.clear();
   }
 
+  if (HasDeadCUs) {
+    // Delete the old node and replace it with a new one
+    NamedMDNode *NMD = M.getOrInsertNamedMetadata("llvm.dbg.cu");
+    NMD->clearOperands();
+    if (!LiveCUs.empty()) {
+      for (DICompileUnit *CU : LiveCUs)
+        NMD->addOperand(CU);
+    }
+    Changed = true;
+  }
+
   return Changed;
+}
+
+/// Remove any debug info for global variables/functions in the given module for
+/// which said global variable/function no longer exists (i.e. is null).
+///
+/// Debugging information is encoded in llvm IR using metadata. This is designed
+/// such a way that debug info for symbols preserved even if symbols are
+/// optimized away by the optimizer. This special pass removes debug info for
+/// such symbols.
+bool StripDeadDebugInfo::runOnModule(Module &M) {
+  if (skipModule(M))
+    return false;
+  return stripDeadDebugInfoImpl(M);
+}
+
+PreservedAnalyses StripSymbolsPass::run(Module &M, ModuleAnalysisManager &AM) {
+  StripDebugInfo(M);
+  StripSymbolNames(M, false);
+  return PreservedAnalyses::all();
+}
+
+PreservedAnalyses StripNonDebugSymbolsPass::run(Module &M,
+                                                ModuleAnalysisManager &AM) {
+  StripSymbolNames(M, true);
+  return PreservedAnalyses::all();
+}
+
+PreservedAnalyses StripDebugDeclarePass::run(Module &M,
+                                             ModuleAnalysisManager &AM) {
+  stripDebugDeclareImpl(M);
+  return PreservedAnalyses::all();
+}
+
+PreservedAnalyses StripDeadDebugInfoPass::run(Module &M,
+                                              ModuleAnalysisManager &AM) {
+  stripDeadDebugInfoImpl(M);
+  return PreservedAnalyses::all();
 }

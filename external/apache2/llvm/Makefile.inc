@@ -1,84 +1,72 @@
-#	$NetBSD: Makefile.inc,v 1.79 2015/05/29 17:37:50 joerg Exp $
+#	$NetBSD: Makefile.inc,v 1.8 2023/06/04 17:48:05 lukem Exp $
 
 .if !defined(LLVM_TOPLEVEL_MK)
 LLVM_TOPLEVEL_MK=
 
 .include <bsd.own.mk>
 
-SVN_ROOT=		http://llvm.org/svn/llvm-project
-SVN_BRANCH=		branches/release_36
-
-COMMON_REVISION=	237755
+COMMON_REVISION=	249b40b558955afe5ac2b549edcf2d7f859c8cc9
 CLANG_REVISION=		${COMMON_REVISION}
-LLD_REVISION=		${COMMON_REVISION}
-LLDB_REVISION=		${COMMON_REVISION}
 LLVM_REVISION=		${COMMON_REVISION}
 
-MCLINKER_REVISION=	deeb2a77b4165827316f88e0a7ba4ba6b743a080
-MCLINKER_ROOT=		https://code.google.com/p/mclinker/
-
-LLVM_VERSION=		3.6.1
-CLANG_VERSION=		3.6.1
-LLD_VERSION=		3.6.1
+LLVM_VERSION=		13.0.0
+CLANG_VERSION=		13.0.0
 
 CLANG_SRCDIR:=	${.PARSEDIR}/dist/clang
-LLD_SRCDIR:=	${.PARSEDIR}/dist/lld
-LLDB_SRCDIR:=	${.PARSEDIR}/dist/lldb
 LLVM_SRCDIR:=	${.PARSEDIR}/dist/llvm
-MCLINKER_SRCDIR:=	${.PARSEDIR}/dist/mclinker
 LLVM_TOPLEVEL:=	${.PARSEDIR}
+CONFIG_DIR:=	${.PARSEDIR}/autoconf
 
-CPPFLAGS+=	-I. -I${CLANG_SRCDIR}/include -I${LLD_SRCDIR}/include \
-		-I${LLVM_SRCDIR}/include -I${MCLINKER_SRCDIR}/include \
-		-I${LLDB_SRCDIR}/include \
-		-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS \
-		-D__STDC_FORMAT_MACROS -DCLANG_ENABLE_STATIC_ANALYZER
+CPPFLAGS+=	-I. -I${CLANG_SRCDIR}/include -I${LLVM_SRCDIR}/include
 
-.if defined(HOSTLIB) || defined(HOSTPROG)
+MODULES_CXXFLAGS=	-fmodules -fcxx-modules -Werror=incomplete-umbrella \
+			-fmodules-validate-system-headers \
+			-Xclang -fmodules-local-submodule-visibility \
+			-fmodules-cache-path=${LLVM_MODULE_CACHE:Q}
+
+.if defined(HOSTLIB) || defined(HOSTPROG) || defined(_BSD_HOSTINIT_MK_)
 LLVM_INCLUDE_CONFIG=	${LLVM_TOOLCONF_OBJDIR}/config/include
 CLANG_INCLUDE_CONFIG=	${LLVM_TOOLCONF_OBJDIR}/config/tools/clang/include
-MCLINKER_INCLUDE_CONFIG= ${LLVM_TOPLEVEL}/config/mclinker
 LLVM_INCLUDE_OBJDIR!=	cd ${NETBSDSRCDIR}/tools/llvm-include && ${PRINTOBJDIR}
 LLVM_TOOLCONF_OBJDIR!=	cd ${NETBSDSRCDIR}/tools/llvm && ${PRINTOBJDIR}
+LLVM_MODULE_CACHE=	${LLVM_TOOLCONF_OBJDIR}/module.cache
 HOST_CPPFLAGS+=	${CPPFLAGS}
-HOST_CXXFLAGS+=	-O2 -fno-rtti -fno-exceptions
-HOST_CPPFLAGS+=	-std=c++11
+HOST_CXXFLAGS+=	-O2 -fno-rtti -fno-exceptions -fno-strict-aliasing
+.sinclude "${LLVM_TOOLCONF_OBJDIR}/support-modules"
+.if ${HOST_SUPPORTS_MODULES:Uno} == "yes"
+HOST_CXXFLAGS+=	${MODULES_CXXFLAGS}
+.endif
+HOST_CXXFLAGS+=	-std=c++14
+LLVM_TARGETS=	x86,powerpc,sparc,aarch64,arm,mips
 .else
 LLVM_INCLUDE_CONFIG=	${LLVM_TOPLEVEL}/config
 CLANG_INCLUDE_CONFIG=	${LLVM_TOPLEVEL}/config
-MCLINKER_INCLUDE_CONFIG= ${LLVM_TOPLEVEL}/config/mclinker
 LLVM_INCLUDE_OBJDIR!=	cd ${LLVM_TOPLEVEL}/include && ${PRINTOBJDIR}
+LLVM_MODULE_CACHE=	${LLVM_INCLUDE_OBJDIR}/module.cache
+LLVM_TARGETS=	x86,powerpc,sparc,aarch64,arm,mips,amdgpu
+CXXFLAGS+=		${${ACTIVE_CC} == "clang":? ${MODULES_CXXFLAGS} :}
 
-.if ${MKLLDB:Uno} == "yes"
-CPPFLAGS+=	-DLLDB_DISABLE_PYTHON
+CXXFLAGS+=	-std=c++14
+.if ${MKDEBUG:Uno} != "no"
+CXXFLAGS+=	-g1
 .endif
-CXXFLAGS+=	-std=c++11
-CXXFLAGS+=	-fno-rtti -fno-exceptions
+CXXFLAGS+=	-fno-rtti -fno-exceptions ${${ACTIVE_CC} == "gcc" :? -fno-strict-aliasing :}
 CXXFLAGS+=	-ffunction-sections -fdata-sections
 LDFLAGS+=	-Wl,--gc-sections
+DPADD+=		${LIBEXECINFO}
+LDADD+=		-lexecinfo
 .endif
 CPPFLAGS+=	-I${LLVM_INCLUDE_OBJDIR} -I${LLVM_INCLUDE_CONFIG} \
-		-I${CLANG_INCLUDE_CONFIG} -I${MCLINKER_INCLUDE_CONFIG}
+		-I${CLANG_INCLUDE_CONFIG}
 
-.if !defined(__MINIX)
 LLVM_PLATFORM=${MACHINE_GNU_ARCH}--netbsd
-.else
-LLVM_PLATFORM=${MACHINE_GNU_ARCH}-elf32-minix
 
-LLVM_CONFIGURE_ARGS+=	\
-	--with-binutils-include=${NETBSDSRCDIR}/external/gpl3/binutils/dist/include \
-	#--disable-debug-symbols --enable-assertions
-
-.if ${HOST_OSTYPE:C/\-.*//} == "Minix"
-LLVM_CONFIGURE_ARGS+= --disable-threads
-CPPFLAGS+= -D_NLS_PRIVATE=1
-.endif # ${HOST_OSTYPE:C/\-.*//} == "Minix"
-.endif # !defined(__MINIX)
-
-LLVM_CONFIGURE_ARGS+=	\
-	--enable-targets=x86,powerpc,sparc,aarch64,arm,mips \
+LLVM_CONFIGURE_ARGS=	\
+	--enable-targets=${LLVM_TARGETS} \
 	--with-c-include-dirs=/usr/include/clang-${CLANG_VERSION:R}:/usr/include \
 	--disable-timestamps --prefix=/usr --sysconfdir=/etc/llvm \
+	--with-clang-default-openmp-runtime=libomp \
+	--with-llvm-srcdir=${LLVM_SRCDIR} \
 	--with-clang-srcdir=${CLANG_SRCDIR} \
 	--host=${LLVM_PLATFORM} --disable-compiler-version-checks \
 	--disable-bindings llvm_cv_gnu_make_command=${MAKE}

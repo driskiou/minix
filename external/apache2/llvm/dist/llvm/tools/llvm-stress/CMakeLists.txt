@@ -1,10 +1,12 @@
 set(LLVM_LINK_COMPONENTS
+  Analysis
   Core
-  IPA
   Support
   )
 
 add_llvm_tool(llvm-stress
   llvm-stress.cpp
+
+  DEPENDS
+  intrinsics_gen
   )
-set_target_properties(llvm-stress PROPERTIES ENABLE_EXPORTS 1)

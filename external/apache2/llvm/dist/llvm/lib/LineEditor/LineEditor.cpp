@@ -1,9 +1,8 @@
 //===-- LineEditor.cpp - line editor --------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -12,7 +11,9 @@
 #include "llvm/Config/config.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
-#include <stdio.h>
+#include <algorithm>
+#include <cassert>
+#include <cstdio>
 #ifdef HAVE_LIBEDIT
 #include <histedit.h>
 #endif
@@ -23,7 +24,7 @@ std::string LineEditor::getDefaultHistoryPath(StringRef ProgName) {
   SmallString<32> Path;
   if (sys::path::home_directory(Path)) {
     sys::path::append(Path, "." + ProgName + "-history");
-    return Path.str();
+    return std::string(Path.str());
   }
   return std::string();
 }
@@ -106,7 +107,9 @@ struct LineEditor::InternalData {
   FILE *Out;
 };
 
-static const char *ElGetPromptFn(EditLine *EL) {
+namespace {
+
+const char *ElGetPromptFn(EditLine *EL) {
   LineEditor::InternalData *Data;
   if (el_get(EL, EL_CLIENTDATA, &Data) == 0)
     return Data->LE->getPrompt().c_str();
@@ -117,7 +120,7 @@ static const char *ElGetPromptFn(EditLine *EL) {
 //
 // This function is really horrible. But since the alternative is to get into
 // the line editor business, here we are.
-static unsigned char ElCompletionFn(EditLine *EL, int ch) {
+unsigned char ElCompletionFn(EditLine *EL, int ch) {
   LineEditor::InternalData *Data;
   if (el_get(EL, EL_CLIENTDATA, &Data) == 0) {
     if (!Data->ContinuationOutput.empty()) {
@@ -190,9 +193,11 @@ static unsigned char ElCompletionFn(EditLine *EL, int ch) {
   return CC_ERROR;
 }
 
+} // end anonymous namespace
+
 LineEditor::LineEditor(StringRef ProgName, StringRef HistoryPath, FILE *In,
                        FILE *Out, FILE *Err)
-    : Prompt((ProgName + "> ").str()), HistoryPath(HistoryPath),
+    : Prompt((ProgName + "> ").str()), HistoryPath(std::string(HistoryPath)),
       Data(new InternalData) {
   if (HistoryPath.empty())
     this->HistoryPath = getDefaultHistoryPath(ProgName);
@@ -269,7 +274,7 @@ Optional<std::string> LineEditor::readLine() const {
   return std::string(Line, LineLen);
 }
 
-#else
+#else // HAVE_LIBEDIT
 
 // Simple fgets-based implementation.
 
@@ -316,4 +321,4 @@ Optional<std::string> LineEditor::readLine() const {
   return Line;
 }
 
-#endif
+#endif // HAVE_LIBEDIT

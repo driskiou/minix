@@ -1,9 +1,8 @@
 //===-- PPCSchedule440.td - PPC 440 Scheduling Definitions -*- tablegen -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -121,6 +120,14 @@ def PPC440Itineraries : ProcessorItineraries<
                                 [2, 0, 0],
                                 [P440_GPR_Bypass,
                                  P440_GPR_Bypass, P440_GPR_Bypass]>,
+  InstrItinData<IIC_IntISEL,    [InstrStage<1, [P440_DISS1, P440_DISS2]>,
+                                 InstrStage<1, [P440_IRACC, P440_LRACC]>,
+                                 InstrStage<1, [P440_IEXE1, P440_JEXE1]>,
+                                 InstrStage<1, [P440_IEXE2, P440_JEXE2]>,
+                                 InstrStage<1, [P440_IWB, P440_JWB]>],
+                                [2, 0, 0, 0],
+                                [P440_GPR_Bypass,
+                                 P440_GPR_Bypass, P440_GPR_Bypass, NoBypass]>,
   InstrItinData<IIC_IntCompare, [InstrStage<1, [P440_DISS1, P440_DISS2]>,
                                  InstrStage<1, [P440_IRACC, P440_LRACC]>,
                                  InstrStage<1, [P440_IEXE1, P440_JEXE1]>,
@@ -272,13 +279,6 @@ def PPC440Itineraries : ProcessorItineraries<
                                  InstrStage<2, [P440_LWB]>],
                                 [1, 1, 1],
                                 [NoBypass, P440_GPR_Bypass]>,
-  InstrItinData<IIC_LdStStoreUpd,[InstrStage<1, [P440_DISS1, P440_DISS2]>,
-                                 InstrStage<1, [P440_LRACC]>,
-                                 InstrStage<1, [P440_AGEN]>,
-                                 InstrStage<1, [P440_CRD]>,
-                                 InstrStage<2, [P440_LWB]>],
-                                [2, 1, 1, 1],
-                                [NoBypass, P440_GPR_Bypass]>,
   InstrItinData<IIC_LdStICBI,   [InstrStage<1, [P440_DISS1, P440_DISS2]>,
                                  InstrStage<1, [P440_LRACC]>,
                                  InstrStage<1, [P440_AGEN]>,
@@ -365,14 +365,14 @@ def PPC440Itineraries : ProcessorItineraries<
                                  InstrStage<2, [P440_LWB]>],
                                 [4, 1, 1],
                                 [NoBypass, P440_GPR_Bypass]>,
-  InstrItinData<IIC_LdStSTDU,   [InstrStage<1, [P440_DISS1, P440_DISS2]>,
+  InstrItinData<IIC_LdStSTU,    [InstrStage<1, [P440_DISS1, P440_DISS2]>,
                                  InstrStage<1, [P440_LRACC]>,
                                  InstrStage<1, [P440_AGEN]>,
                                  InstrStage<1, [P440_CRD]>,
                                  InstrStage<2, [P440_LWB]>],
                                 [2, 1, 1, 1],
                                 [NoBypass, P440_GPR_Bypass]>,
-  InstrItinData<IIC_LdStSTDUX,  [InstrStage<1, [P440_DISS1, P440_DISS2]>,
+  InstrItinData<IIC_LdStSTUX,   [InstrStage<1, [P440_DISS1, P440_DISS2]>,
                                  InstrStage<1, [P440_LRACC]>,
                                  InstrStage<1, [P440_AGEN]>,
                                  InstrStage<1, [P440_CRD]>,
@@ -589,10 +589,11 @@ def PPC440Itineraries : ProcessorItineraries<
 
 def PPC440Model : SchedMachineModel {
   let IssueWidth = 2;  // 2 instructions are dispatched per cycle.
-  let MinLatency = -1; // OperandCycles are interpreted as MinLatency.
   let LoadLatency = 5; // Optimistic load latency assuming bypass.
                        // This is overriden by OperandCycles if the
                        // Itineraries are queried instead.
+
+  let CompleteModel = 0;
 
   let Itineraries = PPC440Itineraries;
 }

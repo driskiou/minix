@@ -1,17 +1,20 @@
-//===-- llvm/MC/MCParsedAsmOperand.h - Asm Parser Operand -------*- C++ -*-===//
+//===- llvm/MC/MCParsedAsmOperand.h - Asm Parser Operand --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_MC_MCPARSER_MCPARSEDASMOPERAND_H
 #define LLVM_MC_MCPARSER_MCPARSEDASMOPERAND_H
 
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/SMLoc.h"
+#include <string>
+
 namespace llvm {
-class SMLoc;
+
 class raw_ostream;
 
 /// MCParsedAsmOperand - This abstract class represents a source-level assembly
@@ -27,9 +30,17 @@ class MCParsedAsmOperand {
   /// MS-style inline assembly.
   std::string Constraint;
 
+protected:
+  // This only seems to need to be movable (by ARMOperand) but ARMOperand has
+  // lots of members and MSVC doesn't support defaulted move ops, so to avoid
+  // that verbosity, just rely on defaulted copy ops. It's only the Constraint
+  // string member that would benefit from movement anyway.
+  MCParsedAsmOperand() = default;
+  MCParsedAsmOperand(const MCParsedAsmOperand &RHS) = default;
+  MCParsedAsmOperand &operator=(const MCParsedAsmOperand &) = default;
+
 public:
-  MCParsedAsmOperand() {}
-  virtual ~MCParsedAsmOperand() {}
+  virtual ~MCParsedAsmOperand() = default;
 
   void setConstraint(StringRef C) { Constraint = C.str(); }
   StringRef getConstraint() { return Constraint; }
@@ -60,16 +71,17 @@ public:
   /// variable/label?   Only valid when parsing MS-style inline assembly.
   virtual bool needAddressOf() const { return false; }
 
-  /// isOffsetOf - Do we need to emit code to get the offset of the variable,
-  /// rather then the value of the variable?   Only valid when parsing MS-style
-  /// inline assembly.
-  virtual bool isOffsetOf() const { return false; }
+  /// isOffsetOfLocal - Do we need to emit code to get the offset of the local
+  /// variable, rather than its value?   Only valid when parsing MS-style inline
+  /// assembly.
+  virtual bool isOffsetOfLocal() const { return false; }
 
   /// getOffsetOfLoc - Get the location of the offset operator.
   virtual SMLoc getOffsetOfLoc() const { return SMLoc(); }
 
   /// print - Print a debug representation of the operand to the given stream.
   virtual void print(raw_ostream &OS) const = 0;
+
   /// dump - Print to the debug stream.
   virtual void dump() const;
 };
@@ -82,6 +94,6 @@ inline raw_ostream& operator<<(raw_ostream &OS, const MCParsedAsmOperand &MO) {
   return OS;
 }
 
-} // end namespace llvm.
+} // end namespace llvm
 
-#endif
+#endif // LLVM_MC_MCPARSER_MCPARSEDASMOPERAND_H

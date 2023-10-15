@@ -1,23 +1,27 @@
 //===-- NVPTXTargetInfo.cpp - NVPTX Target Implementation -----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
-#include "NVPTX.h"
-#include "llvm/IR/Module.h"
+#include "TargetInfo/NVPTXTargetInfo.h"
 #include "llvm/Support/TargetRegistry.h"
 using namespace llvm;
 
-Target llvm::TheNVPTXTarget32;
-Target llvm::TheNVPTXTarget64;
+Target &llvm::getTheNVPTXTarget32() {
+  static Target TheNVPTXTarget32;
+  return TheNVPTXTarget32;
+}
+Target &llvm::getTheNVPTXTarget64() {
+  static Target TheNVPTXTarget64;
+  return TheNVPTXTarget64;
+}
 
-extern "C" void LLVMInitializeNVPTXTargetInfo() {
-  RegisterTarget<Triple::nvptx> X(TheNVPTXTarget32, "nvptx",
-                                  "NVIDIA PTX 32-bit");
-  RegisterTarget<Triple::nvptx64> Y(TheNVPTXTarget64, "nvptx64",
-                                    "NVIDIA PTX 64-bit");
+extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeNVPTXTargetInfo() {
+  RegisterTarget<Triple::nvptx> X(getTheNVPTXTarget32(), "nvptx",
+                                  "NVIDIA PTX 32-bit", "NVPTX");
+  RegisterTarget<Triple::nvptx64> Y(getTheNVPTXTarget64(), "nvptx64",
+                                    "NVIDIA PTX 64-bit", "NVPTX");
 }

@@ -1,10 +1,9 @@
 //===- PPCScheduleA2.td - PPC A2 Scheduling Definitions --*- tablegen -*-===//
-// 
-//                     The LLVM Compiler Infrastructure
 //
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-// 
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 //===----------------------------------------------------------------------===//
 
 // Primary reference:
@@ -29,6 +28,8 @@ def PPCA2Itineraries : ProcessorItineraries<
                                  [1, 0, 0]>,
   InstrItinData<IIC_IntGeneral,  [InstrStage<1, [A2_XU]>],
                                  [2, 0, 0]>,
+  InstrItinData<IIC_IntISEL,     [InstrStage<1, [A2_XU]>],
+                                 [2, 0, 0, 0]>,
   InstrItinData<IIC_IntCompare,  [InstrStage<1, [A2_XU]>],
                                  [2, 0, 0]>,
   InstrItinData<IIC_IntDivW,     [InstrStage<1, [A2_XU]>],
@@ -79,8 +80,6 @@ def PPCA2Itineraries : ProcessorItineraries<
                                  [6, 0, 0]>,
   InstrItinData<IIC_LdStStore,   [InstrStage<1, [A2_XU]>],
                                  [0, 0, 0]>,
-  InstrItinData<IIC_LdStStoreUpd,[InstrStage<1, [A2_XU]>],
-                                 [2, 0, 0, 0]>,
   InstrItinData<IIC_LdStICBI,    [InstrStage<1, [A2_XU]>],
                                  [16, 0, 0]>,
   InstrItinData<IIC_LdStSTFD,    [InstrStage<1, [A2_XU]>],
@@ -103,9 +102,9 @@ def PPCA2Itineraries : ProcessorItineraries<
                                  [82, 0, 0]>, // L2 latency
   InstrItinData<IIC_LdStSTD,     [InstrStage<1, [A2_XU]>],
                                  [0, 0, 0]>,
-  InstrItinData<IIC_LdStSTDU,    [InstrStage<1, [A2_XU]>],
+  InstrItinData<IIC_LdStSTU,     [InstrStage<1, [A2_XU]>],
                                  [2, 0, 0, 0]>,
-  InstrItinData<IIC_LdStSTDUX,   [InstrStage<1, [A2_XU]>],
+  InstrItinData<IIC_LdStSTUX,    [InstrStage<1, [A2_XU]>],
                                  [2, 0, 0, 0]>,
   InstrItinData<IIC_LdStSTDCX,   [InstrStage<1, [A2_XU]>],
                                  [82, 0, 0]>, // L2 latency
@@ -158,11 +157,12 @@ def PPCA2Itineraries : ProcessorItineraries<
 
 def PPCA2Model : SchedMachineModel {
   let IssueWidth = 1;  // 1 instruction is dispatched per cycle.
-  let MinLatency = -1; // OperandCycles are interpreted as MinLatency.
   let LoadLatency = 6; // Optimistic load latency assuming bypass.
                        // This is overriden by OperandCycles if the
                        // Itineraries are queried instead.
   let MispredictPenalty = 13;
+
+  let CompleteModel = 0;
 
   let Itineraries = PPCA2Itineraries;
 }

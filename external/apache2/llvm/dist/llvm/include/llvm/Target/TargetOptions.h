@@ -1,9 +1,8 @@
 //===-- llvm/Target/TargetOptions.h - Target Options ------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,19 +14,21 @@
 #ifndef LLVM_TARGET_TARGETOPTIONS_H
 #define LLVM_TARGET_TARGETOPTIONS_H
 
+#include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/MC/MCTargetOptions.h"
-#include <string>
+
+#include <memory>
 
 namespace llvm {
+  struct fltSemantics;
   class MachineFunction;
-  class StringRef;
+  class MemoryBuffer;
 
-  // Possible float ABI settings. Used with FloatABIType in TargetOptions.h.
   namespace FloatABI {
     enum ABIType {
-      Default, // Target-specific (either soft or hard depending on triple,etc).
-      Soft, // Soft float.
-      Hard  // Hard float.
+      Default, // Target-specific (either soft or hard depending on triple, etc).
+      Soft,    // Soft float.
+      Hard     // Hard float.
     };
   }
 
@@ -57,61 +58,95 @@ namespace llvm {
     };
   }
 
-  enum class CFIntegrity {
-    Sub,             // Use subtraction-based checks.
-    Ror,             // Use rotation-based checks.
-    Add              // Use addition-based checks. This depends on having
-                     // sufficient alignment in the code and is usually not
-                     // feasible.
+  enum class BasicBlockSection {
+    All,    // Use Basic Block Sections for all basic blocks.  A section
+            // for every basic block can significantly bloat object file sizes.
+    List,   // Get list of functions & BBs from a file. Selectively enables
+            // basic block sections for a subset of basic blocks which can be
+            // used to control object size bloats from creating sections.
+    Labels, // Do not use Basic Block Sections but label basic blocks.  This
+            // is useful when associating profile counts from virtual addresses
+            // to basic blocks.
+    Preset, // Similar to list but the blocks are identified by passes which
+            // seek to use Basic Block Sections, e.g. MachineFunctionSplitter.
+            // This option cannot be set via the command line.
+    None    // Do not use Basic Block Sections.
+  };
+
+  enum class EABI {
+    Unknown,
+    Default, // Default means not specified
+    EABI4,   // Target-specific (either 4, 5 or gnu depending on triple).
+    EABI5,
+    GNU
+  };
+
+  /// Identify a debugger for "tuning" the debug info.
+  ///
+  /// The "debugger tuning" concept allows us to present a more intuitive
+  /// interface that unpacks into different sets of defaults for the various
+  /// individual feature-flag settings, that suit the preferences of the
+  /// various debuggers.  However, it's worth remembering that debuggers are
+  /// not the only consumers of debug info, and some variations in DWARF might
+  /// better be treated as target/platform issues. Fundamentally,
+  /// o if the feature is useful (or not) to a particular debugger, regardless
+  ///   of the target, that's a tuning decision;
+  /// o if the feature is useful (or not) on a particular platform, regardless
+  ///   of the debugger, that's a target decision.
+  /// It's not impossible to see both factors in some specific case.
+  enum class DebuggerKind {
+    Default, ///< No specific tuning requested.
+    GDB,     ///< Tune debug info for gdb.
+    LLDB,    ///< Tune debug info for lldb.
+    SCE,     ///< Tune debug info for SCE targets (e.g. PS4).
+    DBX      ///< Tune debug info for dbx.
+  };
+
+  /// Enable abort calls when global instruction selection fails to lower/select
+  /// an instruction.
+  enum class GlobalISelAbortMode {
+    Disable,        // Disable the abort.
+    Enable,         // Enable the abort.
+    DisableWithDiag // Disable the abort but emit a diagnostic on failure.
   };
 
   class TargetOptions {
   public:
     TargetOptions()
-        : PrintMachineCode(false), NoFramePointerElim(false),
-          LessPreciseFPMADOption(false), UnsafeFPMath(false),
-          NoInfsFPMath(false), NoNaNsFPMath(false),
-          HonorSignDependentRoundingFPMathOption(false), UseSoftFloat(false),
-          NoZerosInBSS(false), JITEmitDebugInfo(false),
-          JITEmitDebugInfoToDisk(false), GuaranteedTailCallOpt(false),
-          DisableTailCalls(false), StackAlignmentOverride(0),
-          EnableFastISel(false), PositionIndependentExecutable(false),
-          UseInitArray(false), DisableIntegratedAS(false),
-          CompressDebugSections(false), FunctionSections(false),
-          DataSections(false), TrapUnreachable(false), TrapFuncName(),
-          FloatABIType(FloatABI::Default),
-          AllowFPOpFusion(FPOpFusion::Standard), JTType(JumpTable::Single),
-          FCFI(false), ThreadModel(ThreadModel::POSIX),
-          CFIType(CFIntegrity::Sub), CFIEnforcing(false), CFIFuncName() {}
-
-    /// PrintMachineCode - This flag is enabled when the -print-machineinstrs
-    /// option is specified on the command line, and should enable debugging
-    /// output from the code generator.
-    unsigned PrintMachineCode : 1;
-
-    /// NoFramePointerElim - This flag is enabled when the -disable-fp-elim is
-    /// specified on the command line.  If the target supports the frame pointer
-    /// elimination optimization, this option should disable it.
-    unsigned NoFramePointerElim : 1;
+        : UnsafeFPMath(false), NoInfsFPMath(false), NoNaNsFPMath(false),
+          NoTrappingFPMath(true), NoSignedZerosFPMath(false),
+          EnableAIXExtendedAltivecABI(false),
+          HonorSignDependentRoundingFPMathOption(false), NoZerosInBSS(false),
+          GuaranteedTailCallOpt(false), StackSymbolOrdering(true),
+          EnableFastISel(false), EnableGlobalISel(false), UseInitArray(false),
+          DisableIntegratedAS(false), RelaxELFRelocations(false),
+          FunctionSections(false), DataSections(false),
+          IgnoreXCOFFVisibility(false), XCOFFTracebackTable(true),
+          UniqueSectionNames(true), UniqueBasicBlockSectionNames(false),
+          TrapUnreachable(false), NoTrapAfterNoreturn(false), TLSSize(0),
+          EmulatedTLS(false), ExplicitEmulatedTLS(false), EnableIPRA(false),
+          EmitStackSizeSection(false), EnableMachineOutliner(false),
+          EnableMachineFunctionSplitter(false), SupportsDefaultOutlining(false),
+          EmitAddrsig(false), EmitCallSiteInfo(false),
+          SupportsDebugEntryValues(false), EnableDebugEntryValues(false),
+          PseudoProbeForProfiling(false), ValueTrackingVariableLocations(false),
+          ForceDwarfFrameSection(false), XRayOmitFunctionIndex(false),
+          DebugStrictDwarf(false),
+          FPDenormalMode(DenormalMode::IEEE, DenormalMode::IEEE) {}
 
     /// DisableFramePointerElim - This returns true if frame pointer elimination
     /// optimization should be disabled for the given machine function.
     bool DisableFramePointerElim(const MachineFunction &MF) const;
 
-    /// LessPreciseFPMAD - This flag is enabled when the
-    /// -enable-fp-mad is specified on the command line.  When this flag is off
-    /// (the default), the code generator is not allowed to generate mad
-    /// (multiply add) if the result is "less precise" than doing those
-    /// operations individually.
-    unsigned LessPreciseFPMADOption : 1;
-    bool LessPreciseFPMAD() const;
+    /// If greater than 0, override the default value of
+    /// MCAsmInfo::BinutilsVersion.
+    std::pair<int, int> BinutilsVersion{0, 0};
 
     /// UnsafeFPMath - This flag is enabled when the
     /// -enable-unsafe-fp-math flag is specified on the command line.  When
     /// this flag is off (the default), the code generator is not allowed to
     /// produce results that are "less precise" than IEEE allows.  This includes
     /// use of X86 instructions like FSIN and FCOS instead of libcalls.
-    /// UnsafeFPMath implies LessPreciseFPMAD.
     unsigned UnsafeFPMath : 1;
 
     /// NoInfsFPMath - This flag is enabled when the
@@ -126,6 +161,23 @@ namespace llvm {
     /// assume the FP arithmetic arguments and results are never NaNs.
     unsigned NoNaNsFPMath : 1;
 
+    /// NoTrappingFPMath - This flag is enabled when the
+    /// -enable-no-trapping-fp-math is specified on the command line. This
+    /// specifies that there are no trap handlers to handle exceptions.
+    unsigned NoTrappingFPMath : 1;
+
+    /// NoSignedZerosFPMath - This flag is enabled when the
+    /// -enable-no-signed-zeros-fp-math is specified on the command line. This
+    /// specifies that optimizations are allowed to treat the sign of a zero
+    /// argument or result as insignificant.
+    unsigned NoSignedZerosFPMath : 1;
+
+    /// EnableAIXExtendedAltivecABI - This flag returns true when -vec-extabi is
+    /// specified. The code generator is then able to use both volatile and
+    /// nonvolitle vector regisers. When false, the code generator only uses
+    /// volatile vector registers which is the default setting on AIX.
+    unsigned EnableAIXExtendedAltivecABI : 1;
+
     /// HonorSignDependentRoundingFPMath - This returns true when the
     /// -enable-sign-dependent-rounding-fp-math is specified.  If this returns
     /// false (the default), the code generator is allowed to assume that the
@@ -136,25 +188,10 @@ namespace llvm {
     unsigned HonorSignDependentRoundingFPMathOption : 1;
     bool HonorSignDependentRoundingFPMath() const;
 
-    /// UseSoftFloat - This flag is enabled when the -soft-float flag is
-    /// specified on the command line.  When this flag is on, the code generator
-    /// will generate libcalls to the software floating point library instead of
-    /// target FP instructions.
-    unsigned UseSoftFloat : 1;
-
     /// NoZerosInBSS - By default some codegens place zero-initialized data to
     /// .bss section. This flag disables such behaviour (necessary, e.g. for
     /// crt*.o compiling).
     unsigned NoZerosInBSS : 1;
-
-    /// JITEmitDebugInfo - This flag indicates that the JIT should try to emit
-    /// debug information and notify a debugger about it.
-    unsigned JITEmitDebugInfo : 1;
-
-    /// JITEmitDebugInfoToDisk - This flag indicates that the JIT should write
-    /// the object files generated by the JITEmitDebugInfo flag to disk.  This
-    /// flag is hidden and is only for debugging the debug info.
-    unsigned JITEmitDebugInfoToDisk : 1;
 
     /// GuaranteedTailCallOpt - This flag is enabled when -tailcallopt is
     /// specified on the commandline. When the flag is on, participating targets
@@ -164,23 +201,26 @@ namespace llvm {
     /// as their parent function, etc.), using an alternate ABI if necessary.
     unsigned GuaranteedTailCallOpt : 1;
 
-    /// DisableTailCalls - This flag controls whether we will use tail calls.
-    /// Disabling them may be useful to maintain a correct call stack.
-    unsigned DisableTailCalls : 1;
-
     /// StackAlignmentOverride - Override default stack alignment for target.
-    unsigned StackAlignmentOverride;
+    unsigned StackAlignmentOverride = 0;
+
+    /// StackSymbolOrdering - When true, this will allow CodeGen to order
+    /// the local stack symbols (for code size, code locality, or any other
+    /// heuristics). When false, the local symbols are left in whatever order
+    /// they were generated. Default is true.
+    unsigned StackSymbolOrdering : 1;
 
     /// EnableFastISel - This flag enables fast-path instruction selection
     /// which trades away generated code quality in favor of reducing
     /// compile time.
     unsigned EnableFastISel : 1;
 
-    /// PositionIndependentExecutable - This flag indicates whether the code
-    /// will eventually be linked into a single executable, despite the PIC
-    /// relocation model being in use. It's value is undefined (and irrelevant)
-    /// if the relocation model is anything other than PIC.
-    unsigned PositionIndependentExecutable : 1;
+    /// EnableGlobalISel - This flag enables global instruction selection.
+    unsigned EnableGlobalISel : 1;
+
+    /// EnableGlobalISelAbort - Control abort behaviour when global instruction
+    /// selection fails to lower/select an instruction.
+    GlobalISelAbortMode GlobalISelAbort = GlobalISelAbortMode::Enable;
 
     /// UseInitArray - Use .init_array instead of .ctors for static
     /// constructors.
@@ -190,7 +230,9 @@ namespace llvm {
     unsigned DisableIntegratedAS : 1;
 
     /// Compress DWARF debug sections.
-    unsigned CompressDebugSections : 1;
+    DebugCompressionType CompressDebugSections = DebugCompressionType::None;
+
+    unsigned RelaxELFRelocations : 1;
 
     /// Emit functions into separate sections.
     unsigned FunctionSections : 1;
@@ -198,22 +240,104 @@ namespace llvm {
     /// Emit data into separate sections.
     unsigned DataSections : 1;
 
+    /// Do not emit visibility attribute for xcoff.
+    unsigned IgnoreXCOFFVisibility : 1;
+
+    /// Emit XCOFF traceback table.
+    unsigned XCOFFTracebackTable : 1;
+
+    unsigned UniqueSectionNames : 1;
+
+    /// Use unique names for basic block sections.
+    unsigned UniqueBasicBlockSectionNames : 1;
+
     /// Emit target-specific trap instruction for 'unreachable' IR instructions.
     unsigned TrapUnreachable : 1;
 
-    /// getTrapFunctionName - If this returns a non-empty string, this means
-    /// isel should lower Intrinsic::trap to a call to the specified function
-    /// name instead of an ISD::TRAP node.
-    std::string TrapFuncName;
-    StringRef getTrapFunctionName() const;
+    /// Do not emit a trap instruction for 'unreachable' IR instructions behind
+    /// noreturn calls, even if TrapUnreachable is true.
+    unsigned NoTrapAfterNoreturn : 1;
+
+    /// Bit size of immediate TLS offsets (0 == use the default).
+    unsigned TLSSize : 8;
+
+    /// EmulatedTLS - This flag enables emulated TLS model, using emutls
+    /// function in the runtime library..
+    unsigned EmulatedTLS : 1;
+
+    /// Whether -emulated-tls or -no-emulated-tls is set.
+    unsigned ExplicitEmulatedTLS : 1;
+
+    /// This flag enables InterProcedural Register Allocation (IPRA).
+    unsigned EnableIPRA : 1;
+
+    /// Emit section containing metadata on function stack sizes.
+    unsigned EmitStackSizeSection : 1;
+
+    /// Enables the MachineOutliner pass.
+    unsigned EnableMachineOutliner : 1;
+
+    /// Enables the MachineFunctionSplitter pass.
+    unsigned EnableMachineFunctionSplitter : 1;
+
+    /// Set if the target supports default outlining behaviour.
+    unsigned SupportsDefaultOutlining : 1;
+
+    /// Emit address-significance table.
+    unsigned EmitAddrsig : 1;
+
+    /// Emit basic blocks into separate sections.
+    BasicBlockSection BBSections = BasicBlockSection::None;
+
+    /// Memory Buffer that contains information on sampled basic blocks and used
+    /// to selectively generate basic block sections.
+    std::shared_ptr<MemoryBuffer> BBSectionsFuncListBuf;
+
+    /// The flag enables call site info production. It is used only for debug
+    /// info, and it is restricted only to optimized code. This can be used for
+    /// something else, so that should be controlled in the frontend.
+    unsigned EmitCallSiteInfo : 1;
+    /// Set if the target supports the debug entry values by default.
+    unsigned SupportsDebugEntryValues : 1;
+    /// When set to true, the EnableDebugEntryValues option forces production
+    /// of debug entry values even if the target does not officially support
+    /// it. Useful for testing purposes only. This flag should never be checked
+    /// directly, always use \ref ShouldEmitDebugEntryValues instead.
+     unsigned EnableDebugEntryValues : 1;
+    /// NOTE: There are targets that still do not support the debug entry values
+    /// production.
+    bool ShouldEmitDebugEntryValues() const;
+
+    /// Emit pseudo probes into the binary for sample profiling
+    unsigned PseudoProbeForProfiling : 1;
+
+    // When set to true, use experimental new debug variable location tracking,
+    // which seeks to follow the values of variables rather than their location,
+    // post isel.
+    unsigned ValueTrackingVariableLocations : 1;
+
+    /// Emit DWARF debug frame section.
+    unsigned ForceDwarfFrameSection : 1;
+
+    /// Emit XRay Function Index section
+    unsigned XRayOmitFunctionIndex : 1;
+
+    /// When set to true, don't use DWARF extensions in later DWARF versions.
+    /// By default, it is set to false.
+    unsigned DebugStrictDwarf : 1;
+
+    /// Name of the stack usage file (i.e., .su file) if user passes
+    /// -fstack-usage. If empty, it can be implied that -fstack-usage is not
+    /// passed on the command line.
+    std::string StackUsageOutput;
 
     /// FloatABIType - This setting is set by -float-abi=xxx option is specfied
     /// on the command line. This setting may either be Default, Soft, or Hard.
     /// Default selects the target's default behavior. Soft selects the ABI for
-    /// UseSoftFloat, but does not indicate that FP hardware may not be used.
-    /// Such a combination is unfortunately popular (e.g. arm-apple-darwin).
-    /// Hard presumes that the normal FP ABI is used.
-    FloatABI::ABIType FloatABIType;
+    /// software floating point, but does not indicate that FP hardware may not
+    /// be used. Such a combination is unfortunately popular (e.g.
+    /// arm-apple-darwin). Hard presumes that the normal FP ABI is used.
+    FloatABI::ABIType FloatABIType = FloatABI::Default;
 
     /// AllowFPOpFusion - This flag is set by the -fuse-fp-ops=xxx option.
     /// This controls the creation of fused FP ops that store intermediate
@@ -231,77 +355,51 @@ namespace llvm {
     /// optimizers.  Fused operations that are explicitly specified (e.g. FMA
     /// via the llvm.fma.* intrinsic) will always be honored, regardless of
     /// the value of this option.
-    FPOpFusion::FPOpFusionMode AllowFPOpFusion;
-
-    /// JTType - This flag specifies the type of jump-instruction table to
-    /// create for functions that have the jumptable attribute.
-    JumpTable::JumpTableType JTType;
-
-    /// FCFI - This flags controls whether or not forward-edge control-flow
-    /// integrity is applied.
-    bool FCFI;
+    FPOpFusion::FPOpFusionMode AllowFPOpFusion = FPOpFusion::Standard;
 
     /// ThreadModel - This flag specifies the type of threading model to assume
     /// for things like atomics
-    ThreadModel::Model ThreadModel;
+    ThreadModel::Model ThreadModel = ThreadModel::POSIX;
 
-    /// CFIType - This flag specifies the type of control-flow integrity check
-    /// to add as a preamble to indirect calls.
-    CFIntegrity CFIType;
+    /// EABIVersion - This flag specifies the EABI version
+    EABI EABIVersion = EABI::Default;
 
-    /// CFIEnforcing - This flags controls whether or not CFI violations cause
-    /// the program to halt.
-    bool CFIEnforcing;
+    /// Which debugger to tune for.
+    DebuggerKind DebuggerTuning = DebuggerKind::Default;
 
-    /// getCFIFuncName - If this returns a non-empty string, then this is the
-    /// name of the function that will be called for each CFI violation in
-    /// non-enforcing mode.
-    std::string CFIFuncName;
-    StringRef getCFIFuncName() const;
+  private:
+    /// Flushing mode to assume in default FP environment.
+    DenormalMode FPDenormalMode;
+
+    /// Flushing mode to assume in default FP environment, for float/vector of
+    /// float.
+    DenormalMode FP32DenormalMode;
+
+  public:
+    void setFPDenormalMode(DenormalMode Mode) {
+      FPDenormalMode = Mode;
+    }
+
+    void setFP32DenormalMode(DenormalMode Mode) {
+      FP32DenormalMode = Mode;
+    }
+
+    DenormalMode getRawFPDenormalMode() const {
+      return FPDenormalMode;
+    }
+
+    DenormalMode getRawFP32DenormalMode() const {
+      return FP32DenormalMode;
+    }
+
+    DenormalMode getDenormalMode(const fltSemantics &FPType) const;
+
+    /// What exception model to use
+    ExceptionHandling ExceptionModel = ExceptionHandling::None;
 
     /// Machine level options.
     MCTargetOptions MCOptions;
   };
-
-// Comparison operators:
-
-
-inline bool operator==(const TargetOptions &LHS,
-                       const TargetOptions &RHS) {
-#define ARE_EQUAL(X) LHS.X == RHS.X
-  return
-    ARE_EQUAL(UnsafeFPMath) &&
-    ARE_EQUAL(NoInfsFPMath) &&
-    ARE_EQUAL(NoNaNsFPMath) &&
-    ARE_EQUAL(HonorSignDependentRoundingFPMathOption) &&
-    ARE_EQUAL(UseSoftFloat) &&
-    ARE_EQUAL(NoZerosInBSS) &&
-    ARE_EQUAL(JITEmitDebugInfo) &&
-    ARE_EQUAL(JITEmitDebugInfoToDisk) &&
-    ARE_EQUAL(GuaranteedTailCallOpt) &&
-    ARE_EQUAL(DisableTailCalls) &&
-    ARE_EQUAL(StackAlignmentOverride) &&
-    ARE_EQUAL(EnableFastISel) &&
-    ARE_EQUAL(PositionIndependentExecutable) &&
-    ARE_EQUAL(UseInitArray) &&
-    ARE_EQUAL(TrapUnreachable) &&
-    ARE_EQUAL(TrapFuncName) &&
-    ARE_EQUAL(FloatABIType) &&
-    ARE_EQUAL(AllowFPOpFusion) &&
-    ARE_EQUAL(JTType) &&
-    ARE_EQUAL(FCFI) &&
-    ARE_EQUAL(ThreadModel) &&
-    ARE_EQUAL(CFIType) &&
-    ARE_EQUAL(CFIEnforcing) &&
-    ARE_EQUAL(CFIFuncName) &&
-    ARE_EQUAL(MCOptions);
-#undef ARE_EQUAL
-}
-
-inline bool operator!=(const TargetOptions &LHS,
-                       const TargetOptions &RHS) {
-  return !(LHS == RHS);
-}
 
 } // End llvm namespace
 

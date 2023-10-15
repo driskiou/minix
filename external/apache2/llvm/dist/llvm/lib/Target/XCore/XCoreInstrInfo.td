@@ -1,9 +1,8 @@
 //===-- XCoreInstrInfo.td - Target Description for XCore ---*- tablegen -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -73,9 +72,10 @@ def XCoreLdwsp        : SDNode<"XCoreISD::LDWSP", SDT_XCoreLdwsp,
                                [SDNPHasChain, SDNPMayLoad]>;
 
 // These are target-independent nodes, but have target-specific formats.
-def SDT_XCoreCallSeqStart : SDCallSeqStart<[ SDTCisVT<0, i32> ]>;
+def SDT_XCoreCallSeqStart : SDCallSeqStart<[ SDTCisVT<0, i32>,
+                                             SDTCisVT<1, i32> ]>;
 def SDT_XCoreCallSeqEnd   : SDCallSeqEnd<[ SDTCisVT<0, i32>,
-                                        SDTCisVT<1, i32> ]>;
+                                           SDTCisVT<1, i32> ]>;
 
 def callseq_start : SDNode<"ISD::CALLSEQ_START", SDT_XCoreCallSeqStart,
                            [SDNPHasChain, SDNPOutGlue]>;
@@ -94,33 +94,34 @@ def XCoreMemBarrier : SDNode<"XCoreISD::MEMBARRIER", SDT_XCoreMEMBARRIER,
 def div4_xform : SDNodeXForm<imm, [{
   // Transformation function: imm/4
   assert(N->getZExtValue() % 4 == 0);
-  return getI32Imm(N->getZExtValue()/4);
+  return getI32Imm(N->getZExtValue()/4, SDLoc(N));
 }]>;
 
 def msksize_xform : SDNodeXForm<imm, [{
   // Transformation function: get the size of a mask
   assert(isMask_32(N->getZExtValue()));
   // look for the first non-zero bit
-  return getI32Imm(32 - countLeadingZeros((uint32_t)N->getZExtValue()));
+  return getI32Imm(32 - countLeadingZeros((uint32_t)N->getZExtValue()),
+                   SDLoc(N));
 }]>;
 
 def neg_xform : SDNodeXForm<imm, [{
   // Transformation function: -imm
   uint32_t value = N->getZExtValue();
-  return getI32Imm(-value);
+  return getI32Imm(-value, SDLoc(N));
 }]>;
 
 def bpwsub_xform : SDNodeXForm<imm, [{
   // Transformation function: 32-imm
   uint32_t value = N->getZExtValue();
-  return getI32Imm(32-value);
+  return getI32Imm(32 - value, SDLoc(N));
 }]>;
 
 def div4neg_xform : SDNodeXForm<imm, [{
   // Transformation function: -imm/4
   uint32_t value = N->getZExtValue();
   assert(-value % 4 == 0);
-  return getI32Imm(-value/4);
+  return getI32Imm(-value/4, SDLoc(N));
 }]>;
 
 def immUs4Neg : PatLeaf<(imm), [{
@@ -145,16 +146,8 @@ def immU6 : PatLeaf<(imm), [{
   return (uint32_t)N->getZExtValue() < (1 << 6);
 }]>;
 
-def immU10 : PatLeaf<(imm), [{
-  return (uint32_t)N->getZExtValue() < (1 << 10);
-}]>;
-
 def immU16 : PatLeaf<(imm), [{
   return (uint32_t)N->getZExtValue() < (1 << 16);
-}]>;
-
-def immU20 : PatLeaf<(imm), [{
-  return (uint32_t)N->getZExtValue() < (1 << 20);
 }]>;
 
 def immMskBitp : PatLeaf<(imm), [{ return immMskBitp(N); }]>;
@@ -330,9 +323,9 @@ class F2R_np<bits<6> opc, string OpcStr> :
 //===----------------------------------------------------------------------===//
 
 let Defs = [SP], Uses = [SP] in {
-def ADJCALLSTACKDOWN : PseudoInstXCore<(outs), (ins i32imm:$amt),
-                               "# ADJCALLSTACKDOWN $amt",
-                               [(callseq_start timm:$amt)]>;
+def ADJCALLSTACKDOWN : PseudoInstXCore<(outs), (ins i32imm:$amt, i32imm:$amt2),
+                               "# ADJCALLSTACKDOWN $amt, $amt2",
+                               [(callseq_start timm:$amt, timm:$amt2)]>;
 def ADJCALLSTACKUP : PseudoInstXCore<(outs), (ins i32imm:$amt1, i32imm:$amt2),
                             "# ADJCALLSTACKUP $amt1",
                             [(callseq_end timm:$amt1, timm:$amt2)]>;
@@ -542,7 +535,7 @@ let hasSideEffects = 0, isReMaterializable = 1 in
 def LDAWDP_ru6: _FRU6<0b011000, (outs RRegs:$a), (ins i32imm:$b),
                       "ldaw $a, dp[$b]", []>;
 
-let isReMaterializable = 1 in                    
+let isReMaterializable = 1 in
 def LDAWDP_lru6: _FLRU6<0b011000, (outs RRegs:$a), (ins i32imm:$b),
                         "ldaw $a, dp[$b]",
                         [(set RRegs:$a, (dprelwrapper tglobaladdr:$b))]>;
@@ -981,17 +974,17 @@ def SETDP_1r : _F1R<0b001100, (outs), (ins GRRegs:$a), "set dp, $a", []>;
 let hasSideEffects=0 in
 def SETCP_1r : _F1R<0b001101, (outs), (ins GRRegs:$a), "set cp, $a", []>;
 
-let hasCtrlDep = 1 in 
+let hasCtrlDep = 1 in
 def ECALLT_1r : _F1R<0b010011, (outs), (ins GRRegs:$a),
                  "ecallt $a",
                  []>;
 
-let hasCtrlDep = 1 in 
+let hasCtrlDep = 1 in
 def ECALLF_1r : _F1R<0b010010, (outs), (ins GRRegs:$a),
                  "ecallf $a",
                  []>;
 
-let isCall=1, 
+let isCall=1,
 // All calls clobber the link register and the non-callee-saved registers:
 Defs = [R0, R1, R2, R3, R11, LR], Uses = [SP] in {
 def BLA_1r : _F1R<0b001000, (outs), (ins GRRegs:$a),
@@ -1148,7 +1141,7 @@ def : Pat<(truncstorei8 GRRegs:$val, (add GRRegs:$addr, GRRegs:$offset)),
           (ST8_l3r GRRegs:$val, GRRegs:$addr, GRRegs:$offset)>;
 def : Pat<(truncstorei8 GRRegs:$val, GRRegs:$addr),
           (ST8_l3r GRRegs:$val, GRRegs:$addr, (LDC_ru6 0))>;
-          
+
 def : Pat<(truncstorei16 GRRegs:$val, (lda16f GRRegs:$addr, GRRegs:$offset)),
           (ST16_l3r GRRegs:$val, GRRegs:$addr, GRRegs:$offset)>;
 def : Pat<(truncstorei16 GRRegs:$val, GRRegs:$addr),
@@ -1160,6 +1153,9 @@ def : Pat<(store GRRegs:$val, (add GRRegs:$addr, immUs4:$offset)),
           (STW_2rus GRRegs:$val, GRRegs:$addr, (div4_xform immUs4:$offset))>;
 def : Pat<(store GRRegs:$val, GRRegs:$addr),
           (STW_2rus GRRegs:$val, GRRegs:$addr, 0)>;
+
+/// bitrev
+def : Pat<(bitreverse GRRegs:$src), (BITREV_l2r GRRegs:$src)>;
 
 /// cttz
 def : Pat<(cttz GRRegs:$src), (CLZ_l2r (BITREV_l2r GRRegs:$src))>;

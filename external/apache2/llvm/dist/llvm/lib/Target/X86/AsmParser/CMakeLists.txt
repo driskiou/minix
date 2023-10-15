@@ -1,7 +1,13 @@
-add_llvm_library(LLVMX86AsmParser
-  X86AsmInstrumentation.cpp
+add_llvm_component_library(LLVMX86AsmParser
   X86AsmParser.cpp
 
-  LINK_LIBS
-  LLVMX86CodeGen
+  LINK_COMPONENTS
+  MC
+  MCParser
+  Support
+  X86Desc
+  X86Info
+
+  ADD_TO_COMPONENT
+  X86
   )

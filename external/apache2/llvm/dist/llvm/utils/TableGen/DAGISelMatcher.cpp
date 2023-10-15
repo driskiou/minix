@@ -1,16 +1,14 @@
 //===- DAGISelMatcher.cpp - Representation of DAG pattern matcher ---------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "DAGISelMatcher.h"
 #include "CodeGenDAGPatterns.h"
 #include "CodeGenTarget.h"
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TableGen/Record.h"
 using namespace llvm;
@@ -80,38 +78,48 @@ bool Matcher::canMoveBeforeNode(const Matcher *Other) const {
 
 
 ScopeMatcher::~ScopeMatcher() {
-  for (unsigned i = 0, e = Children.size(); i != e; ++i)
-    delete Children[i];
+  for (Matcher *C : Children)
+    delete C;
 }
 
 SwitchOpcodeMatcher::~SwitchOpcodeMatcher() {
-  for (unsigned i = 0, e = Cases.size(); i != e; ++i)
-    delete Cases[i].second;
+  for (auto &C : Cases)
+    delete C.second;
 }
 
 SwitchTypeMatcher::~SwitchTypeMatcher() {
-  for (unsigned i = 0, e = Cases.size(); i != e; ++i)
-    delete Cases[i].second;
+  for (auto &C : Cases)
+    delete C.second;
 }
 
-CheckPredicateMatcher::CheckPredicateMatcher(const TreePredicateFn &pred)
-  : Matcher(CheckPredicate), Pred(pred.getOrigPatFragRecord()) {}
+CheckPredicateMatcher::CheckPredicateMatcher(
+    const TreePredicateFn &pred, const SmallVectorImpl<unsigned> &Ops)
+  : Matcher(CheckPredicate), Pred(pred.getOrigPatFragRecord()),
+    Operands(Ops.begin(), Ops.end()) {}
 
 TreePredicateFn CheckPredicateMatcher::getPredicate() const {
   return TreePredicateFn(Pred);
 }
 
+unsigned CheckPredicateMatcher::getNumOperands() const {
+  return Operands.size();
+}
+
+unsigned CheckPredicateMatcher::getOperandNo(unsigned i) const {
+  assert(i < Operands.size());
+  return Operands[i];
+}
 
 
 // printImpl methods.
 
 void ScopeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "Scope\n";
-  for (unsigned i = 0, e = getNumChildren(); i != e; ++i) {
-    if (!getChild(i))
+  for (const Matcher *C : Children) {
+    if (!C)
       OS.indent(indent+1) << "NULL POINTER\n";
     else
-      getChild(i)->print(OS, indent+2);
+      C->print(OS, indent+2);
   }
 }
 
@@ -162,9 +170,9 @@ void CheckOpcodeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
 
 void SwitchOpcodeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "SwitchOpcode: {\n";
-  for (unsigned i = 0, e = Cases.size(); i != e; ++i) {
-    OS.indent(indent) << "case " << Cases[i].first->getEnumName() << ":\n";
-    Cases[i].second->print(OS, indent+2);
+  for (const auto &C : Cases) {
+    OS.indent(indent) << "case " << C.first->getEnumName() << ":\n";
+    C.second->print(OS, indent+2);
   }
   OS.indent(indent) << "}\n";
 }
@@ -177,9 +185,9 @@ void CheckTypeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
 
 void SwitchTypeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "SwitchType: {\n";
-  for (unsigned i = 0, e = Cases.size(); i != e; ++i) {
-    OS.indent(indent) << "case " << getEnumName(Cases[i].first) << ":\n";
-    Cases[i].second->print(OS, indent+2);
+  for (const auto &C : Cases) {
+    OS.indent(indent) << "case " << getEnumName(C.first) << ":\n";
+    C.second->print(OS, indent+2);
   }
   OS.indent(indent) << "}\n";
 }
@@ -203,6 +211,11 @@ void CheckCondCodeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "CheckCondCode ISD::" << CondCodeName << '\n';
 }
 
+void CheckChild2CondCodeMatcher::printImpl(raw_ostream &OS,
+                                           unsigned indent) const {
+  OS.indent(indent) << "CheckChild2CondCode ISD::" << CondCodeName << '\n';
+}
+
 void CheckValueTypeMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "CheckValueType MVT::" << TypeName << '\n';
 }
@@ -224,13 +237,25 @@ void CheckFoldableChainNodeMatcher::printImpl(raw_ostream &OS,
   OS.indent(indent) << "CheckFoldableChainNode\n";
 }
 
+void CheckImmAllOnesVMatcher::printImpl(raw_ostream &OS,
+                                        unsigned indent) const {
+  OS.indent(indent) << "CheckAllOnesV\n";
+}
+
+void CheckImmAllZerosVMatcher::printImpl(raw_ostream &OS,
+                                         unsigned indent) const {
+  OS.indent(indent) << "CheckAllZerosV\n";
+}
+
 void EmitIntegerMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
-  OS.indent(indent) << "EmitInteger " << Val << " VT=" << VT << '\n';
+  OS.indent(indent) << "EmitInteger " << Val << " VT=" << getEnumName(VT)
+                    << '\n';
 }
 
 void EmitStringIntegerMatcher::
 printImpl(raw_ostream &OS, unsigned indent) const {
-  OS.indent(indent) << "EmitStringInteger " << Val << " VT=" << VT << '\n';
+  OS.indent(indent) << "EmitStringInteger " << Val << " VT=" << getEnumName(VT)
+                    << '\n';
 }
 
 void EmitRegisterMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
@@ -239,7 +264,7 @@ void EmitRegisterMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
     OS << Reg->getName();
   else
     OS << "zero_reg";
-  OS << " VT=" << VT << '\n';
+  OS << " VT=" << getEnumName(VT) << '\n';
 }
 
 void EmitConvertToTargetMatcher::
@@ -275,52 +300,10 @@ void EmitNodeMatcherCommon::printImpl(raw_ostream &OS, unsigned indent) const {
   OS << ")\n";
 }
 
-void MarkGlueResultsMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
-  OS.indent(indent) << "MarkGlueResults <todo: args>\n";
-}
-
 void CompleteMatchMatcher::printImpl(raw_ostream &OS, unsigned indent) const {
   OS.indent(indent) << "CompleteMatch <todo args>\n";
   OS.indent(indent) << "Src = " << *Pattern.getSrcPattern() << "\n";
   OS.indent(indent) << "Dst = " << *Pattern.getDstPattern() << "\n";
-}
-
-// getHashImpl Implementation.
-
-unsigned CheckPatternPredicateMatcher::getHashImpl() const {
-  return HashString(Predicate);
-}
-
-unsigned CheckPredicateMatcher::getHashImpl() const {
-  return HashString(getPredicate().getFnName());
-}
-
-unsigned CheckOpcodeMatcher::getHashImpl() const {
-  return HashString(Opcode.getEnumName());
-}
-
-unsigned CheckCondCodeMatcher::getHashImpl() const {
-  return HashString(CondCodeName);
-}
-
-unsigned CheckValueTypeMatcher::getHashImpl() const {
-  return HashString(TypeName);
-}
-
-unsigned EmitStringIntegerMatcher::getHashImpl() const {
-  return HashString(Val) ^ VT;
-}
-
-template<typename It>
-static unsigned HashUnsigneds(It I, It E) {
-  unsigned Result = 0;
-  for (; I != E; ++I)
-    Result = (Result<<3) ^ *I;
-  return Result;
-}
-
-unsigned EmitMergeInputChainsMatcher::getHashImpl() const {
-  return HashUnsigneds(ChainNodes.begin(), ChainNodes.end());
 }
 
 bool CheckOpcodeMatcher::isEqualImpl(const Matcher *M) const {
@@ -339,23 +322,9 @@ bool EmitNodeMatcherCommon::isEqualImpl(const Matcher *m) const {
          M->NumFixedArityOperands == NumFixedArityOperands;
 }
 
-unsigned EmitNodeMatcherCommon::getHashImpl() const {
-  return (HashString(OpcodeName) << 4) | Operands.size();
-}
-
-
 void EmitNodeMatcher::anchor() { }
 
 void MorphNodeToMatcher::anchor() { }
-
-unsigned MarkGlueResultsMatcher::getHashImpl() const {
-  return HashUnsigneds(GlueResultNodes.begin(), GlueResultNodes.end());
-}
-
-unsigned CompleteMatchMatcher::getHashImpl() const {
-  return HashUnsigneds(Results.begin(), Results.end()) ^
-          ((unsigned)(intptr_t)&Pattern << 8);
-}
 
 // isContradictoryImpl Implementations.
 
@@ -443,3 +412,24 @@ bool CheckValueTypeMatcher::isContradictoryImpl(const Matcher *M) const {
   return false;
 }
 
+bool CheckImmAllOnesVMatcher::isContradictoryImpl(const Matcher *M) const {
+  // AllZeros is contradictory.
+  return isa<CheckImmAllZerosVMatcher>(M);
+}
+
+bool CheckImmAllZerosVMatcher::isContradictoryImpl(const Matcher *M) const {
+  // AllOnes is contradictory.
+  return isa<CheckImmAllOnesVMatcher>(M);
+}
+
+bool CheckCondCodeMatcher::isContradictoryImpl(const Matcher *M) const {
+  if (const auto *CCCM = dyn_cast<CheckCondCodeMatcher>(M))
+    return CCCM->getCondCodeName() != getCondCodeName();
+  return false;
+}
+
+bool CheckChild2CondCodeMatcher::isContradictoryImpl(const Matcher *M) const {
+  if (const auto *CCCCM = dyn_cast<CheckChild2CondCodeMatcher>(M))
+    return CCCCM->getCondCodeName() != getCondCodeName();
+  return false;
+}

@@ -1,9 +1,8 @@
 //===-- llvm/Target/TargetMachine.h - Target Information --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,36 +14,49 @@
 #define LLVM_TARGET_TARGETMACHINE_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Triple.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Target/CGPassBuilderOption.h"
 #include "llvm/Target/TargetOptions.h"
-#include <cassert>
 #include <string>
 
 namespace llvm {
 
-class InstrItineraryData;
+class AAManager;
+template <typename IRUnitT, typename AnalysisManagerT, typename... ExtraArgTs>
+class PassManager;
+using ModulePassManager = PassManager<Module>;
+
+class Function;
 class GlobalValue;
+class MachineFunctionPassManager;
+class MachineFunctionAnalysisManager;
+class MachineModuleInfoWrapperPass;
 class Mangler;
 class MCAsmInfo;
-class MCCodeGenInfo;
 class MCContext;
+class MCInstrInfo;
+class MCRegisterInfo;
+class MCStreamer;
+class MCSubtargetInfo;
 class MCSymbol;
+class raw_pwrite_stream;
+class PassBuilder;
+class PassManagerBuilder;
+struct PerFunctionMIParsingState;
+class SMDiagnostic;
+class SMRange;
 class Target;
-class DataLayout;
-class TargetLibraryInfo;
-class TargetFrameLowering;
 class TargetIntrinsicInfo;
-class TargetLowering;
-class TargetPassConfig;
-class TargetRegisterInfo;
-class TargetSelectionDAGInfo;
-class TargetSubtargetInfo;
-class ScalarTargetTransformInfo;
-class VectorTargetTransformInfo;
-class formatted_raw_ostream;
-class raw_ostream;
+class TargetIRAnalysis;
+class TargetTransformInfo;
 class TargetLoweringObjectFile;
+class TargetPassConfig;
+class TargetSubtargetInfo;
 
 // The old pass manager infrastructure is hidden in a legacy namespace now.
 namespace legacy {
@@ -52,83 +64,148 @@ class PassManagerBase;
 }
 using legacy::PassManagerBase;
 
+namespace yaml {
+struct MachineFunctionInfo;
+}
+
 //===----------------------------------------------------------------------===//
 ///
-/// TargetMachine - Primary interface to the complete machine description for
-/// the target machine.  All target-specific information should be accessible
-/// through this interface.
+/// Primary interface to the complete machine description for the target
+/// machine.  All target-specific information should be accessible through this
+/// interface.
 ///
 class TargetMachine {
-  TargetMachine(const TargetMachine &) LLVM_DELETED_FUNCTION;
-  void operator=(const TargetMachine &) LLVM_DELETED_FUNCTION;
 protected: // Can only create subclasses.
-  TargetMachine(const Target &T, StringRef TargetTriple,
-                StringRef CPU, StringRef FS, const TargetOptions &Options);
+  TargetMachine(const Target &T, StringRef DataLayoutString,
+                const Triple &TargetTriple, StringRef CPU, StringRef FS,
+                const TargetOptions &Options);
 
-  /// TheTarget - The Target that this machine was created for.
+  /// The Target that this machine was created for.
   const Target &TheTarget;
 
-  /// TargetTriple, TargetCPU, TargetFS - Triple string, CPU name, and target
-  /// feature strings the TargetMachine instance is created with.
-  std::string TargetTriple;
+  /// DataLayout for the target: keep ABI type size and alignment.
+  ///
+  /// The DataLayout is created based on the string representation provided
+  /// during construction. It is kept here only to avoid reparsing the string
+  /// but should not really be used during compilation, because it has an
+  /// internal cache that is context specific.
+  const DataLayout DL;
+
+  /// Triple string, CPU name, and target feature strings the TargetMachine
+  /// instance is created with.
+  Triple TargetTriple;
   std::string TargetCPU;
   std::string TargetFS;
 
-  /// CodeGenInfo - Low level target information such as relocation model.
-  /// Non-const to allow resetting optimization level per-function.
-  MCCodeGenInfo *CodeGenInfo;
+  Reloc::Model RM = Reloc::Static;
+  CodeModel::Model CMModel = CodeModel::Small;
+  CodeGenOpt::Level OptLevel = CodeGenOpt::Default;
 
-  /// AsmInfo - Contains target specific asm information.
-  ///
-  const MCAsmInfo *AsmInfo;
+  /// Contains target specific asm information.
+  std::unique_ptr<const MCAsmInfo> AsmInfo;
+  std::unique_ptr<const MCRegisterInfo> MRI;
+  std::unique_ptr<const MCInstrInfo> MII;
+  std::unique_ptr<const MCSubtargetInfo> STI;
 
   unsigned RequireStructuredCFG : 1;
+  unsigned O0WantsFastISel : 1;
 
 public:
+  const TargetOptions DefaultOptions;
   mutable TargetOptions Options;
 
+  TargetMachine(const TargetMachine &) = delete;
+  void operator=(const TargetMachine &) = delete;
   virtual ~TargetMachine();
 
   const Target &getTarget() const { return TheTarget; }
 
-  StringRef getTargetTriple() const { return TargetTriple; }
+  const Triple &getTargetTriple() const { return TargetTriple; }
   StringRef getTargetCPU() const { return TargetCPU; }
   StringRef getTargetFeatureString() const { return TargetFS; }
+  void setTargetFeatureString(StringRef FS) { TargetFS = std::string(FS); }
 
-  /// getSubtargetImpl - virtual method implemented by subclasses that returns
-  /// a reference to that target's TargetSubtargetInfo-derived member variable.
-  virtual const TargetSubtargetInfo *getSubtargetImpl() const {
-    return nullptr;
-  }
+  /// Virtual method implemented by subclasses that returns a reference to that
+  /// target's TargetSubtargetInfo-derived member variable.
   virtual const TargetSubtargetInfo *getSubtargetImpl(const Function &) const {
-    return getSubtargetImpl();
+    return nullptr;
   }
   virtual TargetLoweringObjectFile *getObjFileLowering() const {
     return nullptr;
   }
 
-  /// getSubtarget - This method returns a pointer to the specified type of
-  /// TargetSubtargetInfo.  In debug builds, it verifies that the object being
-  /// returned is of the correct type.
-  template<typename STC> const STC &getSubtarget() const {
-    return *static_cast<const STC*>(getSubtargetImpl());
-  }
-  template <typename STC> const STC &getSubtarget(const Function *) const {
-    return *static_cast<const STC*>(getSubtargetImpl());
+  /// Allocate and return a default initialized instance of the YAML
+  /// representation for the MachineFunctionInfo.
+  virtual yaml::MachineFunctionInfo *createDefaultFuncInfoYAML() const {
+    return nullptr;
   }
 
-  /// \brief Reset the target options based on the function's attributes.
+  /// Allocate and initialize an instance of the YAML representation of the
+  /// MachineFunctionInfo.
+  virtual yaml::MachineFunctionInfo *
+  convertFuncInfoToYAML(const MachineFunction &MF) const {
+    return nullptr;
+  }
+
+  /// Parse out the target's MachineFunctionInfo from the YAML reprsentation.
+  virtual bool parseMachineFunctionInfo(const yaml::MachineFunctionInfo &,
+                                        PerFunctionMIParsingState &PFS,
+                                        SMDiagnostic &Error,
+                                        SMRange &SourceRange) const {
+    return false;
+  }
+
+  /// This method returns a pointer to the specified type of
+  /// TargetSubtargetInfo.  In debug builds, it verifies that the object being
+  /// returned is of the correct type.
+  template <typename STC> const STC &getSubtarget(const Function &F) const {
+    return *static_cast<const STC*>(getSubtargetImpl(F));
+  }
+
+  /// Create a DataLayout.
+  const DataLayout createDataLayout() const { return DL; }
+
+  /// Test if a DataLayout if compatible with the CodeGen for this target.
+  ///
+  /// The LLVM Module owns a DataLayout that is used for the target independent
+  /// optimizations and code generation. This hook provides a target specific
+  /// check on the validity of this DataLayout.
+  bool isCompatibleDataLayout(const DataLayout &Candidate) const {
+    return DL == Candidate;
+  }
+
+  /// Get the pointer size for this target.
+  ///
+  /// This is the only time the DataLayout in the TargetMachine is used.
+  unsigned getPointerSize(unsigned AS) const {
+    return DL.getPointerSize(AS);
+  }
+
+  unsigned getPointerSizeInBits(unsigned AS) const {
+    return DL.getPointerSizeInBits(AS);
+  }
+
+  unsigned getProgramPointerSize() const {
+    return DL.getPointerSize(DL.getProgramAddressSpace());
+  }
+
+  unsigned getAllocaPointerSize() const {
+    return DL.getPointerSize(DL.getAllocaAddrSpace());
+  }
+
+  /// Reset the target options based on the function's attributes.
   // FIXME: Remove TargetOptions that affect per-function code generation
   // from TargetMachine.
   void resetTargetOptions(const Function &F) const;
 
-  /// getMCAsmInfo - Return target specific asm information.
-  ///
-  const MCAsmInfo *getMCAsmInfo() const { return AsmInfo; }
+  /// Return target specific asm information.
+  const MCAsmInfo *getMCAsmInfo() const { return AsmInfo.get(); }
 
-  /// getIntrinsicInfo - If intrinsic information is available, return it.  If
-  /// not, return null.
-  ///
+  const MCRegisterInfo *getMCRegisterInfo() const { return MRI.get(); }
+  const MCInstrInfo *getMCInstrInfo() const { return MII.get(); }
+  const MCSubtargetInfo *getMCSubtargetInfo() const { return STI.get(); }
+
+  /// If intrinsic information is available, return it.  If not, return null.
   virtual const TargetIntrinsicInfo *getIntrinsicInfo() const {
     return nullptr;
   }
@@ -136,132 +213,276 @@ public:
   bool requiresStructuredCFG() const { return RequireStructuredCFG; }
   void setRequiresStructuredCFG(bool Value) { RequireStructuredCFG = Value; }
 
-  /// getRelocationModel - Returns the code generation relocation model. The
-  /// choices are static, PIC, and dynamic-no-pic, and target default.
+  /// Returns the code generation relocation model. The choices are static, PIC,
+  /// and dynamic-no-pic, and target default.
   Reloc::Model getRelocationModel() const;
 
-  /// getCodeModel - Returns the code model. The choices are small, kernel,
-  /// medium, large, and target default.
+  /// Returns the code model. The choices are small, kernel, medium, large, and
+  /// target default.
   CodeModel::Model getCodeModel() const;
 
-  /// getTLSModel - Returns the TLS model which should be used for the given
-  /// global variable.
+  bool isPositionIndependent() const;
+
+  bool shouldAssumeDSOLocal(const Module &M, const GlobalValue *GV) const;
+
+  /// Returns true if this target uses emulated TLS.
+  bool useEmulatedTLS() const;
+
+  /// Returns the TLS model which should be used for the given global variable.
   TLSModel::Model getTLSModel(const GlobalValue *GV) const;
 
-  /// getOptLevel - Returns the optimization level: None, Less,
-  /// Default, or Aggressive.
+  /// Returns the optimization level: None, Less, Default, or Aggressive.
   CodeGenOpt::Level getOptLevel() const;
 
-  /// \brief Overrides the optimization level.
-  void setOptLevel(CodeGenOpt::Level Level) const;
+  /// Overrides the optimization level.
+  void setOptLevel(CodeGenOpt::Level Level);
 
   void setFastISel(bool Enable) { Options.EnableFastISel = Enable; }
+  bool getO0WantsFastISel() { return O0WantsFastISel; }
+  void setO0WantsFastISel(bool Enable) { O0WantsFastISel = Enable; }
+  void setGlobalISel(bool Enable) { Options.EnableGlobalISel = Enable; }
+  void setGlobalISelAbort(GlobalISelAbortMode Mode) {
+    Options.GlobalISelAbort = Mode;
+  }
+  void setMachineOutliner(bool Enable) {
+    Options.EnableMachineOutliner = Enable;
+  }
+  void setSupportsDefaultOutlining(bool Enable) {
+    Options.SupportsDefaultOutlining = Enable;
+  }
+  void setSupportsDebugEntryValues(bool Enable) {
+    Options.SupportsDebugEntryValues = Enable;
+  }
 
-  bool shouldPrintMachineCode() const { return Options.PrintMachineCode; }
+  bool getAIXExtendedAltivecABI() const {
+    return Options.EnableAIXExtendedAltivecABI;
+  }
 
-  /// getAsmVerbosityDefault - Returns the default value of asm verbosity.
+  bool getUniqueSectionNames() const { return Options.UniqueSectionNames; }
+
+  /// Return true if unique basic block section names must be generated.
+  bool getUniqueBasicBlockSectionNames() const {
+    return Options.UniqueBasicBlockSectionNames;
+  }
+
+  /// Return true if data objects should be emitted into their own section,
+  /// corresponds to -fdata-sections.
+  bool getDataSections() const {
+    return Options.DataSections;
+  }
+
+  /// Return true if functions should be emitted into their own section,
+  /// corresponding to -ffunction-sections.
+  bool getFunctionSections() const {
+    return Options.FunctionSections;
+  }
+
+  /// Return true if visibility attribute should not be emitted in XCOFF,
+  /// corresponding to -mignore-xcoff-visibility.
+  bool getIgnoreXCOFFVisibility() const {
+    return Options.IgnoreXCOFFVisibility;
+  }
+
+  /// Return true if XCOFF traceback table should be emitted,
+  /// corresponding to -xcoff-traceback-table.
+  bool getXCOFFTracebackTable() const { return Options.XCOFFTracebackTable; }
+
+  /// If basic blocks should be emitted into their own section,
+  /// corresponding to -fbasic-block-sections.
+  llvm::BasicBlockSection getBBSectionsType() const {
+    return Options.BBSections;
+  }
+
+  /// Get the list of functions and basic block ids that need unique sections.
+  const MemoryBuffer *getBBSectionsFuncListBuf() const {
+    return Options.BBSectionsFuncListBuf.get();
+  }
+
+  /// Returns true if a cast between SrcAS and DestAS is a noop.
+  virtual bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const {
+    return false;
+  }
+
+  /// If the specified generic pointer could be assumed as a pointer to a
+  /// specific address space, return that address space.
   ///
-  bool getAsmVerbosityDefault() const ;
+  /// Under offloading programming, the offloading target may be passed with
+  /// values only prepared on the host side and could assume certain
+  /// properties.
+  virtual unsigned getAssumedAddrSpace(const Value *V) const { return -1; }
 
-  /// setAsmVerbosityDefault - Set the default value of asm verbosity. Default
-  /// is false.
-  void setAsmVerbosityDefault(bool);
+  /// Get a \c TargetIRAnalysis appropriate for the target.
+  ///
+  /// This is used to construct the new pass manager's target IR analysis pass,
+  /// set up appropriately for this target machine. Even the old pass manager
+  /// uses this to answer queries about the IR.
+  TargetIRAnalysis getTargetIRAnalysis();
 
-  /// getDataSections - Return true if data objects should be emitted into their
-  /// own section, corresponds to -fdata-sections.
-  bool getDataSections() const;
+  /// Return a TargetTransformInfo for a given function.
+  ///
+  /// The returned TargetTransformInfo is specialized to the subtarget
+  /// corresponding to \p F.
+  virtual TargetTransformInfo getTargetTransformInfo(const Function &F);
 
-  /// getFunctionSections - Return true if functions should be emitted into
-  /// their own section, corresponding to -ffunction-sections.
-  bool getFunctionSections() const;
+  /// Allow the target to modify the pass manager, e.g. by calling
+  /// PassManagerBuilder::addExtension.
+  virtual void adjustPassManager(PassManagerBuilder &) {}
 
-  /// setDataSections - Set if the data are emit into separate sections.
-  void setDataSections(bool);
+  /// Allow the target to modify the pass pipeline with New Pass Manager
+  /// (similar to adjustPassManager for Legacy Pass manager).
+  virtual void registerPassBuilderCallbacks(PassBuilder &) {}
 
-  /// setFunctionSections - Set if the functions are emit into separate
-  /// sections.
-  void setFunctionSections(bool);
+  /// Allow the target to register alias analyses with the AAManager for use
+  /// with the new pass manager. Only affects the "default" AAManager.
+  virtual void registerDefaultAliasAnalyses(AAManager &) {}
 
-  /// \brief Register analysis passes for this target with a pass manager.
-  virtual void addAnalysisPasses(PassManagerBase &) {}
-
-  /// CodeGenFileType - These enums are meant to be passed into
-  /// addPassesToEmitFile to indicate what type of file to emit, and returned by
-  /// it to indicate what type of file could actually be made.
-  enum CodeGenFileType {
-    CGFT_AssemblyFile,
-    CGFT_ObjectFile,
-    CGFT_Null         // Do not emit any output.
-  };
-
-  /// addPassesToEmitFile - Add passes to the specified pass manager to get the
-  /// specified file emitted.  Typically this will involve several steps of code
-  /// generation.  This method should return true if emission of this file type
-  /// is not supported, or false on success.
-  virtual bool addPassesToEmitFile(PassManagerBase &,
-                                   formatted_raw_ostream &,
-                                   CodeGenFileType,
-                                   bool /*DisableVerify*/ = true,
-                                   AnalysisID /*StartAfter*/ = nullptr,
-                                   AnalysisID /*StopAfter*/ = nullptr) {
+  /// Add passes to the specified pass manager to get the specified file
+  /// emitted.  Typically this will involve several steps of code generation.
+  /// This method should return true if emission of this file type is not
+  /// supported, or false on success.
+  /// \p MMIWP is an optional parameter that, if set to non-nullptr,
+  /// will be used to set the MachineModuloInfo for this PM.
+  virtual bool
+  addPassesToEmitFile(PassManagerBase &, raw_pwrite_stream &,
+                      raw_pwrite_stream *, CodeGenFileType,
+                      bool /*DisableVerify*/ = true,
+                      MachineModuleInfoWrapperPass *MMIWP = nullptr) {
     return true;
   }
 
-  /// addPassesToEmitMC - Add passes to the specified pass manager to get
-  /// machine code emitted with the MCJIT. This method returns true if machine
-  /// code is not supported. It fills the MCContext Ctx pointer which can be
-  /// used to build custom MCStreamer.
+  /// Add passes to the specified pass manager to get machine code emitted with
+  /// the MCJIT. This method returns true if machine code is not supported. It
+  /// fills the MCContext Ctx pointer which can be used to build custom
+  /// MCStreamer.
   ///
-  virtual bool addPassesToEmitMC(PassManagerBase &,
-                                 MCContext *&,
-                                 raw_ostream &,
+  virtual bool addPassesToEmitMC(PassManagerBase &, MCContext *&,
+                                 raw_pwrite_stream &,
                                  bool /*DisableVerify*/ = true) {
     return true;
   }
 
+  /// True if subtarget inserts the final scheduling pass on its own.
+  ///
+  /// Branch relaxation, which must happen after block placement, can
+  /// on some targets (e.g. SystemZ) expose additional post-RA
+  /// scheduling opportunities.
+  virtual bool targetSchedulesPostRAScheduling() const { return false; };
+
   void getNameWithPrefix(SmallVectorImpl<char> &Name, const GlobalValue *GV,
                          Mangler &Mang, bool MayAlwaysUsePrivate = false) const;
-  MCSymbol *getSymbol(const GlobalValue *GV, Mangler &Mang) const;
+  MCSymbol *getSymbol(const GlobalValue *GV) const;
+
+  /// The integer bit size to use for SjLj based exception handling.
+  static constexpr unsigned DefaultSjLjDataSize = 32;
+  virtual unsigned getSjLjDataSize() const { return DefaultSjLjDataSize; }
+
+  static std::pair<int, int> parseBinutilsVersion(StringRef Version);
 };
 
-/// LLVMTargetMachine - This class describes a target machine that is
-/// implemented with the LLVM target-independent code generator.
+/// This class describes a target machine that is implemented with the LLVM
+/// target-independent code generator.
 ///
 class LLVMTargetMachine : public TargetMachine {
 protected: // Can only create subclasses.
-  LLVMTargetMachine(const Target &T, StringRef TargetTriple,
-                    StringRef CPU, StringRef FS, TargetOptions Options,
-                    Reloc::Model RM, CodeModel::Model CM,
-                    CodeGenOpt::Level OL);
+  LLVMTargetMachine(const Target &T, StringRef DataLayoutString,
+                    const Triple &TT, StringRef CPU, StringRef FS,
+                    const TargetOptions &Options, Reloc::Model RM,
+                    CodeModel::Model CM, CodeGenOpt::Level OL);
 
   void initAsmInfo();
-public:
-  /// \brief Register analysis passes for this target with a pass manager.
-  ///
-  /// This registers target independent analysis passes.
-  void addAnalysisPasses(PassManagerBase &PM) override;
 
-  /// createPassConfig - Create a pass configuration object to be used by
-  /// addPassToEmitX methods for generating a pipeline of CodeGen passes.
+public:
+  /// Get a TargetTransformInfo implementation for the target.
+  ///
+  /// The TTI returned uses the common code generator to answer queries about
+  /// the IR.
+  TargetTransformInfo getTargetTransformInfo(const Function &F) override;
+
+  /// Create a pass configuration object to be used by addPassToEmitX methods
+  /// for generating a pipeline of CodeGen passes.
   virtual TargetPassConfig *createPassConfig(PassManagerBase &PM);
 
-  /// addPassesToEmitFile - Add passes to the specified pass manager to get the
-  /// specified file emitted.  Typically this will involve several steps of code
-  /// generation.
-  bool addPassesToEmitFile(PassManagerBase &PM, formatted_raw_ostream &Out,
-                           CodeGenFileType FileType, bool DisableVerify = true,
-                           AnalysisID StartAfter = nullptr,
-                           AnalysisID StopAfter = nullptr) override;
+  /// Add passes to the specified pass manager to get the specified file
+  /// emitted.  Typically this will involve several steps of code generation.
+  /// \p MMIWP is an optional parameter that, if set to non-nullptr,
+  /// will be used to set the MachineModuloInfo for this PM.
+  bool
+  addPassesToEmitFile(PassManagerBase &PM, raw_pwrite_stream &Out,
+                      raw_pwrite_stream *DwoOut, CodeGenFileType FileType,
+                      bool DisableVerify = true,
+                      MachineModuleInfoWrapperPass *MMIWP = nullptr) override;
 
-  /// addPassesToEmitMC - Add passes to the specified pass manager to get
-  /// machine code emitted with the MCJIT. This method returns true if machine
-  /// code is not supported. It fills the MCContext Ctx pointer which can be
-  /// used to build custom MCStreamer.
-  ///
+  virtual Error buildCodeGenPipeline(ModulePassManager &,
+                                     MachineFunctionPassManager &,
+                                     MachineFunctionAnalysisManager &,
+                                     raw_pwrite_stream &, raw_pwrite_stream *,
+                                     CodeGenFileType, CGPassBuilderOption,
+                                     PassInstrumentationCallbacks *) {
+    return make_error<StringError>("buildCodeGenPipeline is not overriden",
+                                   inconvertibleErrorCode());
+  }
+
+  virtual std::pair<StringRef, bool> getPassNameFromLegacyName(StringRef) {
+    llvm_unreachable(
+        "getPassNameFromLegacyName parseMIRPipeline is not overriden");
+  }
+
+  /// Add passes to the specified pass manager to get machine code emitted with
+  /// the MCJIT. This method returns true if machine code is not supported. It
+  /// fills the MCContext Ctx pointer which can be used to build custom
+  /// MCStreamer.
   bool addPassesToEmitMC(PassManagerBase &PM, MCContext *&Ctx,
-                         raw_ostream &OS, bool DisableVerify = true) override;
+                         raw_pwrite_stream &Out,
+                         bool DisableVerify = true) override;
+
+  /// Returns true if the target is expected to pass all machine verifier
+  /// checks. This is a stopgap measure to fix targets one by one. We will
+  /// remove this at some point and always enable the verifier when
+  /// EXPENSIVE_CHECKS is enabled.
+  virtual bool isMachineVerifierClean() const { return true; }
+
+  /// Adds an AsmPrinter pass to the pipeline that prints assembly or
+  /// machine code from the MI representation.
+  bool addAsmPrinter(PassManagerBase &PM, raw_pwrite_stream &Out,
+                     raw_pwrite_stream *DwoOut, CodeGenFileType FileType,
+                     MCContext &Context);
+
+  Expected<std::unique_ptr<MCStreamer>>
+  createMCStreamer(raw_pwrite_stream &Out, raw_pwrite_stream *DwoOut,
+                   CodeGenFileType FileType, MCContext &Ctx);
+
+  /// True if the target uses physical regs (as nearly all targets do). False
+  /// for stack machines such as WebAssembly and other virtual-register
+  /// machines. If true, all vregs must be allocated before PEI. If false, then
+  /// callee-save register spilling and scavenging are not needed or used. If
+  /// false, implicitly defined registers will still be assumed to be physical
+  /// registers, except that variadic defs will be allocated vregs.
+  virtual bool usesPhysRegsForValues() const { return true; }
+
+  /// True if the target wants to use interprocedural register allocation by
+  /// default. The -enable-ipra flag can be used to override this.
+  virtual bool useIPRA() const {
+    return false;
+  }
 };
 
-} // End llvm namespace
+/// Helper method for getting the code model, returning Default if
+/// CM does not have a value. The tiny and kernel models will produce
+/// an error, so targets that support them or require more complex codemodel
+/// selection logic should implement and call their own getEffectiveCodeModel.
+inline CodeModel::Model getEffectiveCodeModel(Optional<CodeModel::Model> CM,
+                                              CodeModel::Model Default) {
+  if (CM) {
+    // By default, targets do not support the tiny and kernel models.
+    if (*CM == CodeModel::Tiny)
+      report_fatal_error("Target does not support the tiny CodeModel", false);
+    if (*CM == CodeModel::Kernel)
+      report_fatal_error("Target does not support the kernel CodeModel", false);
+    return *CM;
+  }
+  return Default;
+}
 
-#endif
+} // end namespace llvm
+
+#endif // LLVM_TARGET_TARGETMACHINE_H

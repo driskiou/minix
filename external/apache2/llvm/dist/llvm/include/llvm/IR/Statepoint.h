@@ -1,215 +1,273 @@
-//===-- llvm/IR/Statepoint.h - gc.statepoint utilities ------ --*- C++ -*-===//
+//===- llvm/IR/Statepoint.h - gc.statepoint utilities -----------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
 // This file contains utility functions and a wrapper class analogous to
-// CallSite for accessing the fields of gc.statepoint, gc.relocate, and
-// gc.result intrinsics
+// CallBase for accessing the fields of gc.statepoint, gc.relocate,
+// gc.result intrinsics; and some general utilities helpful when dealing with
+// gc.statepoint.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef __LLVM_IR_STATEPOINT_H
-#define __LLVM_IR_STATEPOINT_H
+#ifndef LLVM_IR_STATEPOINT_H
+#define LLVM_IR_STATEPOINT_H
 
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/IR/CallSite.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/MathExtras.h"
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace llvm {
 
-bool isStatepoint(const ImmutableCallSite &CS);
-bool isStatepoint(const Instruction *inst);
-bool isStatepoint(const Instruction &inst);
+/// The statepoint intrinsic accepts a set of flags as its third argument.
+/// Valid values come out of this set.
+enum class StatepointFlags {
+  None = 0,
+  GCTransition = 1, ///< Indicates that this statepoint is a transition from
+                    ///< GC-aware code to code that is not GC-aware.
+  /// Mark the deopt arguments associated with the statepoint as only being
+  /// "live-in". By default, deopt arguments are "live-through".  "live-through"
+  /// requires that they the value be live on entry, on exit, and at any point
+  /// during the call.  "live-in" only requires the value be available at the
+  /// start of the call.  In particular, "live-in" values can be placed in
+  /// unused argument registers or other non-callee saved registers.
+  DeoptLiveIn = 2,
 
-bool isGCRelocate(const Instruction *inst);
-bool isGCRelocate(const ImmutableCallSite &CS);
+  MaskAll = 3 ///< A bitmask that includes all valid flags.
+};
 
-bool isGCResult(const Instruction *inst);
-bool isGCResult(const ImmutableCallSite &CS);
+// These two are defined in IntrinsicInst since they're part of the
+// IntrinsicInst class hierarchy.
+class GCRelocateInst;
+class GCResultInst;
 
-/// Analogous to CallSiteBase, this provides most of the actual
-/// functionality for Statepoint and ImmutableStatepoint.  It is
-/// templatized to allow easily specializing of const and non-const
-/// concrete subtypes.  This is structured analogous to CallSite
-/// rather than the IntrinsicInst.h helpers since we want to support
-/// invokable statepoints in the near future.
-/// TODO: This does not currently allow the if(Statepoint S = ...)
-///   idiom used with CallSites.  Consider refactoring to support.
-template <typename InstructionTy, typename ValueTy, typename CallSiteTy>
-class StatepointBase {
-  CallSiteTy StatepointCS;
-  void *operator new(size_t, unsigned) LLVM_DELETED_FUNCTION;
-  void *operator new(size_t s) LLVM_DELETED_FUNCTION;
+/// Represents a gc.statepoint intrinsic call.  This extends directly from
+/// CallBase as the IntrinsicInst only supports calls and gc.statepoint is
+/// invokable.
+class GCStatepointInst : public CallBase {
+public:
+  GCStatepointInst() = delete;
+  GCStatepointInst(const GCStatepointInst &) = delete;
+  GCStatepointInst &operator=(const GCStatepointInst &) = delete;
 
- protected:
-  explicit StatepointBase(InstructionTy *I) : StatepointCS(I) {
-    assert(isStatepoint(I));
+  static bool classof(const CallBase *I) {
+    if (const Function *CF = I->getCalledFunction())
+      return CF->getIntrinsicID() == Intrinsic::experimental_gc_statepoint;
+    return false;
   }
-  explicit StatepointBase(CallSiteTy CS) : StatepointCS(CS) {
-    assert(isStatepoint(CS));
+
+  static bool classof(const Value *V) {
+    return isa<CallBase>(V) && classof(cast<CallBase>(V));
   }
 
- public:
-  typedef typename CallSiteTy::arg_iterator arg_iterator;
+  enum {
+    IDPos = 0,
+    NumPatchBytesPos = 1,
+    CalledFunctionPos = 2,
+    NumCallArgsPos = 3,
+    FlagsPos = 4,
+    CallArgsBeginPos = 5,
+  };
 
-  /// Return the underlying CallSite.
-  CallSiteTy getCallSite() {
-    return StatepointCS;
+  /// Return the ID associated with this statepoint.
+  uint64_t getID() const {
+    return cast<ConstantInt>(getArgOperand(IDPos))->getZExtValue();
+  }
+
+  /// Return the number of patchable bytes associated with this statepoint.
+  uint32_t getNumPatchBytes() const {
+    const Value *NumPatchBytesVal = getArgOperand(NumPatchBytesPos);
+    uint64_t NumPatchBytes =
+      cast<ConstantInt>(NumPatchBytesVal)->getZExtValue();
+    assert(isInt<32>(NumPatchBytes) && "should fit in 32 bits!");
+    return NumPatchBytes;
+  }
+
+  /// Number of arguments to be passed to the actual callee.
+  int getNumCallArgs() const {
+    return cast<ConstantInt>(getArgOperand(NumCallArgsPos))->getZExtValue();
+  }
+
+  uint64_t getFlags() const {
+    return cast<ConstantInt>(getArgOperand(FlagsPos))->getZExtValue();
   }
 
   /// Return the value actually being called or invoked.
-  ValueTy *actualCallee() {
-    return StatepointCS.getArgument(0);
-  }
-  /// Number of arguments to be passed to the actual callee.
-  int numCallArgs() {
-    return cast<ConstantInt>(StatepointCS.getArgument(1))->getZExtValue();
-  }
-  /// Number of additional arguments excluding those intended
-  /// for garbage collection.
-  int numTotalVMSArgs() {
-    return cast<ConstantInt>(StatepointCS.getArgument(3 + numCallArgs()))->getZExtValue();
+  Value *getActualCalledOperand() const {
+    return getArgOperand(CalledFunctionPos);
   }
 
-  typename CallSiteTy::arg_iterator call_args_begin() {
-    // 3 = callTarget, #callArgs, flag
-    int Offset = 3;
-    assert(Offset <= (int)StatepointCS.arg_size());
-    return StatepointCS.arg_begin() + Offset;
-  }
-  typename CallSiteTy::arg_iterator call_args_end() {
-    int Offset = 3 + numCallArgs();
-    assert(Offset <= (int)StatepointCS.arg_size());
-    return StatepointCS.arg_begin() + Offset;
+  /// Returns the function called if this is a wrapping a direct call, and null
+  /// otherwise.
+  Function *getActualCalledFunction() const {
+    return dyn_cast_or_null<Function>(getActualCalledOperand());
   }
 
-  /// range adapter for call arguments
-  iterator_range<arg_iterator> call_args() {
-    return iterator_range<arg_iterator>(call_args_begin(), call_args_end());
+  /// Return the type of the value returned by the call underlying the
+  /// statepoint.
+  Type *getActualReturnType() const {
+    auto *CalleeTy =
+      cast<PointerType>(getActualCalledOperand()->getType())->getElementType();
+    return cast<FunctionType>(CalleeTy)->getReturnType();
   }
 
-  typename CallSiteTy::arg_iterator vm_state_begin() {
-    return call_args_end();
+
+  /// Return the number of arguments to the underlying call.
+  size_t actual_arg_size() const { return getNumCallArgs(); }
+  /// Return an iterator to the begining of the arguments to the underlying call
+  const_op_iterator actual_arg_begin() const {
+    assert(CallArgsBeginPos <= (int)arg_size());
+    return arg_begin() + CallArgsBeginPos;
   }
-  typename CallSiteTy::arg_iterator vm_state_end() {
-    int Offset = 3 + numCallArgs() + 1 + numTotalVMSArgs();
-    assert(Offset <= (int)StatepointCS.arg_size());
-    return StatepointCS.arg_begin() + Offset;
+  /// Return an end iterator of the arguments to the underlying call
+  const_op_iterator actual_arg_end() const {
+    auto I = actual_arg_begin() + actual_arg_size();
+    assert((arg_end() - I) == 2);
+    return I;
+  }
+  /// range adapter for actual call arguments
+  iterator_range<const_op_iterator> actual_args() const {
+    return make_range(actual_arg_begin(), actual_arg_end());
+  }
+
+  const_op_iterator gc_transition_args_begin() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_gc_transition))
+      return Opt->Inputs.begin();
+    return arg_end();
+  }
+  const_op_iterator gc_transition_args_end() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_gc_transition))
+      return Opt->Inputs.end();
+    return arg_end();
+  }
+
+  /// range adapter for GC transition arguments
+  iterator_range<const_op_iterator> gc_transition_args() const {
+    return make_range(gc_transition_args_begin(), gc_transition_args_end());
+  }
+
+  const_op_iterator deopt_begin() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_deopt))
+      return Opt->Inputs.begin();
+    return arg_end();
+  }
+  const_op_iterator deopt_end() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_deopt))
+      return Opt->Inputs.end();
+    return arg_end();
   }
 
   /// range adapter for vm state arguments
-  iterator_range<arg_iterator> vm_state_args() {
-    return iterator_range<arg_iterator>(vm_state_begin(), vm_state_end());
+  iterator_range<const_op_iterator> deopt_operands() const {
+    return make_range(deopt_begin(), deopt_end());
   }
 
-  typename CallSiteTy::arg_iterator first_vm_state_stack_begin() {
-    // 6 = numTotalVMSArgs, 1st_objectID, 1st_bci,
-    //     1st_#stack, 1st_#local, 1st_#monitor
-    return vm_state_begin() + 6;
+  /// Returns an iterator to the begining of the argument range describing gc
+  /// values for the statepoint.
+  const_op_iterator gc_args_begin() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_gc_live))
+      return Opt->Inputs.begin();
+    return arg_end();
   }
 
-  typename CallSiteTy::arg_iterator gc_args_begin() {
-    return vm_state_end();
-  }
-  typename CallSiteTy::arg_iterator gc_args_end() {
-    return StatepointCS.arg_end();
+  /// Return an end iterator for the gc argument range
+  const_op_iterator gc_args_end() const {
+    if (auto Opt = getOperandBundle(LLVMContext::OB_gc_live))
+      return Opt->Inputs.end();
+    return arg_end();
   }
 
   /// range adapter for gc arguments
-  iterator_range<arg_iterator> gc_args() {
-    return iterator_range<arg_iterator>(gc_args_begin(), gc_args_end());
+  iterator_range<const_op_iterator> gc_args() const {
+    return make_range(gc_args_begin(), gc_args_end());
   }
 
 
-#ifndef NDEBUG
-  /// Asserts if this statepoint is malformed.  Common cases for failure
-  /// include incorrect length prefixes for variable length sections or
-  /// illegal values for parameters.
-  void verify() {
-    assert(numCallArgs() >= 0 &&
-           "number of arguments to actually callee can't be negative");
+  /// Get list of all gc reloactes linked to this statepoint
+  /// May contain several relocations for the same base/derived pair.
+  /// For example this could happen due to relocations on unwinding
+  /// path of invoke.
+  inline std::vector<const GCRelocateInst *> getGCRelocates() const;
 
-    // The internal asserts in the iterator accessors do the rest.
-    (void)call_args_begin();
-    (void)call_args_end();
-    (void)vm_state_begin();
-    (void)vm_state_end();
-    (void)gc_args_begin();
-    (void)gc_args_end();
-  }
-#endif
+  /// Returns pair of boolean flags. The first one is true is there is
+  /// a gc.result intrinsic in the same block as statepoint. The second flag
+  /// is true if there is an intrinsic outside of the block with statepoint.
+  inline std::pair<bool, bool> getGCResultLocality() const;
 };
 
-/// A specialization of it's base class for read only access
-/// to a gc.statepoint.
-class ImmutableStatepoint
-    : public StatepointBase<const Instruction, const Value,
-                            ImmutableCallSite> {
-  typedef StatepointBase<const Instruction, const Value, ImmutableCallSite>
-      Base;
+std::vector<const GCRelocateInst *> GCStatepointInst::getGCRelocates() const {
+  std::vector<const GCRelocateInst *> Result;
 
-public:
-  explicit ImmutableStatepoint(const Instruction *I) : Base(I) {}
-  explicit ImmutableStatepoint(ImmutableCallSite CS) : Base(CS) {}
-};
+  // Search for relocated pointers.  Note that working backwards from the
+  // gc_relocates ensures that we only get pairs which are actually relocated
+  // and used after the statepoint.
+  for (const User *U : users())
+    if (auto *Relocate = dyn_cast<GCRelocateInst>(U))
+      Result.push_back(Relocate);
 
-/// A specialization of it's base class for read-write access
-/// to a gc.statepoint.
-class Statepoint : public StatepointBase<Instruction, Value, CallSite> {
-  typedef StatepointBase<Instruction, Value, CallSite> Base;
+  auto *StatepointInvoke = dyn_cast<InvokeInst>(this);
+  if (!StatepointInvoke)
+    return Result;
 
-public:
-  explicit Statepoint(Instruction *I) : Base(I) {}
-  explicit Statepoint(CallSite CS) : Base(CS) {}
-};
+  // We need to scan thorough exceptional relocations if it is invoke statepoint
+  LandingPadInst *LandingPad = StatepointInvoke->getLandingPadInst();
 
-/// Wraps a call to a gc.relocate and provides access to it's operands.
-/// TODO: This should likely be refactored to resememble the wrappers in
-/// InstrinsicInst.h.
-class GCRelocateOperands {
-  ImmutableCallSite RelocateCS;
-
- public:
-  GCRelocateOperands(const User* U) : RelocateCS(U) {
-    assert(isGCRelocate(U));
+  // Search for gc relocates that are attached to this landingpad.
+  for (const User *LandingPadUser : LandingPad->users()) {
+    if (auto *Relocate = dyn_cast<GCRelocateInst>(LandingPadUser))
+      Result.push_back(Relocate);
   }
-  GCRelocateOperands(const Instruction *inst) : RelocateCS(inst) {
-    assert(isGCRelocate(inst));
-  }
-  GCRelocateOperands(CallSite CS) : RelocateCS(CS) {
-    assert(isGCRelocate(CS));
-  }
-
-  /// The statepoint with which this gc.relocate is associated.
-  const Instruction *statepoint() {
-    return cast<Instruction>(RelocateCS.getArgument(0));
-  }
-  /// The index into the associate statepoint's argument list
-  /// which contains the base pointer of the pointer whose
-  /// relocation this gc.relocate describes.
-  int basePtrIndex() {
-    return cast<ConstantInt>(RelocateCS.getArgument(1))->getZExtValue();
-  }
-  /// The index into the associate statepoint's argument list which
-  /// contains the pointer whose relocation this gc.relocate describes.
-  int derivedPtrIndex() {
-    return cast<ConstantInt>(RelocateCS.getArgument(2))->getZExtValue();
-  }
-  Value *basePtr() {
-    ImmutableCallSite CS(statepoint());
-    return *(CS.arg_begin() + basePtrIndex());
-  }
-  Value *derivedPtr() {
-    ImmutableCallSite CS(statepoint());
-    return *(CS.arg_begin() + derivedPtrIndex());
-  }
-};
+  return Result;
 }
-#endif
+
+std::pair<bool, bool> GCStatepointInst::getGCResultLocality() const {
+  std::pair<bool, bool> Res(false, false);
+  for (auto *U : users())
+    if (auto *GRI = dyn_cast<GCResultInst>(U)) {
+      if (GRI->getParent() == this->getParent())
+        Res.first = true;
+      else
+        Res.second = true;
+    }
+  return Res;
+}
+
+/// Call sites that get wrapped by a gc.statepoint (currently only in
+/// RewriteStatepointsForGC and potentially in other passes in the future) can
+/// have attributes that describe properties of gc.statepoint call they will be
+/// eventually be wrapped in.  This struct is used represent such directives.
+struct StatepointDirectives {
+  Optional<uint32_t> NumPatchBytes;
+  Optional<uint64_t> StatepointID;
+
+  static const uint64_t DefaultStatepointID = 0xABCDEF00;
+  static const uint64_t DeoptBundleStatepointID = 0xABCDEF0F;
+};
+
+/// Parse out statepoint directives from the function attributes present in \p
+/// AS.
+StatepointDirectives parseStatepointDirectivesFromAttrs(AttributeList AS);
+
+/// Return \c true if the \p Attr is an attribute that is a statepoint
+/// directive.
+bool isStatepointDirectiveAttr(Attribute Attr);
+
+} // end namespace llvm
+
+#endif // LLVM_IR_STATEPOINT_H

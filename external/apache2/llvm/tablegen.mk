@@ -1,4 +1,4 @@
-#	$NetBSD: tablegen.mk,v 1.4 2011/10/11 13:53:57 joerg Exp $
+#	$NetBSD: tablegen.mk,v 1.1 2019/11/11 22:44:57 joerg Exp $
 
 .include <bsd.own.mk>
 

@@ -1,9 +1,8 @@
-//===--- Rewriter.h - Code rewriting interface ------------------*- C++ -*-===//
+//===- Rewriter.h - Code rewriting interface --------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,147 +14,66 @@
 #ifndef LLVM_CLANG_REWRITE_CORE_REWRITER_H
 #define LLVM_CLANG_REWRITE_CORE_REWRITER_H
 
+#include "clang/Basic/LLVM.h"
 #include "clang/Basic/SourceLocation.h"
-#include "clang/Rewrite/Core/DeltaTree.h"
-#include "clang/Rewrite/Core/RewriteRope.h"
+#include "clang/Rewrite/Core/RewriteBuffer.h"
 #include "llvm/ADT/StringRef.h"
-#include <cstring>
 #include <map>
 #include <string>
 
 namespace clang {
-  class LangOptions;
-  class Rewriter;
-  class SourceManager;
 
-/// RewriteBuffer - As code is rewritten, SourceBuffer's from the original
-/// input with modifications get a new RewriteBuffer associated with them.  The
-/// RewriteBuffer captures the modified text itself as well as information used
-/// to map between SourceLocation's in the original input and offsets in the
-/// RewriteBuffer.  For example, if text is inserted into the buffer, any
-/// locations after the insertion point have to be mapped.
-class RewriteBuffer {
-  friend class Rewriter;
-  /// Deltas - Keep track of all the deltas in the source code due to insertions
-  /// and deletions.
-  DeltaTree Deltas;
-  RewriteRope Buffer;
-public:
-  typedef RewriteRope::const_iterator iterator;
-  iterator begin() const { return Buffer.begin(); }
-  iterator end() const { return Buffer.end(); }
-  unsigned size() const { return Buffer.size(); }
-
-  /// \brief Write to \p Stream the result of applying all changes to the
-  /// original buffer.
-  /// Note that it isn't safe to use this function to overwrite memory mapped
-  /// files in-place (PR17960). Consider using a higher-level utility such as
-  /// Rewriter::overwriteChangedFiles() instead.
-  ///
-  /// The original buffer is not actually changed.
-  raw_ostream &write(raw_ostream &Stream) const;
-
-  /// RemoveText - Remove the specified text.
-  void RemoveText(unsigned OrigOffset, unsigned Size,
-                  bool removeLineIfEmpty = false);
-
-  /// InsertText - Insert some text at the specified point, where the offset in
-  /// the buffer is specified relative to the original SourceBuffer.  The
-  /// text is inserted after the specified location.
-  ///
-  void InsertText(unsigned OrigOffset, StringRef Str,
-                  bool InsertAfter = true);
-
-
-  /// InsertTextBefore - Insert some text before the specified point, where the
-  /// offset in the buffer is specified relative to the original
-  /// SourceBuffer. The text is inserted before the specified location.  This is
-  /// method is the same as InsertText with "InsertAfter == false".
-  void InsertTextBefore(unsigned OrigOffset, StringRef Str) {
-    InsertText(OrigOffset, Str, false);
-  }
-
-  /// InsertTextAfter - Insert some text at the specified point, where the
-  /// offset in the buffer is specified relative to the original SourceBuffer.
-  /// The text is inserted after the specified location.
-  void InsertTextAfter(unsigned OrigOffset, StringRef Str) {
-    InsertText(OrigOffset, Str);
-  }
-
-  /// ReplaceText - This method replaces a range of characters in the input
-  /// buffer with a new string.  This is effectively a combined "remove/insert"
-  /// operation.
-  void ReplaceText(unsigned OrigOffset, unsigned OrigLength,
-                   StringRef NewStr);
-
-private:  // Methods only usable by Rewriter.
-
-  /// Initialize - Start this rewrite buffer out with a copy of the unmodified
-  /// input buffer.
-  void Initialize(const char *BufStart, const char *BufEnd) {
-    Buffer.assign(BufStart, BufEnd);
-  }
-
-  /// getMappedOffset - Given an offset into the original SourceBuffer that this
-  /// RewriteBuffer is based on, map it into the offset space of the
-  /// RewriteBuffer.  If AfterInserts is true and if the OrigOffset indicates a
-  /// position where text is inserted, the location returned will be after any
-  /// inserted text at the position.
-  unsigned getMappedOffset(unsigned OrigOffset,
-                           bool AfterInserts = false) const{
-    return Deltas.getDeltaAt(2*OrigOffset+AfterInserts)+OrigOffset;
-  }
-
-  /// AddInsertDelta - When an insertion is made at a position, this
-  /// method is used to record that information.
-  void AddInsertDelta(unsigned OrigOffset, int Change) {
-    return Deltas.AddDelta(2*OrigOffset, Change);
-  }
-
-  /// AddReplaceDelta - When a replacement/deletion is made at a position, this
-  /// method is used to record that information.
-  void AddReplaceDelta(unsigned OrigOffset, int Change) {
-    return Deltas.AddDelta(2*OrigOffset+1, Change);
-  }
-};
-
+class LangOptions;
+class SourceManager;
 
 /// Rewriter - This is the main interface to the rewrite buffers.  Its primary
 /// job is to dispatch high-level requests to the low-level RewriteBuffers that
 /// are involved.
 class Rewriter {
-  SourceManager *SourceMgr;
-  const LangOptions *LangOpts;
+  SourceManager *SourceMgr = nullptr;
+  const LangOptions *LangOpts = nullptr;
   std::map<FileID, RewriteBuffer> RewriteBuffers;
+
 public:
   struct RewriteOptions {
-    /// \brief Given a source range, true to include previous inserts at the
+    /// Given a source range, true to include previous inserts at the
     /// beginning of the range as part of the range itself (true by default).
-    bool IncludeInsertsAtBeginOfRange;
-    /// \brief Given a source range, true to include previous inserts at the
-    /// end of the range as part of the range itself (true by default).
-    bool IncludeInsertsAtEndOfRange;
-    /// \brief If true and removing some text leaves a blank line
-    /// also remove the empty line (false by default).
-    bool RemoveLineIfEmpty;
+    bool IncludeInsertsAtBeginOfRange = true;
 
-    RewriteOptions()
-      : IncludeInsertsAtBeginOfRange(true),
-        IncludeInsertsAtEndOfRange(true),
-        RemoveLineIfEmpty(false) { }
+    /// Given a source range, true to include previous inserts at the
+    /// end of the range as part of the range itself (true by default).
+    bool IncludeInsertsAtEndOfRange = true;
+
+    /// If true and removing some text leaves a blank line
+    /// also remove the empty line (false by default).
+    ///
+    /// FIXME: This sometimes corrupts the file's rewrite buffer due to
+    /// incorrect indexing in the implementation (see the FIXME in
+    /// clang::RewriteBuffer::RemoveText).  Moreover, it's inefficient because
+    /// it must scan the buffer from the beginning to find the start of the
+    /// line.  When feasible, it's better for the caller to check for a blank
+    /// line and then, if found, expand the removal range to include it.
+    /// Checking for a blank line is easy if, for example, the caller can
+    /// guarantee this is the first edit of a line.  In that case, it can just
+    /// scan before and after the removal range until the next newline or
+    /// begin/end of the input.
+    bool RemoveLineIfEmpty = false;
+
+    RewriteOptions() {}
   };
 
-  typedef std::map<FileID, RewriteBuffer>::iterator buffer_iterator;
-  typedef std::map<FileID, RewriteBuffer>::const_iterator const_buffer_iterator;
+  using buffer_iterator = std::map<FileID, RewriteBuffer>::iterator;
+  using const_buffer_iterator = std::map<FileID, RewriteBuffer>::const_iterator;
 
+  explicit Rewriter() = default;
   explicit Rewriter(SourceManager &SM, const LangOptions &LO)
-    : SourceMgr(&SM), LangOpts(&LO) {}
-  explicit Rewriter() : SourceMgr(nullptr), LangOpts(nullptr) {}
+      : SourceMgr(&SM), LangOpts(&LO) {}
 
   void setSourceMgr(SourceManager &SM, const LangOptions &LO) {
     SourceMgr = &SM;
     LangOpts = &LO;
   }
+
   SourceManager &getSourceMgr() const { return *SourceMgr; }
   const LangOptions &getLangOpts() const { return *LangOpts; }
 
@@ -177,8 +95,16 @@ public:
   /// in different buffers, this returns an empty string.
   ///
   /// Note that this method is not particularly efficient.
+  std::string getRewrittenText(CharSourceRange Range) const;
+
+  /// getRewrittenText - Return the rewritten form of the text in the specified
+  /// range.  If the start or end of the range was unrewritable or if they are
+  /// in different buffers, this returns an empty string.
   ///
-  std::string getRewrittenText(SourceRange Range) const;
+  /// Note that this method is not particularly efficient.
+  std::string getRewrittenText(SourceRange Range) const {
+    return getRewrittenText(CharSourceRange::getTokenRange(Range));
+  }
 
   /// InsertText - Insert the specified string at the specified location in the
   /// original buffer.  This method returns true (and does nothing) if the input
@@ -198,7 +124,7 @@ public:
     return InsertText(Loc, Str);
   }
 
-  /// \brief Insert the specified string after the token in the
+  /// Insert the specified string after the token in the
   /// specified location.
   bool InsertTextAfterToken(SourceLocation Loc, StringRef Str);
 
@@ -215,13 +141,13 @@ public:
   bool RemoveText(SourceLocation Start, unsigned Length,
                   RewriteOptions opts = RewriteOptions());
 
-  /// \brief Remove the specified text region.
+  /// Remove the specified text region.
   bool RemoveText(CharSourceRange range,
                   RewriteOptions opts = RewriteOptions()) {
     return RemoveText(range.getBegin(), getRangeSize(range, opts), opts);
   }
 
-  /// \brief Remove the specified text region.
+  /// Remove the specified text region.
   bool RemoveText(SourceRange range, RewriteOptions opts = RewriteOptions()) {
     return RemoveText(range.getBegin(), getRangeSize(range, opts), opts);
   }
@@ -235,6 +161,13 @@ public:
   /// ReplaceText - This method replaces a range of characters in the input
   /// buffer with a new string.  This is effectively a combined "remove/insert"
   /// operation.
+  bool ReplaceText(CharSourceRange range, StringRef NewStr) {
+    return ReplaceText(range.getBegin(), getRangeSize(range), NewStr);
+  }
+
+  /// ReplaceText - This method replaces a range of characters in the input
+  /// buffer with a new string.  This is effectively a combined "remove/insert"
+  /// operation.
   bool ReplaceText(SourceRange range, StringRef NewStr) {
     return ReplaceText(range.getBegin(), getRangeSize(range), NewStr);
   }
@@ -244,7 +177,7 @@ public:
   /// operation.
   bool ReplaceText(SourceRange range, SourceRange replacementRange);
 
-  /// \brief Increase indentation for the lines between the given source range.
+  /// Increase indentation for the lines between the given source range.
   /// To determine what the indentation should be, 'parentIndent' is used
   /// that should be at a source location with an indentation one degree
   /// lower than the given range.
@@ -285,6 +218,6 @@ private:
   unsigned getLocationOffsetAndFileID(SourceLocation Loc, FileID &FID) const;
 };
 
-} // end namespace clang
+} // namespace clang
 
-#endif
+#endif // LLVM_CLANG_REWRITE_CORE_REWRITER_H

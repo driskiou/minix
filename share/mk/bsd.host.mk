@@ -28,7 +28,7 @@ HOST_LINK.c?=   ${HOST_LINK.cc}
 HOST_LINK.c?=	${HOST_CC} ${HOST_CFLAGS} ${HOST_CPPFLAGS} ${HOST_LDFLAGS}
 .endif
 
-HOST_CXX?=	c++ -std=c++11
+HOST_CXX?=	c++
 HOST_CXXFLAGS?=	-O
 
 HOST_CPP?=	cpp

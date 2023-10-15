@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.13 2015/01/29 20:41:35 joerg Exp $
+#	$NetBSD: Makefile,v 1.4 2023/06/03 08:52:53 lukem Exp $
 
 LIB=	LLVMInstrumentation
 
@@ -8,16 +8,28 @@ LIB=	LLVMInstrumentation
 
 SRCS+=	AddressSanitizer.cpp \
 	BoundsChecking.cpp \
+	CGProfile.cpp \
+	ControlHeightReduction.cpp \
 	DataFlowSanitizer.cpp \
 	GCOVProfiling.cpp \
+	HWAddressSanitizer.cpp \
+	IndirectCallPromotion.cpp \
+	InstrOrderFile.cpp \
 	InstrProfiling.cpp \
 	Instrumentation.cpp \
 	MemorySanitizer.cpp \
+	MemProfiler.cpp \
+	PGOInstrumentation.cpp \
+	PGOMemOPSizeOpt.cpp \
+	PoisonChecking.cpp \
 	SanitizerCoverage.cpp \
-	ThreadSanitizer.cpp
+	ThreadSanitizer.cpp \
+	ValueProfileCollector.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>
 .else
 .include <bsd.lib.mk>
 .endif
+
+CWARNFLAGS.gcc+=	${CC_WNO_ADDRESS_OF_PACKED_MEMBER}

@@ -159,7 +159,7 @@ Module maps are specified as separate files (each named ``module.modulemap``) al
 
   To actually see any benefits from modules, one first has to introduce module maps for the underlying C standard library and the libraries and headers on which it depends. The section `Modularizing a Platform`_ describes the steps one must take to write these module maps.
   
-One can use module maps without modules to check the integrity of the use of header files. To do this, use the ``-fmodule-maps`` option instead of the ``-fmodules`` option.
+One can use module maps without modules to check the integrity of the use of header files. To do this, use the ``-fimplicit-module-maps`` option instead of the ``-fmodules`` option, or use ``-fmodule-map-file=`` option to explicitly specify the module map files to load.
 
 Compilation model
 -----------------
@@ -174,8 +174,11 @@ Command-line parameters
 ``-fmodules``
   Enable the modules feature.
 
-``-fmodule-maps``
-  Enable interpretation of module maps. This option is implied by ``-fmodules``.
+``-fbuiltin-module-map``
+  Load the Clang builtins module map file. (Equivalent to ``-fmodule-map-file=<resource dir>/include/module.modulemap``)
+
+``-fimplicit-module-maps``
+  Enable implicit search for module map files named ``module.modulemap`` and similar. This option is implied by ``-fmodules``. If this is disabled with ``-fno-implicit-module-maps``, module map files will only be loaded if they are explicitly specified via ``-fmodule-map-file`` or transitively used by another module map file.
 
 ``-fmodules-cache-path=<directory>``
   Specify the path to the modules cache. If not provided, Clang will select a system-appropriate default.
@@ -207,8 +210,152 @@ Command-line parameters
 ``-fmodules-search-all``
   If a symbol is not found, search modules referenced in the current module maps but not imported for symbols, so the error message can reference the module by name.  Note that if the global module index has not been built before, this might take some time as it needs to build all the modules.  Note that this option doesn't apply in module builds, to avoid the recursion.
 
-``-fno-modules-implicit-maps``
-  Suppresses the implicit search for files called ``module.modulemap`` and similar. Instead, module files need to be explicitly specified via ``-fmodule-map-file`` or transitively used.
+``-fno-implicit-modules``
+  All modules used by the build must be specified with ``-fmodule-file``.
+
+``-fmodule-file=[<name>=]<file>``
+  Specify the mapping of module names to precompiled module files. If the
+  name is omitted, then the module file is loaded whether actually required
+  or not. If the name is specified, then the mapping is treated as another
+  prebuilt module search mechanism (in addition to ``-fprebuilt-module-path``)
+  and the module is only loaded if required. Note that in this case the
+  specified file also overrides this module's paths that might be embedded
+  in other precompiled module files.
+
+``-fprebuilt-module-path=<directory>``
+  Specify the path to the prebuilt modules. If specified, we will look for modules in this directory for a given top-level module name. We don't need a module map for loading prebuilt modules in this directory and the compiler will not try to rebuild these modules. This can be specified multiple times.
+
+``-fprebuilt-implicit-modules``
+  Enable prebuilt implicit modules. If a prebuilt module is not found in the
+  prebuilt modules paths (specified via ``-fprebuilt-module-path``), we will
+  look for a matching implicit module in the prebuilt modules paths.
+
+-cc1 Options
+~~~~~~~~~~~~
+
+``-fmodules-strict-context-hash``
+  Enables hashing of all compiler options that could impact the semantics of a
+  module in an implicit build. This includes things such as header search paths
+  and diagnostics. Using this option may lead to an excessive number of modules
+  being built if the command line arguments are not homogeneous across your
+  build.
+
+Using Prebuilt Modules
+----------------------
+
+Below are a few examples illustrating uses of prebuilt modules via the different options.
+
+First, let's set up files for our examples.
+
+.. code-block:: c
+
+  /* A.h */
+  #ifdef ENABLE_A
+  void a() {}
+  #endif
+
+.. code-block:: c
+
+  /* B.h */
+  #include "A.h"
+
+.. code-block:: c
+
+  /* use.c */
+  #include "B.h"
+  void use() {
+  #ifdef ENABLE_A
+    a();
+  #endif
+  }
+
+.. code-block:: c
+
+  /* module.modulemap */
+  module A {
+    header "A.h"
+  }
+  module B {
+    header "B.h"
+    export *
+  }
+
+In the examples below, the compilation of ``use.c`` can be done without ``-cc1``, but the commands used to prebuild the modules would need to be updated to take into account the default options passed to ``clang -cc1``. (See ``clang use.c -v``)
+Note also that, since we use ``-cc1``, we specify the ``-fmodule-map-file=`` or ``-fimplicit-module-maps`` options explicitly. When using the clang driver, ``-fimplicit-module-maps`` is implied by ``-fmodules``.
+
+First let us use an explicit mapping from modules to files.
+
+.. code-block:: sh
+
+  rm -rf prebuilt ; mkdir prebuilt
+  clang -cc1 -emit-module -o prebuilt/A.pcm -fmodules module.modulemap -fmodule-name=A
+  clang -cc1 -emit-module -o prebuilt/B.pcm -fmodules module.modulemap -fmodule-name=B -fmodule-file=A=prebuilt/A.pcm
+  clang -cc1 -emit-obj use.c -fmodules -fmodule-map-file=module.modulemap -fmodule-file=A=prebuilt/A.pcm -fmodule-file=B=prebuilt/B.pcm
+
+Instead of of specifying the mappings manually, it can be convenient to use the ``-fprebuilt-module-path`` option. Let's also use ``-fimplicit-module-maps`` instead of manually pointing to our module map.
+
+.. code-block:: sh
+
+  rm -rf prebuilt; mkdir prebuilt
+  clang -cc1 -emit-module -o prebuilt/A.pcm -fmodules module.modulemap -fmodule-name=A
+  clang -cc1 -emit-module -o prebuilt/B.pcm -fmodules module.modulemap -fmodule-name=B -fprebuilt-module-path=prebuilt
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt
+
+A trick to prebuild all modules required for our source file in one command is to generate implicit modules while using the ``-fdisable-module-hash`` option.
+
+.. code-block:: sh
+
+  rm -rf prebuilt ; mkdir prebuilt
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fmodules-cache-path=prebuilt -fdisable-module-hash
+  ls prebuilt/*.pcm
+  # prebuilt/A.pcm  prebuilt/B.pcm
+
+Note that with explicit or prebuilt modules, we are responsible for, and should be particularly careful about the compatibility of our modules.
+Using mismatching compilation options and modules may lead to issues.
+
+.. code-block:: sh
+
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -DENABLE_A
+  # use.c:4:10: warning: implicit declaration of function 'a' is invalid in C99 [-Wimplicit-function-declaration]
+  #   return a(x);
+  #          ^
+  # 1 warning generated.
+
+So we need to maintain multiple versions of prebuilt modules. We can do so using a manual module mapping, or pointing to a different prebuilt module cache path. For example:
+
+.. code-block:: sh
+
+  rm -rf prebuilt ; mkdir prebuilt ; rm -rf prebuilt_a ; mkdir prebuilt_a
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fmodules-cache-path=prebuilt -fdisable-module-hash
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fmodules-cache-path=prebuilt_a -fdisable-module-hash -DENABLE_A
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt
+  clang -cc1 -emit-obj use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt_a -DENABLE_A
+
+
+Instead of managing the different module versions manually, we can build implicit modules in a given cache path (using ``-fmodules-cache-path``), and reuse them as prebuilt implicit modules by passing ``-fprebuilt-module-path`` and ``-fprebuilt-implicit-modules``.
+
+.. code-block:: sh
+
+  rm -rf prebuilt; mkdir prebuilt
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fmodules-cache-path=prebuilt
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fmodules-cache-path=prebuilt -DENABLE_A
+  find prebuilt -name "*.pcm"
+  # prebuilt/1AYBIGPM8R2GA/A-3L1K4LUA6O31.pcm
+  # prebuilt/1AYBIGPM8R2GA/B-3L1K4LUA6O31.pcm
+  # prebuilt/VH0YZMF1OIRK/A-3L1K4LUA6O31.pcm
+  # prebuilt/VH0YZMF1OIRK/B-3L1K4LUA6O31.pcm
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -fprebuilt-implicit-modules
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -fprebuilt-implicit-modules -DENABLE_A
+
+Finally we want to allow implicit modules for configurations that were not prebuilt. When using the clang driver a module cache path is implicitly selected. Using ``-cc1``, we simply add use the ``-fmodules-cache-path`` option.
+
+.. code-block:: sh
+
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -fprebuilt-implicit-modules -fmodules-cache-path=cache
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -fprebuilt-implicit-modules -fmodules-cache-path=cache -DENABLE_A
+  clang -cc1 -emit-obj -o use.o use.c -fmodules -fimplicit-module-maps -fprebuilt-module-path=prebuilt -fprebuilt-implicit-modules -fmodules-cache-path=cache -DENABLE_A -DOTHER_OPTIONS
+
+This way, a single directory containing multiple variants of modules can be prepared and reused. The options configuring the module cache are independent of other options.
 
 Module Semantics
 ================
@@ -219,7 +366,7 @@ Modules are modeled as if each submodule were a separate translation unit, and a
 
   This behavior is currently only approximated when building a module with submodules. Entities within a submodule that has already been built are visible when building later submodules in that module. This can lead to fragile modules that depend on the build order used for the submodules of the module, and should not be relied upon. This behavior is subject to change.
 
-As an example, in C, this implies that if two structs are defined in different submodules with the same name, those two types are distinct types (but may be *compatible* types if their definitions match. In C++, two structs defined with the same name in different submodules are the *same* type, and must be equivalent under C++'s One Definition Rule.
+As an example, in C, this implies that if two structs are defined in different submodules with the same name, those two types are distinct types (but may be *compatible* types if their definitions match). In C++, two structs defined with the same name in different submodules are the *same* type, and must be equivalent under C++'s One Definition Rule.
 
 .. note::
 
@@ -308,11 +455,12 @@ Module map files use a simplified form of the C99 lexer, with the same rules for
 
 .. parsed-literal::
 
-  ``config_macros`` ``export``     ``private``
+  ``config_macros`` ``export_as``  ``private``
   ``conflict``      ``framework``  ``requires``
   ``exclude``       ``header``     ``textual``
   ``explicit``      ``link``       ``umbrella``
   ``extern``        ``module``     ``use``
+  ``export``
 
 Module map file
 ---------------
@@ -344,13 +492,14 @@ The *module-id* should consist of only a single *identifier*, which provides the
 
 The ``explicit`` qualifier can only be applied to a submodule, i.e., a module that is nested within another module. The contents of explicit submodules are only made available when the submodule itself was explicitly named in an import declaration or was re-exported from an imported module.
 
-The ``framework`` qualifier specifies that this module corresponds to a Darwin-style framework. A Darwin-style framework (used primarily on Mac OS X and iOS) is contained entirely in directory ``Name.framework``, where ``Name`` is the name of the framework (and, therefore, the name of the module). That directory has the following layout:
+The ``framework`` qualifier specifies that this module corresponds to a Darwin-style framework. A Darwin-style framework (used primarily on macOS and iOS) is contained entirely in directory ``Name.framework``, where ``Name`` is the name of the framework (and, therefore, the name of the module). That directory has the following layout:
 
 .. parsed-literal::
 
   Name.framework/
     Modules/module.modulemap  Module map for the framework
     Headers/                  Subdirectory containing framework headers
+    PrivateHeaders/           Subdirectory containing framework private headers
     Frameworks/               Subdirectory containing embedded frameworks
     Resources/                Subdirectory containing additional resources
     Name                      Symbolic link to the shared library for the framework
@@ -358,6 +507,8 @@ The ``framework`` qualifier specifies that this module corresponds to a Darwin-s
 The ``system`` attribute specifies that the module is a system module. When a system module is rebuilt, all of the module's headers will be considered system headers, which suppresses warnings. This is equivalent to placing ``#pragma GCC system_header`` in each of the module's headers. The form of attributes is described in the section Attributes_, below.
 
 The ``extern_c`` attribute specifies that the module contains C code that can be used from within C++. When such a module is built for use in C++ code, all of the module's headers will be treated as if they were contained within an implicit ``extern "C"`` block. An import for a module with this attribute can appear within an ``extern "C"`` block. No other restrictions are lifted, however: the module currently cannot be imported within an ``extern "C"`` block in a namespace.
+
+The ``no_undeclared_includes`` attribute specifies that the module can only reach non-modular headers and headers from used modules. Since some headers could be present in more than one search path and map to different modules in each path, this mechanism helps clang to find the right header, i.e., prefer the one for the current module or in a submodule instead of the first usual match in the search paths.
 
 Modules can have a number of different kinds of members, each of which is described below:
 
@@ -369,6 +520,7 @@ Modules can have a number of different kinds of members, each of which is descri
     *umbrella-dir-declaration*
     *submodule-declaration*
     *export-declaration*
+    *export-as-declaration*
     *use-declaration*
     *link-declaration*
     *config-macros-declaration*
@@ -391,7 +543,7 @@ A *requires-declaration* specifies the requirements that an importing translatio
   *feature*:
     ``!``:sub:`opt` *identifier*
 
-The requirements clause allows specific modules or submodules to specify that they are only accessible with certain language dialects or on certain platforms. The feature list is a set of identifiers, defined below. If any of the features is not available in a given translation unit, that translation unit shall not import the module. The optional ``!`` indicates that a feature is incompatible with the module.
+The requirements clause allows specific modules or submodules to specify that they are only accessible with certain language dialects, platforms, environments and target specific features. The feature list is a set of identifiers, defined below. If any of the features is not available in a given translation unit, that translation unit shall not import the module. When building a module for use by a compilation, submodules requiring unavailable features are ignored. The optional ``!`` indicates that a feature is incompatible with the module.
 
 The following features are defined:
 
@@ -401,11 +553,35 @@ altivec
 blocks
   The "blocks" language feature is available.
 
+coroutines
+  Support for the coroutines TS is available.
+
 cplusplus
   C++ support is available.
 
 cplusplus11
   C++11 support is available.
+
+cplusplus14
+  C++14 support is available.
+
+cplusplus17
+  C++17 support is available.
+
+c99
+  C99 support is available.
+
+c11
+  C11 support is available.
+
+c17
+  C17 support is available.
+
+freestanding
+  A freestanding environment is available.
+
+gnuinlineasm
+  GNU inline ASM is available.
 
 objc
   Objective-C support is available.
@@ -422,8 +598,13 @@ tls
 *target feature*
   A specific target feature (e.g., ``sse4``, ``avx``, ``neon``) is available.
 
+*platform/os*
+  A os/platform variant (e.g. ``freebsd``, ``win32``, ``windows``, ``linux``, ``ios``, ``macos``, ``iossimulator``) is available.
 
-**Example**: The ``std`` module can be extended to also include C++ and C++11 headers using a *requires-declaration*:
+*environment*
+  A environment variant (e.g. ``gnu``, ``gnueabi``, ``android``, ``msvc``) is available.
+
+**Example:** The ``std`` module can be extended to also include C++ and C++11 headers using a *requires-declaration*:
 
 .. parsed-literal::
 
@@ -448,9 +629,16 @@ A header declaration specifies that a particular header is associated with the e
 .. parsed-literal::
 
   *header-declaration*:
-    ``private``:sub:`opt` ``textual``:sub:`opt` ``header`` *string-literal*
-    ``umbrella`` ``header`` *string-literal*
-    ``exclude`` ``header`` *string-literal*
+    ``private``:sub:`opt` ``textual``:sub:`opt` ``header`` *string-literal* *header-attrs*:sub:`opt`
+    ``umbrella`` ``header`` *string-literal* *header-attrs*:sub:`opt`
+    ``exclude`` ``header`` *string-literal* *header-attrs*:sub:`opt`
+
+  *header-attrs*:
+    '{' *header-attr** '}'
+
+  *header-attr*:
+    ``size`` *integer-literal*
+    ``mtime`` *integer-literal*
 
 A header declaration that does not contain ``exclude`` nor ``textual`` specifies a header that contributes to the enclosing module. Specifically, when the module is built, the named header will be parsed and its declarations will be (logically) placed into the enclosing submodule.
 
@@ -464,11 +652,16 @@ A header with the ``umbrella`` specifier is called an umbrella header. An umbrel
 
 A header with the ``private`` specifier may not be included from outside the module itself.
 
-A header with the ``textual`` specifier will not be included when the module is built, and will be textually included if it is named by a ``#include`` directive. However, it is considered to be part of the module for the purpose of checking *use-declaration*\s.
+A header with the ``textual`` specifier will not be compiled when the module is
+built, and will be textually included if it is named by a ``#include``
+directive. However, it is considered to be part of the module for the purpose
+of checking *use-declaration*\s, and must still be a lexically-valid header
+file. In the future, we intend to pre-tokenize such headers and include the
+token sequence within the prebuilt module representation.
 
 A header with the ``exclude`` specifier is excluded from the module. It will not be included when the module is built, nor will it be considered to be part of the module, even if an ``umbrella`` header or directory would otherwise make it part of the module.
 
-**Example**: The C header ``assert.h`` is an excellent candidate for a textual header, because it is meant to be included multiple times (possibly with different ``NDEBUG`` settings). However, declarations within it should typically be split into a separate modular header.
+**Example:** The C header ``assert.h`` is an excellent candidate for a textual header, because it is meant to be included multiple times (possibly with different ``NDEBUG`` settings). However, declarations within it should typically be split into a separate modular header.
 
 .. parsed-literal::
 
@@ -477,6 +670,18 @@ A header with the ``exclude`` specifier is excluded from the module. It will not
   }
 
 A given header shall not be referenced by more than one *header-declaration*.
+
+Two *header-declaration*\s, or a *header-declaration* and a ``#include``, are
+considered to refer to the same file if the paths resolve to the same file
+and the specified *header-attr*\s (if any) match the attributes of that file,
+even if the file is named differently (for instance, by a relative path or
+via symlinks).
+
+.. note::
+    The use of *header-attr*\s avoids the need for Clang to speculatively
+    ``stat`` every header referenced by a module map. It is recommended that
+    *header-attr*\s only be used in machine-generated module maps, to avoid
+    mismatches between attribute values and the corresponding files.
 
 Umbrella directory declaration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -530,7 +735,7 @@ For each header included by the umbrella header or in the umbrella directory tha
 * Contain a single *header-declaration* naming that header
 * Contain a single *export-declaration* ``export *``, if the \ *inferred-submodule-declaration* contains the \ *inferred-submodule-member* ``export *``
 
-**Example**: If the subdirectory "MyLib" contains the headers ``A.h`` and ``B.h``, then the following module map:
+**Example:** If the subdirectory "MyLib" contains the headers ``A.h`` and ``B.h``, then the following module map:
 
 .. parsed-literal::
 
@@ -573,7 +778,7 @@ An *export-declaration* specifies which imported modules will automatically be r
 
 The *export-declaration* names a module or a set of modules that will be re-exported to any translation unit that imports the enclosing module. Each imported module that matches the *wildcard-module-id* up to, but not including, the first ``*`` will be re-exported.
 
-**Example**:: In the following example, importing ``MyLib.Derived`` also provides the API for ``MyLib.Base``:
+**Example:** In the following example, importing ``MyLib.Derived`` also provides the API for ``MyLib.Base``:
 
 .. parsed-literal::
 
@@ -615,16 +820,42 @@ Note that, if ``Derived.h`` includes ``Base.h``, one can simply use a wildcard e
   compatibility for programs that rely on transitive inclusion (i.e.,
   all of them).
 
+Re-export Declaration
+~~~~~~~~~~~~~~~~~~~~~
+An *export-as-declaration* specifies that the current module will have
+its interface re-exported by the named module.
+
+.. parsed-literal::
+
+  *export-as-declaration*:
+    ``export_as`` *identifier*
+
+The *export-as-declaration* names the module that the current
+module will be re-exported through. Only top-level modules
+can be re-exported, and any given module may only be re-exported
+through a single module.
+
+**Example:** In the following example, the module ``MyFrameworkCore``
+will be re-exported via the module ``MyFramework``:
+
+.. parsed-literal::
+
+  module MyFrameworkCore {
+    export_as MyFramework
+  }
+
 Use declaration
 ~~~~~~~~~~~~~~~
-A *use-declaration* specifies one of the other modules that the module is allowed to use. An import or include not matching one of these is rejected when the option *-fmodules-decluse*.
+A *use-declaration* specifies another module that the current top-level module
+intends to use. When the option *-fmodules-decluse* is specified, a module can
+only use other modules that are explicitly specified in this way.
 
 .. parsed-literal::
 
   *use-declaration*:
     ``use`` *module-id*
 
-**Example**:: In the following example, use of A from C is not declared, so will trigger a warning.
+**Example:** In the following example, use of A from C is not declared, so will trigger a warning.
 
 .. parsed-literal::
 
@@ -641,7 +872,9 @@ A *use-declaration* specifies one of the other modules that the module is allowe
     use B
   }
 
-When compiling a source file that implements a module, use the option ``-fmodule-name=module-id`` to indicate that the source file is logically part of that module.
+When compiling a source file that implements a module, use the option
+``-fmodule-name=module-id`` to indicate that the source file is logically part
+of that module.
 
 The compiler at present only applies restrictions to the module directly being built.
 
@@ -667,7 +900,7 @@ A *link-declaration* with the ``framework`` specifies that the linker should lin
 
 Configuration macros declaration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The *config-macros-declaration* specifies the set of configuration macros that have an effect on the the API of the enclosing module.
+The *config-macros-declaration* specifies the set of configuration macros that have an effect on the API of the enclosing module.
 
 .. parsed-literal::
 
@@ -778,10 +1011,12 @@ express this with a single module map file in the library:
 
   module Foo {
     header "Foo.h"
-    
-    explicit module Private {
-      header "Foo_Private.h"
-    }
+    ...
+  }
+
+  module Foo_Private {
+    header "Foo_Private.h"
+    ...
   }
 
 
@@ -792,7 +1027,7 @@ build machinery.
 
 Private module map files, which are named ``module.private.modulemap``
 (or, for backward compatibility, ``module_private.map``), allow one to
-augment the primary module map file with an additional submodule. For
+augment the primary module map file with an additional modules. For
 example, we would split the module map file above into two module map
 files:
 
@@ -802,9 +1037,9 @@ files:
   module Foo {
     header "Foo.h"
   }
-  
+
   /* module.private.modulemap */
-  explicit module Foo.Private {
+  module Foo_Private {
     header "Foo_Private.h"
   }
 
@@ -815,6 +1050,15 @@ file. In our example library, the ``module.private.modulemap`` file
 would be available when ``Foo_Private.h`` is available, making it
 easier to split a library's public and private APIs along header
 boundaries.
+
+When writing a private module as part of a *framework*, it's recommended that:
+
+* Headers for this module are present in the ``PrivateHeaders`` framework
+  subdirectory.
+* The private module is defined as a *top level module* with the name of the
+  public framework prefixed, like ``Foo_Private`` above. Clang has extra logic
+  to work with this naming, using ``FooPrivate`` or ``Foo.Private`` (submodule)
+  trigger warnings and might not work as expected.
 
 Modularizing a Platform
 =======================
@@ -886,4 +1130,3 @@ PCHInternals_
 .. [#] The preprocessing context in which the modules are parsed is actually dependent on the command-line options provided to the compiler, including the language dialect and any ``-D`` options. However, the compiled modules for different command-line options are kept distinct, and any preprocessor directives that occur within the translation unit are ignored. See the section on the `Configuration macros declaration`_ for more information.
 
 .. _PCHInternals: PCHInternals.html
- 

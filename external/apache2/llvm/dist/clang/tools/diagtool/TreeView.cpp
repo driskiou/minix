@@ -1,20 +1,17 @@
 //===- TreeView.cpp - diagtool tool for printing warning flags ------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "DiagTool.h"
 #include "DiagnosticNames.h"
-#include "clang/AST/ASTDiagnostic.h"
 #include "clang/Basic/AllDiagnostics.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Process.h"
 
@@ -23,30 +20,14 @@ DEF_DIAGTOOL("tree", "Show warning flags in a tree view", TreeView)
 using namespace clang;
 using namespace diagtool;
 
-static bool hasColors(const llvm::raw_ostream &out) {
-  if (&out != &llvm::errs() && &out != &llvm::outs())
-    return false;
-  return llvm::errs().is_displayed() && llvm::outs().is_displayed();
-}
-
 class TreePrinter {
+  using Colors = llvm::raw_ostream::Colors;
+
 public:
   llvm::raw_ostream &out;
-  const bool ShowColors;
-  bool FlagsOnly;
+  bool Internal;
 
-  TreePrinter(llvm::raw_ostream &out)
-      : out(out), ShowColors(hasColors(out)), FlagsOnly(false) {}
-
-  void setColor(llvm::raw_ostream::Colors Color) {
-    if (ShowColors)
-      out << llvm::sys::Process::OutputColor(Color, false, false);
-  }
-
-  void resetColor() {
-    if (ShowColors)
-      out << llvm::sys::Process::ResetColor();
-  }
+  TreePrinter(llvm::raw_ostream &out) : out(out), Internal(false) {}
 
   static bool isIgnored(unsigned DiagID) {
     // FIXME: This feels like a hack.
@@ -55,30 +36,54 @@ public:
     return Diags.isIgnored(DiagID, SourceLocation());
   }
 
+  static bool unimplemented(const GroupRecord &Group) {
+    if (!Group.diagnostics().empty())
+      return false;
+
+    for (const GroupRecord &GR : Group.subgroups())
+      if (!unimplemented(GR))
+        return false;
+
+    return true;
+  }
+
+  static bool enabledByDefault(const GroupRecord &Group) {
+    for (const DiagnosticRecord &DR : Group.diagnostics()) {
+      if (isIgnored(DR.DiagID))
+        return false;
+    }
+
+    for (const GroupRecord &GR : Group.subgroups()) {
+      if (!enabledByDefault(GR))
+        return false;
+    }
+
+    return true;
+  }
+
   void printGroup(const GroupRecord &Group, unsigned Indent = 0) {
     out.indent(Indent * 2);
 
-    setColor(llvm::raw_ostream::YELLOW);
-    out << "-W" << Group.getName() << "\n";
-    resetColor();
+    if (unimplemented(Group))
+      out << Colors::RED;
+    else if (enabledByDefault(Group))
+      out << Colors::GREEN;
+    else
+      out << Colors::YELLOW;
+
+    out << "-W" << Group.getName() << "\n" << Colors::RESET;
 
     ++Indent;
-    for (GroupRecord::subgroup_iterator I = Group.subgroup_begin(),
-                                        E = Group.subgroup_end();
-         I != E; ++I) {
-      printGroup(*I, Indent);
+    for (const GroupRecord &GR : Group.subgroups()) {
+      printGroup(GR, Indent);
     }
 
-    if (!FlagsOnly) {
-      for (GroupRecord::diagnostics_iterator I = Group.diagnostics_begin(),
-                                             E = Group.diagnostics_end();
-           I != E; ++I) {
-        if (ShowColors && !isIgnored(I->DiagID))
-          setColor(llvm::raw_ostream::GREEN);
+    if (Internal) {
+      for (const DiagnosticRecord &DR : Group.diagnostics()) {
+        if (!isIgnored(DR.DiagID))
+          out << Colors::GREEN;
         out.indent(Indent * 2);
-        out << I->getName();
-        resetColor();
-        out << "\n";
+        out << DR.getName() << Colors::RESET << "\n";
       }
     }
   }
@@ -91,9 +96,7 @@ public:
       return 1;
     }
 
-    const GroupRecord *Found =
-        std::lower_bound(AllGroups.begin(), AllGroups.end(), RootGroup);
-
+    const GroupRecord *Found = llvm::lower_bound(AllGroups, RootGroup);
     if (Found == AllGroups.end() || Found->getName() != RootGroup) {
       llvm::errs() << "No such diagnostic group exists\n";
       return 1;
@@ -108,12 +111,9 @@ public:
     ArrayRef<GroupRecord> AllGroups = getDiagnosticGroups();
     llvm::DenseSet<unsigned> NonRootGroupIDs;
 
-    for (ArrayRef<GroupRecord>::iterator I = AllGroups.begin(),
-                                         E = AllGroups.end();
-         I != E; ++I) {
-      for (GroupRecord::subgroup_iterator SI = I->subgroup_begin(),
-                                          SE = I->subgroup_end();
-           SI != SE; ++SI) {
+    for (const GroupRecord &GR : AllGroups) {
+      for (auto SI = GR.subgroup_begin(), SE = GR.subgroup_end(); SI != SE;
+           ++SI) {
         NonRootGroupIDs.insert((unsigned)SI.getID());
       }
     }
@@ -129,27 +129,24 @@ public:
   }
 
   void showKey() {
-    if (ShowColors) {
-      out << '\n';
-      setColor(llvm::raw_ostream::GREEN);
-      out << "GREEN";
-      resetColor();
-      out << " = enabled by default\n\n";
-    }
+    out << '\n' << Colors::GREEN << "GREEN" << Colors::RESET
+        << " = enabled by default";
+    out << '\n' << Colors::RED << "RED" << Colors::RESET
+        << " = unimplemented (accepted for GCC compatibility)\n\n";
   }
 };
 
 static void printUsage() {
-  llvm::errs() << "Usage: diagtool tree [--flags-only] [<diagnostic-group>]\n";
+  llvm::errs() << "Usage: diagtool tree [--internal] [<diagnostic-group>]\n";
 }
 
 int TreeView::run(unsigned int argc, char **argv, llvm::raw_ostream &out) {
   // First check our one flag (--flags-only).
-  bool FlagsOnly = false;
+  bool Internal = false;
   if (argc > 0) {
     StringRef FirstArg(*argv);
-    if (FirstArg.equals("--flags-only")) {
-      FlagsOnly = true;
+    if (FirstArg.equals("--internal")) {
+      Internal = true;
       --argc;
       ++argv;
     }
@@ -175,8 +172,10 @@ int TreeView::run(unsigned int argc, char **argv, llvm::raw_ostream &out) {
     return -1;
   }
 
+  out.enable_colors(out.has_colors());
+
   TreePrinter TP(out);
-  TP.FlagsOnly = FlagsOnly;
+  TP.Internal = Internal;
   TP.showKey();
   return ShowAll ? TP.showAll() : TP.showGroup(RootGroup);
 }

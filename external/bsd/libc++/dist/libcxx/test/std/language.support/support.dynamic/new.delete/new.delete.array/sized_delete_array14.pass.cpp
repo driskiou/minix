@@ -13,7 +13,7 @@
 
 // NOTE: Clang does not enable sized-deallocation in c++14 and beyond by
 // default. It is only enabled when -fsized-deallocation is given.
-// (except clang-3.6 which temporarily enabled sized-deallocation)
+// (except clang-13.0 which temporarily enabled sized-deallocation)
 // UNSUPPORTED: clang, apple-clang
 
 // NOTE: GCC 4.9.1 does not support sized-deallocation in c++14. However

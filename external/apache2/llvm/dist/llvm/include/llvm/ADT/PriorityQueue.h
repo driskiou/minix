@@ -1,9 +1,8 @@
 //===- llvm/ADT/PriorityQueue.h - Priority queues ---------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -46,8 +45,7 @@ public:
   ///
   void erase_one(const T &t) {
     // Linear-search to find the element.
-    typename Sequence::size_type i =
-      std::find(this->c.begin(), this->c.end(), t) - this->c.begin();
+    typename Sequence::size_type i = find(this->c, t) - this->c.begin();
 
     // Logarithmic-time heap bubble-up.
     while (i != 0) {

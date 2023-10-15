@@ -236,7 +236,7 @@
 ./usr/include/clang-3.4/x86intrin.h                     minix-comp      llvm,llvmcmds,obsolete
 ./usr/include/clang-3.4/xmmintrin.h                     minix-comp      llvm,llvmcmds,obsolete
 ./usr/include/clang-3.4/xopintrin.h                     minix-comp      llvm,llvmcmds,obsolete
-./usr/include/clang-3.6                                 minix-comp      llvm
+./usr/include/clang-13.0                                 minix-comp      llvm
 ./usr/include/compat                                    minix-comp      obsolete
 ./usr/include/compat/machine                            minix-comp      obsolete
 ./usr/include/complex.h                                 minix-comp

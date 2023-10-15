@@ -1,9 +1,8 @@
 //===- SetTheory.cpp - Generate ordered sets from DAG expressions ---------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,18 +11,29 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/SMLoc.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TableGen/Error.h"
 #include "llvm/TableGen/Record.h"
 #include "llvm/TableGen/SetTheory.h"
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <utility>
 
 using namespace llvm;
 
 // Define the standard operators.
 namespace {
 
-typedef SetTheory::RecSet RecSet;
-typedef SetTheory::RecVec RecVec;
+using RecSet = SetTheory::RecSet;
+using RecVec = SetTheory::RecVec;
 
 // (add a, b, ...) Evaluate and union all arguments.
 struct AddOp : public SetTheory::Operator {
@@ -43,9 +53,9 @@ struct SubOp : public SetTheory::Operator {
     RecSet Add, Sub;
     ST.evaluate(*Expr->arg_begin(), Add, Loc);
     ST.evaluate(Expr->arg_begin() + 1, Expr->arg_end(), Sub, Loc);
-    for (RecSet::iterator I = Add.begin(), E = Add.end(); I != E; ++I)
-      if (!Sub.count(*I))
-        Elts.insert(*I);
+    for (const auto &I : Add)
+      if (!Sub.count(I))
+        Elts.insert(I);
   }
 };
 
@@ -59,9 +69,9 @@ struct AndOp : public SetTheory::Operator {
     RecSet S1, S2;
     ST.evaluate(Expr->arg_begin()[0], S1, Loc);
     ST.evaluate(Expr->arg_begin()[1], S2, Loc);
-    for (RecSet::iterator I = S1.begin(), E = S1.end(); I != E; ++I)
-      if (S2.count(*I))
-        Elts.insert(*I);
+    for (const auto &I : S1)
+      if (S2.count(I))
+        Elts.insert(I);
   }
 };
 
@@ -181,7 +191,7 @@ struct SequenceOp : public SetTheory::Operator {
 
     std::string Format;
     if (StringInit *SI = dyn_cast<StringInit>(Expr->arg_begin()[0]))
-      Format = SI->getValue();
+      Format = std::string(SI->getValue());
     else
       PrintFatalError(Loc,  "Format must be a string: " + Expr->getAsString());
 
@@ -196,7 +206,7 @@ struct SequenceOp : public SetTheory::Operator {
     if (IntInit *II = dyn_cast<IntInit>(Expr->arg_begin()[2]))
       To = II->getValue();
     else
-      PrintFatalError(Loc, "From must be an integer: " + Expr->getAsString());
+      PrintFatalError(Loc, "To must be an integer: " + Expr->getAsString());
     if (To < 0 || To >= (1 << 30))
       PrintFatalError(Loc, "To out of range");
 
@@ -237,36 +247,36 @@ struct FieldExpander : public SetTheory::Expander {
     ST.evaluate(Def->getValueInit(FieldName), Elts, Def->getLoc());
   }
 };
+
 } // end anonymous namespace
 
 // Pin the vtables to this file.
 void SetTheory::Operator::anchor() {}
 void SetTheory::Expander::anchor() {}
 
-
 SetTheory::SetTheory() {
-  addOperator("add", new AddOp);
-  addOperator("sub", new SubOp);
-  addOperator("and", new AndOp);
-  addOperator("shl", new ShlOp);
-  addOperator("trunc", new TruncOp);
-  addOperator("rotl", new RotOp(false));
-  addOperator("rotr", new RotOp(true));
-  addOperator("decimate", new DecimateOp);
-  addOperator("interleave", new InterleaveOp);
-  addOperator("sequence", new SequenceOp);
+  addOperator("add", std::make_unique<AddOp>());
+  addOperator("sub", std::make_unique<SubOp>());
+  addOperator("and", std::make_unique<AndOp>());
+  addOperator("shl", std::make_unique<ShlOp>());
+  addOperator("trunc", std::make_unique<TruncOp>());
+  addOperator("rotl", std::make_unique<RotOp>(false));
+  addOperator("rotr", std::make_unique<RotOp>(true));
+  addOperator("decimate", std::make_unique<DecimateOp>());
+  addOperator("interleave", std::make_unique<InterleaveOp>());
+  addOperator("sequence", std::make_unique<SequenceOp>());
 }
 
-void SetTheory::addOperator(StringRef Name, Operator *Op) {
-  Operators[Name] = Op;
+void SetTheory::addOperator(StringRef Name, std::unique_ptr<Operator> Op) {
+  Operators[Name] = std::move(Op);
 }
 
-void SetTheory::addExpander(StringRef ClassName, Expander *E) {
-  Expanders[ClassName] = E;
+void SetTheory::addExpander(StringRef ClassName, std::unique_ptr<Expander> E) {
+  Expanders[ClassName] = std::move(E);
 }
 
 void SetTheory::addFieldExpander(StringRef ClassName, StringRef FieldName) {
-  addExpander(ClassName, new FieldExpander(FieldName));
+  addExpander(ClassName, std::make_unique<FieldExpander>(FieldName));
 }
 
 void SetTheory::evaluate(Init *Expr, RecSet &Elts, ArrayRef<SMLoc> Loc) {
@@ -289,10 +299,10 @@ void SetTheory::evaluate(Init *Expr, RecSet &Elts, ArrayRef<SMLoc> Loc) {
   DefInit *OpInit = dyn_cast<DefInit>(DagExpr->getOperator());
   if (!OpInit)
     PrintFatalError(Loc, "Bad set expression: " + Expr->getAsString());
-  Operator *Op = Operators.lookup(OpInit->getDef()->getName());
-  if (!Op)
+  auto I = Operators.find(OpInit->getDef()->getName());
+  if (I == Operators.end())
     PrintFatalError(Loc, "Unknown set operator: " + Expr->getAsString());
-  Op->apply(*this, DagExpr, Elts, Loc);
+  I->second->apply(*this, DagExpr, Elts, Loc);
 }
 
 const RecVec *SetTheory::expand(Record *Set) {
@@ -302,16 +312,17 @@ const RecVec *SetTheory::expand(Record *Set) {
     return &I->second;
 
   // This is the first time we see Set. Find a suitable expander.
-  const std::vector<Record*> &SC = Set->getSuperClasses();
-  for (unsigned i = 0, e = SC.size(); i != e; ++i) {
+  ArrayRef<std::pair<Record *, SMRange>> SC = Set->getSuperClasses();
+  for (const auto &SCPair : SC) {
     // Skip unnamed superclasses.
-    if (!dyn_cast<StringInit>(SC[i]->getNameInit()))
+    if (!isa<StringInit>(SCPair.first->getNameInit()))
       continue;
-    if (Expander *Exp = Expanders.lookup(SC[i]->getName())) {
+    auto I = Expanders.find(SCPair.first->getName());
+    if (I != Expanders.end()) {
       // This breaks recursive definitions.
       RecVec &EltVec = Expansions[Set];
       RecSet Elts;
-      Exp->expand(*this, Set, Elts);
+      I->second->expand(*this, Set, Elts);
       EltVec.assign(Elts.begin(), Elts.end());
       return &EltVec;
     }
@@ -320,4 +331,3 @@ const RecVec *SetTheory::expand(Record *Set) {
   // Set is not expandable.
   return nullptr;
 }
-

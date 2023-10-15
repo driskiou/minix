@@ -1,9 +1,8 @@
 //===--- LiteralSupport.h ---------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,6 +18,7 @@
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/TokenKinds.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
@@ -40,7 +40,9 @@ void expandUCNs(SmallVectorImpl<char> &Buf, StringRef Input);
 /// of a ppnumber, classifying it as either integer, floating, or erroneous,
 /// determines the radix of the value and can convert it to a useful value.
 class NumericLiteralParser {
-  Preprocessor &PP; // needed for diagnostics
+  const SourceManager &SM;
+  const LangOptions &LangOpts;
+  DiagnosticsEngine &Diags;
 
   const char *const ThisTokBegin;
   const char *const ThisTokEnd;
@@ -49,27 +51,38 @@ class NumericLiteralParser {
 
   unsigned radix;
 
-  bool saw_exponent, saw_period, saw_ud_suffix;
+  bool saw_exponent, saw_period, saw_ud_suffix, saw_fixed_point_suffix;
 
   SmallString<32> UDSuffixBuf;
 
 public:
-  NumericLiteralParser(StringRef TokSpelling,
-                       SourceLocation TokLoc,
-                       Preprocessor &PP);
-  bool hadError;
-  bool isUnsigned;
-  bool isLong;        // This is *not* set for long long.
-  bool isLongLong;
-  bool isFloat;       // 1.0f
-  bool isImaginary;   // 1.0i
-  uint8_t MicrosoftInteger;  // Microsoft suffix extension i8, i16, i32, or i64.
+  NumericLiteralParser(StringRef TokSpelling, SourceLocation TokLoc,
+                       const SourceManager &SM, const LangOptions &LangOpts,
+                       const TargetInfo &Target, DiagnosticsEngine &Diags);
+  bool hadError : 1;
+  bool isUnsigned : 1;
+  bool isLong : 1;          // This is *not* set for long long.
+  bool isLongLong : 1;
+  bool isSizeT : 1;         // 1z, 1uz (C++2b)
+  bool isHalf : 1;          // 1.0h
+  bool isFloat : 1;         // 1.0f
+  bool isImaginary : 1;     // 1.0i
+  bool isFloat16 : 1;       // 1.0f16
+  bool isFloat128 : 1;      // 1.0q
+  uint8_t MicrosoftInteger; // Microsoft suffix extension i8, i16, i32, or i64.
+
+  bool isFract : 1;         // 1.0hr/r/lr/uhr/ur/ulr
+  bool isAccum : 1;         // 1.0hk/k/lk/uhk/uk/ulk
+
+  bool isFixedPointLiteral() const {
+    return (saw_period || saw_exponent) && saw_fixed_point_suffix;
+  }
 
   bool isIntegerLiteral() const {
-    return !saw_period && !saw_exponent;
+    return !saw_period && !saw_exponent && !isFixedPointLiteral();
   }
   bool isFloatingLiteral() const {
-    return saw_period || saw_exponent;
+    return (saw_period || saw_exponent) && !isFixedPointLiteral();
   }
 
   bool hasUDSuffix() const {
@@ -101,15 +114,28 @@ public:
   /// literal exactly, and false otherwise.
   llvm::APFloat::opStatus GetFloatValue(llvm::APFloat &Result);
 
+  /// GetFixedPointValue - Convert this numeric literal value into a
+  /// scaled integer that represents this value. Returns true if an overflow
+  /// occurred when calculating the integral part of the scaled integer or
+  /// calculating the digit sequence of the exponent.
+  bool GetFixedPointValue(llvm::APInt &StoreVal, unsigned Scale);
+
 private:
 
   void ParseNumberStartingWithZero(SourceLocation TokLoc);
+  void ParseDecimalOrOctalCommon(SourceLocation TokLoc);
 
   static bool isDigitSeparator(char C) { return C == '\''; }
 
+  /// Determine whether the sequence of characters [Start, End) contains
+  /// any real digits (not digit separators).
+  bool containsDigits(const char *Start, const char *End) {
+    return Start != End && (Start + 1 != End || !isDigitSeparator(Start[0]));
+  }
+
   enum CheckSeparatorKind { CSK_BeforeDigits, CSK_AfterDigits };
 
-  /// \brief Ensure that we don't have a digit separator here.
+  /// Ensure that we don't have a digit separator here.
   void checkSeparator(SourceLocation TokLoc, const char *Pos,
                       CheckSeparatorKind IsAfterDigits);
 
@@ -166,6 +192,7 @@ public:
   bool hadError() const { return HadError; }
   bool isAscii() const { return Kind == tok::char_constant; }
   bool isWide() const { return Kind == tok::wide_char_constant; }
+  bool isUTF8() const { return Kind == tok::utf8_char_constant; }
   bool isUTF16() const { return Kind == tok::utf16_char_constant; }
   bool isUTF32() const { return Kind == tok::utf32_char_constant; }
   bool isMultiChar() const { return IsMultiChar; }
@@ -185,7 +212,7 @@ class StringLiteralParser {
   const LangOptions &Features;
   const TargetInfo &Target;
   DiagnosticsEngine *Diags;
-  
+
   unsigned MaxTokenLength;
   unsigned SizeBound;
   unsigned CharByteWidth;
@@ -207,7 +234,7 @@ public:
       ResultPtr(ResultBuf.data()), hadError(false), Pascal(false) {
     init(StringToks);
   }
-    
+
 
   bool hadError;
   bool Pascal;
@@ -247,6 +274,8 @@ public:
     assert(!UDSuffixBuf.empty() && "no ud-suffix");
     return UDSuffixOffset;
   }
+
+  static bool isValidUDSuffix(const LangOptions &LangOpts, StringRef Suffix);
 
 private:
   void init(ArrayRef<Token> StringToks);

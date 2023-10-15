@@ -1,9 +1,8 @@
 //===-- NVPTX.h - Top-level interface for NVPTX representation --*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,20 +14,14 @@
 #ifndef LLVM_LIB_TARGET_NVPTX_NVPTX_H
 #define LLVM_LIB_TARGET_NVPTX_NVPTX_H
 
-#include "MCTargetDesc/NVPTXBaseInfo.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Value.h"
-#include "llvm/Support/ErrorHandling.h"
-#include "llvm/Target/TargetMachine.h"
-#include <cassert>
-#include <iosfwd>
+#include "llvm/IR/PassManager.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/CodeGen.h"
 
 namespace llvm {
 class NVPTXTargetMachine;
 class FunctionPass;
 class MachineFunctionPass;
-class formatted_raw_ostream;
 
 namespace NVPTXCC {
 enum CondCodes {
@@ -41,41 +34,37 @@ enum CondCodes {
 };
 }
 
-inline static const char *NVPTXCondCodeToString(NVPTXCC::CondCodes CC) {
-  switch (CC) {
-  case NVPTXCC::NE:
-    return "ne";
-  case NVPTXCC::EQ:
-    return "eq";
-  case NVPTXCC::LT:
-    return "lt";
-  case NVPTXCC::LE:
-    return "le";
-  case NVPTXCC::GT:
-    return "gt";
-  case NVPTXCC::GE:
-    return "ge";
-  }
-  llvm_unreachable("Unknown condition code");
-}
-
-ImmutablePass *createNVPTXTargetTransformInfoPass(const NVPTXTargetMachine *TM);
 FunctionPass *createNVPTXISelDag(NVPTXTargetMachine &TM,
                                  llvm::CodeGenOpt::Level OptLevel);
 ModulePass *createNVPTXAssignValidGlobalNamesPass();
 ModulePass *createGenericToNVVMPass();
-FunctionPass *createNVPTXFavorNonGenericAddrSpacesPass();
-ModulePass *createNVVMReflectPass();
-ModulePass *createNVVMReflectPass(const StringMap<int>& Mapping);
+FunctionPass *createNVVMIntrRangePass(unsigned int SmVersion);
+FunctionPass *createNVVMReflectPass(unsigned int SmVersion);
 MachineFunctionPass *createNVPTXPrologEpilogPass();
 MachineFunctionPass *createNVPTXReplaceImageHandlesPass();
 FunctionPass *createNVPTXImageOptimizerPass();
-FunctionPass *createNVPTXLowerStructArgsPass();
+FunctionPass *createNVPTXLowerArgsPass(const NVPTXTargetMachine *TM);
+FunctionPass *createNVPTXLowerAllocaPass();
+MachineFunctionPass *createNVPTXPeephole();
+MachineFunctionPass *createNVPTXProxyRegErasurePass();
 
-bool isImageOrSamplerVal(const Value *, const Module *);
+struct NVVMIntrRangePass : PassInfoMixin<NVVMIntrRangePass> {
+  NVVMIntrRangePass();
+  NVVMIntrRangePass(unsigned SmVersion) : SmVersion(SmVersion) {}
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 
-extern Target TheNVPTXTarget32;
-extern Target TheNVPTXTarget64;
+private:
+  unsigned SmVersion;
+};
+
+struct NVVMReflectPass : PassInfoMixin<NVVMReflectPass> {
+  NVVMReflectPass();
+  NVVMReflectPass(unsigned SmVersion) : SmVersion(SmVersion) {}
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+
+private:
+  unsigned SmVersion;
+};
 
 namespace NVPTX {
 enum DrvInterface {
@@ -126,7 +115,8 @@ enum AddressSpace {
 enum FromType {
   Unsigned = 0,
   Signed,
-  Float
+  Float,
+  Untyped
 };
 enum VecType {
   Scalar = 1,

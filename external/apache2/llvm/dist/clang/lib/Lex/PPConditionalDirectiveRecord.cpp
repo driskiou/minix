@@ -1,9 +1,8 @@
 //===--- PPConditionalDirectiveRecord.h - Preprocessing Directives-*- C++ -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -26,9 +25,8 @@ bool PPConditionalDirectiveRecord::rangeIntersectsConditionalDirective(
   if (Range.isInvalid())
     return false;
 
-  CondDirectiveLocsTy::const_iterator
-    low = std::lower_bound(CondDirectiveLocs.begin(), CondDirectiveLocs.end(),
-                           Range.getBegin(), CondDirectiveLoc::Comp(SourceMgr));
+  CondDirectiveLocsTy::const_iterator low = llvm::lower_bound(
+      CondDirectiveLocs, Range.getBegin(), CondDirectiveLoc::Comp(SourceMgr));
   if (low == CondDirectiveLocs.end())
     return false;
 
@@ -56,9 +54,8 @@ SourceLocation PPConditionalDirectiveRecord::findConditionalDirectiveRegionLoc(
                                           Loc))
     return CondDirectiveStack.back();
 
-  CondDirectiveLocsTy::const_iterator
-    low = std::lower_bound(CondDirectiveLocs.begin(), CondDirectiveLocs.end(),
-                           Loc, CondDirectiveLoc::Comp(SourceMgr));
+  CondDirectiveLocsTy::const_iterator low = llvm::lower_bound(
+      CondDirectiveLocs, Loc, CondDirectiveLoc::Comp(SourceMgr));
   assert(low != CondDirectiveLocs.end());
   return low->getRegionLoc();
 }
@@ -84,14 +81,14 @@ void PPConditionalDirectiveRecord::If(SourceLocation Loc,
 
 void PPConditionalDirectiveRecord::Ifdef(SourceLocation Loc,
                                          const Token &MacroNameTok,
-                                         const MacroDirective *MD) {
+                                         const MacroDefinition &MD) {
   addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
   CondDirectiveStack.push_back(Loc);
 }
 
 void PPConditionalDirectiveRecord::Ifndef(SourceLocation Loc,
                                           const Token &MacroNameTok,
-                                          const MacroDirective *MD) {
+                                          const MacroDefinition &MD) {
   addCondDirectiveLoc(CondDirectiveLoc(Loc, CondDirectiveStack.back()));
   CondDirectiveStack.push_back(Loc);
 }

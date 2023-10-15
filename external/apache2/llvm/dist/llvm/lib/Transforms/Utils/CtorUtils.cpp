@@ -1,9 +1,8 @@
 //===- CtorUtils.cpp - Helpers for working with global_ctors ----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,22 +10,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/BitVector.h"
 #include "llvm/Transforms/Utils/CtorUtils.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "ctor_utils"
 
-namespace llvm {
+using namespace llvm;
 
-namespace {
 /// Given a specified llvm.global_ctors list, remove the listed elements.
-void removeGlobalCtors(GlobalVariable *GCL, const BitVector &CtorsToRemove) {
+static void removeGlobalCtors(GlobalVariable *GCL, const BitVector &CtorsToRemove) {
   // Filter out the initializer elements to remove.
   ConstantArray *OldCA = cast<ConstantArray>(GCL->getInitializer());
   SmallVector<Constant *, 10> CAList;
@@ -49,7 +47,7 @@ void removeGlobalCtors(GlobalVariable *GCL, const BitVector &CtorsToRemove) {
   GlobalVariable *NGV =
       new GlobalVariable(CA->getType(), GCL->isConstant(), GCL->getLinkage(),
                          CA, "", GCL->getThreadLocalMode());
-  GCL->getParent()->getGlobalList().insert(GCL, NGV);
+  GCL->getParent()->getGlobalList().insert(GCL->getIterator(), NGV);
   NGV->takeName(GCL);
 
   // Nuke the old list, replacing any uses with the new one.
@@ -64,14 +62,14 @@ void removeGlobalCtors(GlobalVariable *GCL, const BitVector &CtorsToRemove) {
 
 /// Given a llvm.global_ctors list that we can understand,
 /// return a list of the functions and null terminator as a vector.
-std::vector<Function *> parseGlobalCtors(GlobalVariable *GV) {
+static std::vector<Function *> parseGlobalCtors(GlobalVariable *GV) {
   if (GV->getInitializer()->isNullValue())
     return std::vector<Function *>();
   ConstantArray *CA = cast<ConstantArray>(GV->getInitializer());
   std::vector<Function *> Result;
   Result.reserve(CA->getNumOperands());
-  for (User::op_iterator i = CA->op_begin(), e = CA->op_end(); i != e; ++i) {
-    ConstantStruct *CS = cast<ConstantStruct>(*i);
+  for (auto &V : CA->operands()) {
+    ConstantStruct *CS = cast<ConstantStruct>(V);
     Result.push_back(dyn_cast<Function>(CS->getOperand(1)));
   }
   return Result;
@@ -79,7 +77,7 @@ std::vector<Function *> parseGlobalCtors(GlobalVariable *GV) {
 
 /// Find the llvm.global_ctors list, verifying that all initializers have an
 /// init priority of 65535.
-GlobalVariable *findGlobalCtors(Module &M) {
+static GlobalVariable *findGlobalCtors(Module &M) {
   GlobalVariable *GV = M.getGlobalVariable("llvm.global_ctors");
   if (!GV)
     return nullptr;
@@ -93,10 +91,10 @@ GlobalVariable *findGlobalCtors(Module &M) {
     return GV;
   ConstantArray *CA = cast<ConstantArray>(GV->getInitializer());
 
-  for (User::op_iterator i = CA->op_begin(), e = CA->op_end(); i != e; ++i) {
-    if (isa<ConstantAggregateZero>(*i))
+  for (auto &V : CA->operands()) {
+    if (isa<ConstantAggregateZero>(V))
       continue;
-    ConstantStruct *CS = cast<ConstantStruct>(*i);
+    ConstantStruct *CS = cast<ConstantStruct>(V);
     if (isa<ConstantPointerNull>(CS->getOperand(1)))
       continue;
 
@@ -112,12 +110,11 @@ GlobalVariable *findGlobalCtors(Module &M) {
 
   return GV;
 }
-} // namespace
 
 /// Call "ShouldRemove" for every entry in M's global_ctor list and remove the
 /// entries for which it returns true.  Return true if anything changed.
-bool optimizeGlobalCtorsList(Module &M,
-                             function_ref<bool(Function *)> ShouldRemove) {
+bool llvm::optimizeGlobalCtorsList(
+    Module &M, function_ref<bool(Function *)> ShouldRemove) {
   GlobalVariable *GlobalCtors = findGlobalCtors(M);
   if (!GlobalCtors)
     return false;
@@ -138,7 +135,7 @@ bool optimizeGlobalCtorsList(Module &M,
     if (!F)
       continue;
 
-    DEBUG(dbgs() << "Optimizing Global Constructor: " << *F << "\n");
+    LLVM_DEBUG(dbgs() << "Optimizing Global Constructor: " << *F << "\n");
 
     // We cannot simplify external ctor functions.
     if (F->empty())
@@ -160,5 +157,3 @@ bool optimizeGlobalCtorsList(Module &M,
   removeGlobalCtors(GlobalCtors, CtorsToRemove);
   return true;
 }
-
-} // End llvm namespace

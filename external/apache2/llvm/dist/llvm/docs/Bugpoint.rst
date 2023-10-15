@@ -121,6 +121,12 @@ non-obvious ways.  Here are some hints and tips:
   miscompilation.  Programs should be temporarily modified to disable outputs
   that are likely to vary from run to run.
 
+* In the `crash debugger`_, ``bugpoint`` does not distinguish different crashes
+  during reduction. Thus, if new crash or miscompilation happens, ``bugpoint``
+  will continue with the new crash instead. If you would like to stick to
+  particular crash, you should write check scripts to validate the error
+  message, see ``-compile-command`` in :doc:`CommandGuide/bugpoint`.
+
 * In the code generator and miscompilation debuggers, debugging will go faster
   if you manually modify the program or its inputs to reduce the runtime, but
   still exhibit the problem.
@@ -150,6 +156,11 @@ non-obvious ways.  Here are some hints and tips:
   ``bugpoint`` with the ``-find-bugs`` option will cause the list of specified
   optimizations to be randomized and applied to the program. This process will
   repeat until a bug is found or the user kills ``bugpoint``.
+
+* ``bugpoint`` can produce IR which contains long names. Run ``opt
+  -metarenamer`` over the IR to rename everything using easy-to-read,
+  metasyntactic names. Alternatively, run ``opt -strip -instnamer`` to rename
+  everything with very short (often purely numeric) names.
 
 What to do when bugpoint isn't enough
 =====================================
@@ -193,14 +204,14 @@ desired ranges.  For example:
 
   static int calledCount = 0;
   calledCount++;
-  DEBUG(if (calledCount < 212) return false);
-  DEBUG(if (calledCount > 217) return false);
-  DEBUG(if (calledCount == 213) return false);
-  DEBUG(if (calledCount == 214) return false);
-  DEBUG(if (calledCount == 215) return false);
-  DEBUG(if (calledCount == 216) return false);
-  DEBUG(dbgs() << "visitXOR calledCount: " << calledCount << "\n");
-  DEBUG(dbgs() << "I: "; I->dump());
+  LLVM_DEBUG(if (calledCount < 212) return false);
+  LLVM_DEBUG(if (calledCount > 217) return false);
+  LLVM_DEBUG(if (calledCount == 213) return false);
+  LLVM_DEBUG(if (calledCount == 214) return false);
+  LLVM_DEBUG(if (calledCount == 215) return false);
+  LLVM_DEBUG(if (calledCount == 216) return false);
+  LLVM_DEBUG(dbgs() << "visitXOR calledCount: " << calledCount << "\n");
+  LLVM_DEBUG(dbgs() << "I: "; I->dump());
 
 could be added to ``visitXOR`` to limit ``visitXor`` to being applied only to
 calls 212 and 217. This is from an actual test case and raises an important
@@ -208,7 +219,7 @@ point---a simple binary search may not be sufficient, as transformations that
 interact may require isolating more than one call.  In TargetLowering, use
 ``return SDNode();`` instead of ``return false;``.
 
-Now that that the number of transformations is down to a manageable number, try
+Now that the number of transformations is down to a manageable number, try
 examining the output to see if you can figure out which transformations are
 being done.  If that can be figured out, then do the usual debugging.  If which
 code corresponds to the transformation being performed isn't obvious, set a

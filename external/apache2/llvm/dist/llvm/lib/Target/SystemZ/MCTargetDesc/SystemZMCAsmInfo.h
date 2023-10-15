@@ -1,9 +1,8 @@
 //====-- SystemZMCAsmInfo.h - SystemZ asm properties -----------*- C++ -*--===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,11 +13,12 @@
 #include "llvm/Support/Compiler.h"
 
 namespace llvm {
-class StringRef;
+class Triple;
+enum SystemZAsmDialect { AD_ATT = 0, AD_HLASM = 1 };
 
 class SystemZMCAsmInfo : public MCAsmInfoELF {
 public:
-  explicit SystemZMCAsmInfo(StringRef TT);
+  explicit SystemZMCAsmInfo(const Triple &TT);
 };
 
 } // end namespace llvm

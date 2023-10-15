@@ -1,107 +1,121 @@
-//===--- Job.cpp - Command to Execute -------------------------------------===//
+//===- Job.cpp - Command to Execute ---------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Driver/Job.h"
+#include "InputInfo.h"
+#include "clang/Basic/LLVM.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
-#include "clang/Driver/Job.h"
 #include "clang/Driver/Tool.h"
 #include "clang/Driver/ToolChain.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 #include <cassert>
-using namespace clang::driver;
-using llvm::raw_ostream;
-using llvm::StringRef;
-using llvm::ArrayRef;
+#include <cstddef>
+#include <string>
+#include <system_error>
+#include <utility>
 
-Job::~Job() {}
+using namespace clang;
+using namespace driver;
 
-Command::Command(const Action &_Source, const Tool &_Creator,
-                 const char *_Executable,
-                 const ArgStringList &_Arguments)
-    : Job(CommandClass), Source(_Source), Creator(_Creator),
-      Executable(_Executable), Arguments(_Arguments),
-      ResponseFile(nullptr) {}
+Command::Command(const Action &Source, const Tool &Creator,
+                 ResponseFileSupport ResponseSupport, const char *Executable,
+                 const llvm::opt::ArgStringList &Arguments,
+                 ArrayRef<InputInfo> Inputs, ArrayRef<InputInfo> Outputs)
+    : Source(Source), Creator(Creator), ResponseSupport(ResponseSupport),
+      Executable(Executable), Arguments(Arguments) {
+  for (const auto &II : Inputs)
+    if (II.isFilename())
+      InputFilenames.push_back(II.getFilename());
+  for (const auto &II : Outputs)
+    if (II.isFilename())
+      OutputFilenames.push_back(II.getFilename());
+}
 
-static int skipArgs(const char *Flag) {
+/// Check if the compiler flag in question should be skipped when
+/// emitting a reproducer. Also track how many arguments it has and if the
+/// option is some kind of include path.
+static bool skipArgs(const char *Flag, bool HaveCrashVFS, int &SkipNum,
+                     bool &IsInclude) {
+  SkipNum = 2;
   // These flags are all of the form -Flag <Arg> and are treated as two
   // arguments.  Therefore, we need to skip the flag and the next argument.
-  bool Res = llvm::StringSwitch<bool>(Flag)
-    .Cases("-I", "-MF", "-MT", "-MQ", true)
-    .Cases("-o", "-coverage-file", "-dependency-file", true)
-    .Cases("-fdebug-compilation-dir", "-idirafter", true)
-    .Cases("-include", "-include-pch", "-internal-isystem", true)
-    .Cases("-internal-externc-isystem", "-iprefix", "-iwithprefix", true)
-    .Cases("-iwithprefixbefore", "-isysroot", "-isystem", "-iquote", true)
-    .Cases("-resource-dir", "-serialize-diagnostic-file", true)
+  bool ShouldSkip = llvm::StringSwitch<bool>(Flag)
+    .Cases("-MF", "-MT", "-MQ", "-serialize-diagnostic-file", true)
+    .Cases("-o", "-dependency-file", true)
+    .Cases("-fdebug-compilation-dir", "-diagnostic-log-file", true)
     .Cases("-dwarf-debug-flags", "-ivfsoverlay", true)
     .Default(false);
+  if (ShouldSkip)
+    return true;
 
-  // Match found.
-  if (Res)
-    return 2;
+  // Some include flags shouldn't be skipped if we have a crash VFS
+  IsInclude = llvm::StringSwitch<bool>(Flag)
+    .Cases("-include", "-header-include-file", true)
+    .Cases("-idirafter", "-internal-isystem", "-iwithprefix", true)
+    .Cases("-internal-externc-isystem", "-iprefix", true)
+    .Cases("-iwithprefixbefore", "-isystem", "-iquote", true)
+    .Cases("-isysroot", "-I", "-F", "-resource-dir", true)
+    .Cases("-iframework", "-include-pch", true)
+    .Default(false);
+  if (IsInclude)
+    return !HaveCrashVFS;
 
   // The remaining flags are treated as a single argument.
 
   // These flags are all of the form -Flag and have no second argument.
-  Res = llvm::StringSwitch<bool>(Flag)
+  ShouldSkip = llvm::StringSwitch<bool>(Flag)
     .Cases("-M", "-MM", "-MG", "-MP", "-MD", true)
     .Case("-MMD", true)
     .Default(false);
 
   // Match found.
-  if (Res)
-    return 1;
+  SkipNum = 1;
+  if (ShouldSkip)
+    return true;
 
   // These flags are treated as a single argument (e.g., -F<Dir>).
   StringRef FlagRef(Flag);
-  if (FlagRef.startswith("-F") || FlagRef.startswith("-I") ||
-      FlagRef.startswith("-fmodules-cache-path="))
-    return 1;
+  IsInclude = FlagRef.startswith("-F") || FlagRef.startswith("-I");
+  if (IsInclude)
+    return !HaveCrashVFS;
+  if (FlagRef.startswith("-fmodules-cache-path="))
+    return true;
 
-  return 0;
-}
-
-static void PrintArg(raw_ostream &OS, const char *Arg, bool Quote) {
-  const bool Escape = std::strpbrk(Arg, "\"\\$");
-
-  if (!Quote && !Escape) {
-    OS << Arg;
-    return;
-  }
-
-  // Quote and escape. This isn't really complete, but good enough.
-  OS << '"';
-  while (const char c = *Arg++) {
-    if (c == '"' || c == '\\' || c == '$')
-      OS << '\\';
-    OS << c;
-  }
-  OS << '"';
+  SkipNum = 0;
+  return false;
 }
 
 void Command::writeResponseFile(raw_ostream &OS) const {
   // In a file list, we only write the set of inputs to the response file
-  if (Creator.getResponseFilesSupport() == Tool::RF_FileList) {
-    for (const char *Arg : InputFileList) {
+  if (ResponseSupport.ResponseKind == ResponseFileSupport::RF_FileList) {
+    for (const auto *Arg : InputFileList) {
       OS << Arg << '\n';
     }
     return;
   }
 
-  // In regular response files, we send all arguments to the response file
-  for (const char *Arg : Arguments) {
+  // In regular response files, we send all arguments to the response file.
+  // Wrapping all arguments in double quotes ensures that both Unix tools and
+  // Windows tools understand the response file.
+  for (const auto *Arg : Arguments) {
     OS << '"';
 
     for (; *Arg != '\0'; Arg++) {
@@ -120,76 +134,145 @@ void Command::buildArgvForResponseFile(
   // When not a file list, all arguments are sent to the response file.
   // This leaves us to set the argv to a single parameter, requesting the tool
   // to read the response file.
-  if (Creator.getResponseFilesSupport() != Tool::RF_FileList) {
+  if (ResponseSupport.ResponseKind != ResponseFileSupport::RF_FileList) {
     Out.push_back(Executable);
     Out.push_back(ResponseFileFlag.c_str());
     return;
   }
 
   llvm::StringSet<> Inputs;
-  for (const char *InputName : InputFileList)
+  for (const auto *InputName : InputFileList)
     Inputs.insert(InputName);
   Out.push_back(Executable);
   // In a file list, build args vector ignoring parameters that will go in the
   // response file (elements of the InputFileList vector)
   bool FirstInput = true;
-  for (const char *Arg : Arguments) {
+  for (const auto *Arg : Arguments) {
     if (Inputs.count(Arg) == 0) {
       Out.push_back(Arg);
     } else if (FirstInput) {
       FirstInput = false;
-      Out.push_back(Creator.getResponseFileFlag());
+      Out.push_back(ResponseSupport.ResponseFlag);
       Out.push_back(ResponseFile);
     }
   }
+}
+
+/// Rewrite relative include-like flag paths to absolute ones.
+static void
+rewriteIncludes(const llvm::ArrayRef<const char *> &Args, size_t Idx,
+                size_t NumArgs,
+                llvm::SmallVectorImpl<llvm::SmallString<128>> &IncFlags) {
+  using namespace llvm;
+  using namespace sys;
+
+  auto getAbsPath = [](StringRef InInc, SmallVectorImpl<char> &OutInc) -> bool {
+    if (path::is_absolute(InInc)) // Nothing to do here...
+      return false;
+    std::error_code EC = fs::current_path(OutInc);
+    if (EC)
+      return false;
+    path::append(OutInc, InInc);
+    return true;
+  };
+
+  SmallString<128> NewInc;
+  if (NumArgs == 1) {
+    StringRef FlagRef(Args[Idx + NumArgs - 1]);
+    assert((FlagRef.startswith("-F") || FlagRef.startswith("-I")) &&
+            "Expecting -I or -F");
+    StringRef Inc = FlagRef.slice(2, StringRef::npos);
+    if (getAbsPath(Inc, NewInc)) {
+      SmallString<128> NewArg(FlagRef.slice(0, 2));
+      NewArg += NewInc;
+      IncFlags.push_back(std::move(NewArg));
+    }
+    return;
+  }
+
+  assert(NumArgs == 2 && "Not expecting more than two arguments");
+  StringRef Inc(Args[Idx + NumArgs - 1]);
+  if (!getAbsPath(Inc, NewInc))
+    return;
+  IncFlags.push_back(SmallString<128>(Args[Idx]));
+  IncFlags.push_back(std::move(NewInc));
 }
 
 void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {
   // Always quote the exe.
   OS << ' ';
-  PrintArg(OS, Executable, /*Quote=*/true);
+  llvm::sys::printArg(OS, Executable, /*Quote=*/true);
 
-  llvm::ArrayRef<const char *> Args = Arguments;
-  llvm::SmallVector<const char *, 128> ArgsRespFile;
+  ArrayRef<const char *> Args = Arguments;
+  SmallVector<const char *, 128> ArgsRespFile;
   if (ResponseFile != nullptr) {
     buildArgvForResponseFile(ArgsRespFile);
     Args = ArrayRef<const char *>(ArgsRespFile).slice(1); // no executable name
   }
 
-  StringRef MainFilename;
-  // We'll need the argument to -main-file-name to find the input file name.
-  if (CrashInfo)
-    for (size_t I = 0, E = Args.size(); I + 1 < E; ++I)
-      if (StringRef(Args[I]).equals("-main-file-name"))
-        MainFilename = Args[I + 1];
-
+  bool HaveCrashVFS = CrashInfo && !CrashInfo->VFSPath.empty();
   for (size_t i = 0, e = Args.size(); i < e; ++i) {
     const char *const Arg = Args[i];
 
     if (CrashInfo) {
-      if (int Skip = skipArgs(Arg)) {
-        i += Skip - 1;
+      int NumArgs = 0;
+      bool IsInclude = false;
+      if (skipArgs(Arg, HaveCrashVFS, NumArgs, IsInclude)) {
+        i += NumArgs - 1;
         continue;
-      } else if (llvm::sys::path::filename(Arg) == MainFilename &&
-                 (i == 0 || StringRef(Args[i - 1]) != "-main-file-name")) {
+      }
+
+      // Relative includes need to be expanded to absolute paths.
+      if (HaveCrashVFS && IsInclude) {
+        SmallVector<SmallString<128>, 2> NewIncFlags;
+        rewriteIncludes(Args, i, NumArgs, NewIncFlags);
+        if (!NewIncFlags.empty()) {
+          for (auto &F : NewIncFlags) {
+            OS << ' ';
+            llvm::sys::printArg(OS, F.c_str(), Quote);
+          }
+          i += NumArgs - 1;
+          continue;
+        }
+      }
+
+      auto Found = llvm::find_if(InputFilenames,
+                                 [&Arg](StringRef IF) { return IF == Arg; });
+      if (Found != InputFilenames.end() &&
+          (i == 0 || StringRef(Args[i - 1]) != "-main-file-name")) {
         // Replace the input file name with the crashinfo's file name.
         OS << ' ';
         StringRef ShortName = llvm::sys::path::filename(CrashInfo->Filename);
-        PrintArg(OS, ShortName.str().c_str(), Quote);
+        llvm::sys::printArg(OS, ShortName.str(), Quote);
         continue;
       }
     }
 
     OS << ' ';
-    PrintArg(OS, Arg, Quote);
+    llvm::sys::printArg(OS, Arg, Quote);
   }
 
-  if (CrashInfo && !CrashInfo->VFSPath.empty()) {
+  if (CrashInfo && HaveCrashVFS) {
     OS << ' ';
-    PrintArg(OS, "-ivfsoverlay", Quote);
+    llvm::sys::printArg(OS, "-ivfsoverlay", Quote);
     OS << ' ';
-    PrintArg(OS, CrashInfo->VFSPath.str().c_str(), Quote);
+    llvm::sys::printArg(OS, CrashInfo->VFSPath.str(), Quote);
+
+    // The leftover modules from the crash are stored in
+    //  <name>.cache/vfs/modules
+    // Leave it untouched for pcm inspection and provide a clean/empty dir
+    // path to contain the future generated module cache:
+    //  <name>.cache/vfs/repro-modules
+    SmallString<128> RelModCacheDir = llvm::sys::path::parent_path(
+        llvm::sys::path::parent_path(CrashInfo->VFSPath));
+    llvm::sys::path::append(RelModCacheDir, "repro-modules");
+
+    std::string ModCachePath = "-fmodules-cache-path=";
+    ModCachePath.append(RelModCacheDir.c_str());
+
+    OS << ' ';
+    llvm::sys::printArg(OS, ModCachePath, Quote);
   }
 
   if (ResponseFile != nullptr) {
@@ -197,7 +280,7 @@ void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
     writeResponseFile(OS);
     // Avoiding duplicated newline terminator, since FileLists are
     // newline-separated.
-    if (Creator.getResponseFilesSupport() != Tool::RF_FileList)
+    if (ResponseSupport.ResponseKind != ResponseFileSupport::RF_FileList)
       OS << "\n";
     OS << " (end of response file)";
   }
@@ -207,93 +290,153 @@ void Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
 
 void Command::setResponseFile(const char *FileName) {
   ResponseFile = FileName;
-  ResponseFileFlag = Creator.getResponseFileFlag();
+  ResponseFileFlag = ResponseSupport.ResponseFlag;
   ResponseFileFlag += FileName;
 }
 
-int Command::Execute(const StringRef **Redirects, std::string *ErrMsg,
-                     bool *ExecutionFailed) const {
-  SmallVector<const char*, 128> Argv;
+void Command::setEnvironment(llvm::ArrayRef<const char *> NewEnvironment) {
+  Environment.reserve(NewEnvironment.size() + 1);
+  Environment.assign(NewEnvironment.begin(), NewEnvironment.end());
+  Environment.push_back(nullptr);
+}
 
+void Command::PrintFileNames() const {
+  if (PrintInputFilenames) {
+    for (const char *Arg : InputFilenames)
+      llvm::outs() << llvm::sys::path::filename(Arg) << "\n";
+    llvm::outs().flush();
+  }
+}
+
+int Command::Execute(ArrayRef<llvm::Optional<StringRef>> Redirects,
+                     std::string *ErrMsg, bool *ExecutionFailed) const {
+  PrintFileNames();
+
+  SmallVector<const char *, 128> Argv;
   if (ResponseFile == nullptr) {
     Argv.push_back(Executable);
-    for (size_t i = 0, e = Arguments.size(); i != e; ++i)
-      Argv.push_back(Arguments[i]);
+    Argv.append(Arguments.begin(), Arguments.end());
     Argv.push_back(nullptr);
+  } else {
+    // If the command is too large, we need to put arguments in a response file.
+    std::string RespContents;
+    llvm::raw_string_ostream SS(RespContents);
 
-    return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
-                                     Redirects, /*secondsToWait*/ 0,
-                                     /*memoryLimit*/ 0, ErrMsg,
-                                     ExecutionFailed);
+    // Write file contents and build the Argv vector
+    writeResponseFile(SS);
+    buildArgvForResponseFile(Argv);
+    Argv.push_back(nullptr);
+    SS.flush();
+
+    // Save the response file in the appropriate encoding
+    if (std::error_code EC = writeFileWithEncoding(
+            ResponseFile, RespContents, ResponseSupport.ResponseEncoding)) {
+      if (ErrMsg)
+        *ErrMsg = EC.message();
+      if (ExecutionFailed)
+        *ExecutionFailed = true;
+      // Return -1 by convention (see llvm/include/llvm/Support/Program.h) to
+      // indicate the requested executable cannot be started.
+      return -1;
+    }
   }
 
-  // We need to put arguments in a response file (command is too large)
-  // Open stream to store the response file contents
-  std::string RespContents;
-  llvm::raw_string_ostream SS(RespContents);
+  Optional<ArrayRef<StringRef>> Env;
+  std::vector<StringRef> ArgvVectorStorage;
+  if (!Environment.empty()) {
+    assert(Environment.back() == nullptr &&
+           "Environment vector should be null-terminated by now");
+    ArgvVectorStorage = llvm::toStringRefArray(Environment.data());
+    Env = makeArrayRef(ArgvVectorStorage);
+  }
 
-  // Write file contents and build the Argv vector
-  writeResponseFile(SS);
-  buildArgvForResponseFile(Argv);
+  auto Args = llvm::toStringRefArray(Argv.data());
+  return llvm::sys::ExecuteAndWait(Executable, Args, Env, Redirects,
+                                   /*secondsToWait*/ 0, /*memoryLimit*/ 0,
+                                   ErrMsg, ExecutionFailed, &ProcStat);
+}
+
+CC1Command::CC1Command(const Action &Source, const Tool &Creator,
+                       ResponseFileSupport ResponseSupport,
+                       const char *Executable,
+                       const llvm::opt::ArgStringList &Arguments,
+                       ArrayRef<InputInfo> Inputs, ArrayRef<InputInfo> Outputs)
+    : Command(Source, Creator, ResponseSupport, Executable, Arguments, Inputs,
+              Outputs) {
+  InProcess = true;
+}
+
+void CC1Command::Print(raw_ostream &OS, const char *Terminator, bool Quote,
+                       CrashReportInfo *CrashInfo) const {
+  if (InProcess)
+    OS << " (in-process)\n";
+  Command::Print(OS, Terminator, Quote, CrashInfo);
+}
+
+int CC1Command::Execute(ArrayRef<llvm::Optional<StringRef>> Redirects,
+                        std::string *ErrMsg, bool *ExecutionFailed) const {
+  // FIXME: Currently, if there're more than one job, we disable
+  // -fintegrate-cc1. If we're no longer a integrated-cc1 job, fallback to
+  // out-of-process execution. See discussion in https://reviews.llvm.org/D74447
+  if (!InProcess)
+    return Command::Execute(Redirects, ErrMsg, ExecutionFailed);
+
+  PrintFileNames();
+
+  SmallVector<const char *, 128> Argv;
+  Argv.push_back(getExecutable());
+  Argv.append(getArguments().begin(), getArguments().end());
   Argv.push_back(nullptr);
-  SS.flush();
 
-  // Save the response file in the appropriate encoding
-  if (std::error_code EC = writeFileWithEncoding(
-          ResponseFile, RespContents, Creator.getResponseFileEncoding())) {
-    if (ErrMsg)
-      *ErrMsg = EC.message();
-    if (ExecutionFailed)
-      *ExecutionFailed = true;
-    return -1;
-  }
-
-  return llvm::sys::ExecuteAndWait(Executable, Argv.data(), /*env*/ nullptr,
-                                   Redirects, /*secondsToWait*/ 0,
-                                   /*memoryLimit*/ 0, ErrMsg, ExecutionFailed);
-}
-
-FallbackCommand::FallbackCommand(const Action &Source_, const Tool &Creator_,
-                                 const char *Executable_,
-                                 const ArgStringList &Arguments_,
-                                 std::unique_ptr<Command> Fallback_)
-    : Command(Source_, Creator_, Executable_, Arguments_),
-      Fallback(std::move(Fallback_)) {}
-
-void FallbackCommand::Print(raw_ostream &OS, const char *Terminator,
-                            bool Quote, CrashReportInfo *CrashInfo) const {
-  Command::Print(OS, "", Quote, CrashInfo);
-  OS << " ||";
-  Fallback->Print(OS, Terminator, Quote, CrashInfo);
-}
-
-static bool ShouldFallback(int ExitCode) {
-  // FIXME: We really just want to fall back for internal errors, such
-  // as when some symbol cannot be mangled, when we should be able to
-  // parse something but can't, etc.
-  return ExitCode != 0;
-}
-
-int FallbackCommand::Execute(const StringRef **Redirects, std::string *ErrMsg,
-                             bool *ExecutionFailed) const {
-  int PrimaryStatus = Command::Execute(Redirects, ErrMsg, ExecutionFailed);
-  if (!ShouldFallback(PrimaryStatus))
-    return PrimaryStatus;
-
-  // Clear ExecutionFailed and ErrMsg before falling back.
-  if (ErrMsg)
-    ErrMsg->clear();
+  // This flag simply indicates that the program couldn't start, which isn't
+  // applicable here.
   if (ExecutionFailed)
     *ExecutionFailed = false;
 
-  const Driver &D = getCreator().getToolChain().getDriver();
-  D.Diag(diag::warn_drv_invoking_fallback) << Fallback->getExecutable();
+  llvm::CrashRecoveryContext CRC;
+  CRC.DumpStackAndCleanupOnFailure = true;
 
-  int SecondaryStatus = Fallback->Execute(Redirects, ErrMsg, ExecutionFailed);
-  return SecondaryStatus;
+  const void *PrettyState = llvm::SavePrettyStackState();
+  const Driver &D = getCreator().getToolChain().getDriver();
+
+  int R = 0;
+  // Enter ExecuteCC1Tool() instead of starting up a new process
+  if (!CRC.RunSafely([&]() { R = D.CC1Main(Argv); })) {
+    llvm::RestorePrettyStackState(PrettyState);
+    return CRC.RetCode;
+  }
+  return R;
 }
 
-JobList::JobList() : Job(JobListClass) {}
+void CC1Command::setEnvironment(llvm::ArrayRef<const char *> NewEnvironment) {
+  // We don't support set a new environment when calling into ExecuteCC1Tool()
+  llvm_unreachable(
+      "The CC1Command doesn't support changing the environment vars!");
+}
+
+ForceSuccessCommand::ForceSuccessCommand(
+    const Action &Source_, const Tool &Creator_,
+    ResponseFileSupport ResponseSupport, const char *Executable_,
+    const llvm::opt::ArgStringList &Arguments_, ArrayRef<InputInfo> Inputs,
+    ArrayRef<InputInfo> Outputs)
+    : Command(Source_, Creator_, ResponseSupport, Executable_, Arguments_,
+              Inputs, Outputs) {}
+
+void ForceSuccessCommand::Print(raw_ostream &OS, const char *Terminator,
+                            bool Quote, CrashReportInfo *CrashInfo) const {
+  Command::Print(OS, "", Quote, CrashInfo);
+  OS << " || (exit 0)" << Terminator;
+}
+
+int ForceSuccessCommand::Execute(ArrayRef<llvm::Optional<StringRef>> Redirects,
+                                 std::string *ErrMsg,
+                                 bool *ExecutionFailed) const {
+  int Status = Command::Execute(Redirects, ErrMsg, ExecutionFailed);
+  (void)Status;
+  if (ExecutionFailed)
+    *ExecutionFailed = false;
+  return 0;
+}
 
 void JobList::Print(raw_ostream &OS, const char *Terminator, bool Quote,
                     CrashReportInfo *CrashInfo) const {

@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.17 2014/08/10 17:34:21 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:53 joerg Exp $
 
 LIB=	LLVMMC
 
@@ -8,51 +8,67 @@ LIB=	LLVMMC
 
 SRCS+=	ConstantPools.cpp \
 	ELFObjectWriter.cpp \
+	MachObjectWriter.cpp \
 	MCAsmBackend.cpp \
-	MCAsmInfo.cpp \
 	MCAsmInfoCOFF.cpp \
+	MCAsmInfo.cpp \
 	MCAsmInfoDarwin.cpp \
 	MCAsmInfoELF.cpp \
+	MCAsmInfoWasm.cpp \
+	MCAsmInfoXCOFF.cpp \
+	MCAsmMacro.cpp \
 	MCAsmStreamer.cpp \
 	MCAssembler.cpp \
-	MCCodeGenInfo.cpp \
 	MCCodeEmitter.cpp \
+	MCCodeView.cpp \
 	MCContext.cpp \
 	MCDwarf.cpp \
-	MCELF.cpp \
 	MCELFObjectTargetWriter.cpp \
 	MCELFStreamer.cpp \
 	MCExpr.cpp \
+	MCFragment.cpp \
 	MCInst.cpp \
-	MCInstrAnalysis.cpp \
 	MCInstPrinter.cpp \
+	MCInstrAnalysis.cpp \
+	MCInstrDesc.cpp \
+	MCInstrInfo.cpp \
 	MCLabel.cpp \
 	MCLinkerOptimizationHint.cpp \
-	MCMachOStreamer.cpp \
 	MCMachObjectTargetWriter.cpp \
+	MCMachOStreamer.cpp \
 	MCNullStreamer.cpp \
 	MCObjectFileInfo.cpp \
 	MCObjectStreamer.cpp \
 	MCObjectWriter.cpp \
+	MCPseudoProbe.cpp \
 	MCRegisterInfo.cpp \
-	MCSection.cpp \
+	MCSchedule.cpp \
 	MCSectionCOFF.cpp \
+	MCSection.cpp \
 	MCSectionELF.cpp \
 	MCSectionMachO.cpp \
+	MCSectionWasm.cpp \
+	MCSectionXCOFF.cpp \
 	MCStreamer.cpp \
 	MCSubtargetInfo.cpp \
-	MCSymbolizer.cpp \
 	MCSymbol.cpp \
+	MCSymbolELF.cpp \
+	MCSymbolXCOFF.cpp \
+	MCTargetOptionsCommandFlags.cpp \
 	MCTargetOptions.cpp \
 	MCValue.cpp \
+	MCWasmObjectTargetWriter.cpp \
+	MCWasmStreamer.cpp \
 	MCWin64EH.cpp \
+	MCWinCOFFStreamer.cpp \
 	MCWinEH.cpp \
-	MachObjectWriter.cpp \
-	WinCOFFStreamer.cpp \
-	WinCOFFObjectWriter.cpp \
+	MCXCOFFObjectTargetWriter.cpp \
+	MCXCOFFStreamer.cpp \
 	StringTableBuilder.cpp \
 	SubtargetFeature.cpp \
-	YAML.cpp
+	WasmObjectWriter.cpp \
+	WinCOFFObjectWriter.cpp \
+	XCOFFObjectWriter.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>

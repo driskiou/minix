@@ -1,14 +1,13 @@
 //===--- TargetCXXABI.h - C++ ABI Target Configuration ----------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief Defines the TargetCXXABI class, which abstracts details of the
+/// Defines the TargetCXXABI class, which abstracts details of the
 /// C++ ABI that we're targeting.
 ///
 //===----------------------------------------------------------------------===//
@@ -16,82 +15,22 @@
 #ifndef LLVM_CLANG_BASIC_TARGETCXXABI_H
 #define LLVM_CLANG_BASIC_TARGETCXXABI_H
 
+#include <map>
+
+#include "clang/Basic/LLVM.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/ErrorHandling.h"
 
 namespace clang {
 
-/// \brief The basic abstraction for the target C++ ABI.
+/// The basic abstraction for the target C++ ABI.
 class TargetCXXABI {
 public:
-  /// \brief The basic C++ ABI kind.
+  /// The basic C++ ABI kind.
   enum Kind {
-    /// The generic Itanium ABI is the standard ABI of most open-source
-    /// and Unix-like platforms.  It is the primary ABI targeted by
-    /// many compilers, including Clang and GCC.
-    ///
-    /// It is documented here:
-    ///   http://www.codesourcery.com/public/cxx-abi/
-    GenericItanium,
-
-    /// The generic ARM ABI is a modified version of the Itanium ABI
-    /// proposed by ARM for use on ARM-based platforms.
-    ///
-    /// These changes include:
-    ///   - the representation of member function pointers is adjusted
-    ///     to not conflict with the 'thumb' bit of ARM function pointers;
-    ///   - constructors and destructors return 'this';
-    ///   - guard variables are smaller;
-    ///   - inline functions are never key functions;
-    ///   - array cookies have a slightly different layout;
-    ///   - additional convenience functions are specified;
-    ///   - and more!
-    ///
-    /// It is documented here:
-    ///    http://infocenter.arm.com
-    ///                    /help/topic/com.arm.doc.ihi0041c/IHI0041C_cppabi.pdf
-    GenericARM,
-
-    /// The iOS ABI is a partial implementation of the ARM ABI.
-    /// Several of the features of the ARM ABI were not fully implemented
-    /// in the compilers that iOS was launched with.
-    ///
-    /// Essentially, the iOS ABI includes the ARM changes to:
-    ///   - member function pointers,
-    ///   - guard variables,
-    ///   - array cookies, and
-    ///   - constructor/destructor signatures.
-    iOS,
-
-    /// The iOS 64-bit ABI is follows ARM's published 64-bit ABI more
-    /// closely, but we don't guarantee to follow it perfectly.
-    ///
-    /// It is documented here:
-    ///    http://infocenter.arm.com
-    ///                  /help/topic/com.arm.doc.ihi0059a/IHI0059A_cppabi64.pdf
-    iOS64,
-
-    /// The generic AArch64 ABI is also a modified version of the Itanium ABI,
-    /// but it has fewer divergences than the 32-bit ARM ABI.
-    ///
-    /// The relevant changes from the generic ABI in this case are:
-    ///   - representation of member function pointers adjusted as in ARM.
-    ///   - guard variables  are smaller.
-    GenericAArch64,
-
-    /// The generic Mips ABI is a modified version of the Itanium ABI.
-    ///
-    /// At the moment, only change from the generic ABI in this case is:
-    ///   - representation of member function pointers adjusted as in ARM.
-    GenericMIPS,
-
-    /// The Microsoft ABI is the ABI used by Microsoft Visual Studio (and
-    /// compatible compilers).
-    ///
-    /// FIXME: should this be split into Win32 and Win64 variants?
-    ///
-    /// Only scattered and incomplete official documentation exists.
-    Microsoft
+#define CXXABI(Name, Str) Name,
+#include "TargetCXXABI.def"
   };
 
 private:
@@ -100,7 +39,31 @@ private:
   // audit the users to pass it by reference instead.
   Kind TheKind;
 
+  static const auto &getABIMap() {
+    static llvm::StringMap<Kind> ABIMap = {
+#define CXXABI(Name, Str) {Str, Name},
+#include "TargetCXXABI.def"
+    };
+    return ABIMap;
+  }
+
+  static const auto &getSpellingMap() {
+    static std::map<Kind, std::string> SpellingMap = {
+#define CXXABI(Name, Str) {Name, Str},
+#include "TargetCXXABI.def"
+    };
+    return SpellingMap;
+  }
+
 public:
+  static Kind getKind(StringRef Name) { return getABIMap().lookup(Name); }
+  static const auto &getSpelling(Kind ABIKind) {
+    return getSpellingMap().find(ABIKind)->second;
+  }
+  static bool isABI(StringRef Name) {
+    return getABIMap().find(Name) != getABIMap().end();
+  }
+
   /// A bogus initialization of the platform ABI.
   TargetCXXABI() : TheKind(GenericItanium) {}
 
@@ -112,45 +75,103 @@ public:
 
   Kind getKind() const { return TheKind; }
 
-  /// \brief Does this ABI generally fall into the Itanium family of ABIs?
+  // Check that the kind provided by the fc++-abi flag is supported on this
+  // target. Users who want to experiment using different ABIs on specific
+  // platforms can change this freely, but this function should be conservative
+  // enough such that not all ABIs are allowed on all platforms. For example, we
+  // probably don't want to allow usage of an ARM ABI on an x86 architecture.
+  static bool isSupportedCXXABI(const llvm::Triple &T, Kind Kind) {
+    switch (Kind) {
+    case GenericARM:
+      return T.isARM() || T.isAArch64();
+
+    case iOS:
+    case WatchOS:
+    case AppleARM64:
+      return T.isOSDarwin();
+
+    case Fuchsia:
+      return T.isOSFuchsia();
+
+    case GenericAArch64:
+      return T.isAArch64();
+
+    case GenericMIPS:
+      return T.isMIPS();
+
+    case WebAssembly:
+      return T.isWasm();
+
+    case XL:
+      return T.isOSAIX();
+
+    case GenericItanium:
+      return true;
+
+    case Microsoft:
+      return T.isKnownWindowsMSVCEnvironment();
+    }
+    llvm_unreachable("invalid CXXABI kind");
+  };
+
+  /// Does this ABI generally fall into the Itanium family of ABIs?
   bool isItaniumFamily() const {
     switch (getKind()) {
-    case GenericAArch64:
-    case GenericItanium:
-    case GenericARM:
-    case iOS:
-    case iOS64:
-    case GenericMIPS:
+#define CXXABI(Name, Str)
+#define ITANIUM_CXXABI(Name, Str) case Name:
+#include "TargetCXXABI.def"
       return true;
 
-    case Microsoft:
+    default:
       return false;
     }
     llvm_unreachable("bad ABI kind");
   }
 
-  /// \brief Is this ABI an MSVC-compatible ABI?
+  /// Is this ABI an MSVC-compatible ABI?
   bool isMicrosoft() const {
     switch (getKind()) {
-    case GenericAArch64:
-    case GenericItanium:
-    case GenericARM:
-    case iOS:
-    case iOS64:
-    case GenericMIPS:
-      return false;
-
-    case Microsoft:
+#define CXXABI(Name, Str)
+#define MICROSOFT_CXXABI(Name, Str) case Name:
+#include "TargetCXXABI.def"
       return true;
+
+    default:
+      return false;
     }
     llvm_unreachable("bad ABI kind");
   }
 
-  /// \brief Is the default C++ member function calling convention
-  /// the same as the default calling convention?
-  bool isMemberFunctionCCDefault() const {
-    // Right now, this is always false for Microsoft.
-    return !isMicrosoft();
+  /// Are member functions differently aligned?
+  ///
+  /// Many Itanium-style C++ ABIs require member functions to be aligned, so
+  /// that a pointer to such a function is guaranteed to have a zero in the
+  /// least significant bit, so that pointers to member functions can use that
+  /// bit to distinguish between virtual and non-virtual functions. However,
+  /// some Itanium-style C++ ABIs differentiate between virtual and non-virtual
+  /// functions via other means, and consequently don't require that member
+  /// functions be aligned.
+  bool areMemberFunctionsAligned() const {
+    switch (getKind()) {
+    case WebAssembly:
+      // WebAssembly doesn't require any special alignment for member functions.
+      return false;
+    case AppleARM64:
+    case Fuchsia:
+    case GenericARM:
+    case GenericAArch64:
+    case GenericMIPS:
+      // TODO: ARM-style pointers to member functions put the discriminator in
+      //       the this adjustment, so they don't require functions to have any
+      //       special alignment and could therefore also return false.
+    case GenericItanium:
+    case iOS:
+    case WatchOS:
+    case Microsoft:
+    case XL:
+      return true;
+    }
+    llvm_unreachable("bad ABI kind");
   }
 
   /// Are arguments to a call destroyed left to right in the callee?
@@ -164,28 +185,28 @@ public:
     return isMicrosoft();
   }
 
-  /// \brief Does this ABI have different entrypoints for complete-object
+  /// Does this ABI have different entrypoints for complete-object
   /// and base-subobject constructors?
   bool hasConstructorVariants() const {
     return isItaniumFamily();
   }
 
-  /// \brief Does this ABI allow virtual bases to be primary base classes?
+  /// Does this ABI allow virtual bases to be primary base classes?
   bool hasPrimaryVBases() const {
     return isItaniumFamily();
   }
 
-  /// \brief Does this ABI use key functions?  If so, class data such as the
+  /// Does this ABI use key functions?  If so, class data such as the
   /// vtable is emitted with strong linkage by the TU containing the key
   /// function.
   bool hasKeyFunctions() const {
     return isItaniumFamily();
   }
 
-  /// \brief Can an out-of-line inline function serve as a key function?
+  /// Can an out-of-line inline function serve as a key function?
   ///
   /// This flag is only useful in ABIs where type data (for example,
-  /// v-tables and type_info objects) are emitted only after processing
+  /// vtables and type_info objects) are emitted only after processing
   /// the definition of a special "key" virtual function.  (This is safe
   /// because the ODR requires that every virtual function be defined
   /// somewhere in a program.)  This usually permits such data to be
@@ -212,8 +233,11 @@ public:
   /// done on a generic Itanium platform.
   bool canKeyFunctionBeInline() const {
     switch (getKind()) {
+    case AppleARM64:
+    case Fuchsia:
     case GenericARM:
-    case iOS64:
+    case WebAssembly:
+    case WatchOS:
       return false;
 
     case GenericAArch64:
@@ -221,6 +245,7 @@ public:
     case iOS:   // old iOS compilers did not follow this rule
     case Microsoft:
     case GenericMIPS:
+    case XL:
       return true;
     }
     llvm_unreachable("bad ABI kind");
@@ -230,27 +255,18 @@ public:
   /// padding of a base class?
   ///
   /// This decision cannot be changed without breaking platform ABI
-  /// compatibility, and yet it is tied to language guarantees which
-  /// the committee has so far seen fit to strengthen no less than
-  /// three separate times:
-  ///   - originally, there were no restrictions at all;
-  ///   - C++98 declared that objects could not be allocated in the
-  ///     tail padding of a POD type;
-  ///   - C++03 extended the definition of POD to include classes
-  ///     containing member pointers; and
-  ///   - C++11 greatly broadened the definition of POD to include
-  ///     all trivial standard-layout classes.
-  /// Each of these changes technically took several existing
-  /// platforms and made them permanently non-conformant.
+  /// compatibility. In ISO C++98, tail padding reuse was only permitted for
+  /// non-POD base classes, but that restriction was removed retroactively by
+  /// DR 43, and tail padding reuse is always permitted in all de facto C++
+  /// language modes. However, many platforms use a variant of the old C++98
+  /// rule for compatibility.
   enum TailPaddingUseRules {
     /// The tail-padding of a base class is always theoretically
-    /// available, even if it's POD.  This is not strictly conforming
-    /// in any language mode.
+    /// available, even if it's POD.
     AlwaysUseTailPadding,
 
     /// Only allocate objects in the tail padding of a base class if
     /// the base class is not POD according to the rules of C++ TR1.
-    /// This is non-strictly conforming in C++11 mode.
     UseTailPaddingUnlessPOD03,
 
     /// Only allocate objects in the tail padding of a base class if
@@ -261,17 +277,21 @@ public:
     switch (getKind()) {
     // To preserve binary compatibility, the generic Itanium ABI has
     // permanently locked the definition of POD to the rules of C++ TR1,
-    // and that trickles down to all the derived ABIs.
+    // and that trickles down to derived ABIs.
     case GenericItanium:
     case GenericAArch64:
     case GenericARM:
     case iOS:
     case GenericMIPS:
+    case XL:
       return UseTailPaddingUnlessPOD03;
 
-    // iOS on ARM64 uses the C++11 POD rules.  It does not honor the
-    // Itanium exception about classes with over-large bitfields.
-    case iOS64:
+    // AppleARM64 and WebAssembly use the C++11 POD rules.  They do not honor
+    // the Itanium exception about classes with over-large bitfields.
+    case AppleARM64:
+    case Fuchsia:
+    case WebAssembly:
+    case WatchOS:
       return UseTailPaddingUnlessPOD11;
 
     // MSVC always allocates fields in the tail-padding of a base class
@@ -281,9 +301,6 @@ public:
     }
     llvm_unreachable("bad ABI kind");
   }
-
-  /// Try to parse an ABI name, returning false on error.
-  bool tryParse(llvm::StringRef name);
 
   friend bool operator==(const TargetCXXABI &left, const TargetCXXABI &right) {
     return left.getKind() == right.getKind();

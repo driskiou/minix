@@ -1,9 +1,8 @@
 //===--- ScratchBuffer.cpp - Scratch space for forming tokens -------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -35,6 +34,14 @@ SourceLocation ScratchBuffer::getToken(const char *Buf, unsigned Len,
                                        const char *&DestPtr) {
   if (BytesUsed+Len+2 > ScratchBufSize)
     AllocScratchBuffer(Len+2);
+  else {
+    // Clear out the source line cache if it's already been computed.
+    // FIXME: Allow this to be incrementally extended.
+    SourceMgr.getSLocEntry(SourceMgr.getFileID(BufferStartLoc))
+        .getFile()
+        .getContentCache()
+        .SourceLineCache = SrcMgr::LineOffsetMapping();
+  }
 
   // Prefix the token with a \n, so that it looks like it is the first thing on
   // its own virtual line in caret diagnostics.
@@ -64,12 +71,13 @@ void ScratchBuffer::AllocScratchBuffer(unsigned RequestLen) {
   if (RequestLen < ScratchBufSize)
     RequestLen = ScratchBufSize;
 
-  std::unique_ptr<llvm::MemoryBuffer> OwnBuf =
-      llvm::MemoryBuffer::getNewMemBuffer(RequestLen, "<scratch space>");
-  llvm::MemoryBuffer &Buf = *OwnBuf;
+  // Get scratch buffer. Zero-initialize it so it can be dumped into a PCH file
+  // deterministically.
+  std::unique_ptr<llvm::WritableMemoryBuffer> OwnBuf =
+      llvm::WritableMemoryBuffer::getNewMemBuffer(RequestLen,
+                                                  "<scratch space>");
+  CurBuffer = OwnBuf->getBufferStart();
   FileID FID = SourceMgr.createFileID(std::move(OwnBuf));
   BufferStartLoc = SourceMgr.getLocForStartOfFile(FID);
-  CurBuffer = const_cast<char*>(Buf.getBufferStart());
-  BytesUsed = 1;
-  CurBuffer[0] = '0';  // Start out with a \0 for cleanliness.
+  BytesUsed = 0;
 }

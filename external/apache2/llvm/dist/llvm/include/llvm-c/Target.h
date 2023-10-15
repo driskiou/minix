@@ -1,9 +1,9 @@
 /*===-- llvm-c/Target.h - Target Lib C Iface --------------------*- C++ -*-===*/
 /*                                                                            */
-/*                     The LLVM Compiler Infrastructure                       */
-/*                                                                            */
-/* This file is distributed under the University of Illinois Open Source      */
-/* License. See LICENSE.TXT for details.                                      */
+/* Part of the LLVM Project, under the Apache License v2.0 with LLVM          */
+/* Exceptions.                                                                */
+/* See https://llvm.org/LICENSE.txt for license information.                  */
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    */
 /*                                                                            */
 /*===----------------------------------------------------------------------===*/
 /*                                                                            */
@@ -19,16 +19,11 @@
 #ifndef LLVM_C_TARGET_H
 #define LLVM_C_TARGET_H
 
-#include "llvm-c/Core.h"
+#include "llvm-c/ExternC.h"
+#include "llvm-c/Types.h"
 #include "llvm/Config/llvm-config.h"
 
-#if defined(_MSC_VER) && !defined(inline)
-#define inline __inline
-#endif
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+LLVM_C_EXTERN_C_BEGIN
 
 /**
  * @defgroup LLVMCTarget Target information
@@ -183,14 +178,27 @@ static inline LLVMBool LLVMInitializeNativeDisassembler(void) {
 
 /*===-- Target Data -------------------------------------------------------===*/
 
+/**
+ * Obtain the data layout for a module.
+ *
+ * @see Module::getDataLayout()
+ */
+LLVMTargetDataRef LLVMGetModuleDataLayout(LLVMModuleRef M);
+
+/**
+ * Set the data layout for a module.
+ *
+ * @see Module::setDataLayout()
+ */
+void LLVMSetModuleDataLayout(LLVMModuleRef M, LLVMTargetDataRef DL);
+
 /** Creates target data from a target layout string.
     See the constructor llvm::DataLayout::DataLayout. */
 LLVMTargetDataRef LLVMCreateTargetData(const char *StringRep);
 
-/** Adds target data information to a pass manager. This does not take ownership
-    of the target data.
-    See the method llvm::PassManagerBase::add. */
-void LLVMAddTargetData(LLVMTargetDataRef TD, LLVMPassManagerRef PM);
+/** Deallocates a TargetData.
+    See the destructor llvm::DataLayout::~DataLayout. */
+void LLVMDisposeTargetData(LLVMTargetDataRef TD);
 
 /** Adds target library information to a pass manager. This does not take
     ownership of the target library info.
@@ -275,16 +283,10 @@ unsigned LLVMElementAtOffset(LLVMTargetDataRef TD, LLVMTypeRef StructTy,
 unsigned long long LLVMOffsetOfElement(LLVMTargetDataRef TD,
                                        LLVMTypeRef StructTy, unsigned Element);
 
-/** Deallocates a TargetData.
-    See the destructor llvm::DataLayout::~DataLayout. */
-void LLVMDisposeTargetData(LLVMTargetDataRef TD);
-
 /**
  * @}
  */
 
-#ifdef __cplusplus
-}
-#endif /* defined(__cplusplus) */
+LLVM_C_EXTERN_C_END
 
 #endif

@@ -1,9 +1,8 @@
 //===-- ConstantFolding.h - Internal Constant Folding Interface -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,9 +18,10 @@
 #ifndef LLVM_LIB_IR_CONSTANTFOLD_H
 #define LLVM_LIB_IR_CONSTANTFOLD_H
 
-#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/Optional.h"
 
 namespace llvm {
+template <typename T> class ArrayRef;
   class Value;
   class Constant;
   class Type;
@@ -38,18 +38,18 @@ namespace llvm {
   Constant *ConstantFoldInsertElementInstruction(Constant *Val, Constant *Elt,
                                                  Constant *Idx);
   Constant *ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
-                                                 Constant *Mask);
+                                                 ArrayRef<int> Mask);
   Constant *ConstantFoldExtractValueInstruction(Constant *Agg,
                                                 ArrayRef<unsigned> Idxs);
   Constant *ConstantFoldInsertValueInstruction(Constant *Agg, Constant *Val,
                                                ArrayRef<unsigned> Idxs);
+  Constant *ConstantFoldUnaryInstruction(unsigned Opcode, Constant *V);
   Constant *ConstantFoldBinaryInstruction(unsigned Opcode, Constant *V1,
                                           Constant *V2);
-  Constant *ConstantFoldCompareInstruction(unsigned short predicate, 
+  Constant *ConstantFoldCompareInstruction(unsigned short predicate,
                                            Constant *C1, Constant *C2);
-  Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
-                                      ArrayRef<Constant *> Idxs);
-  Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
+  Constant *ConstantFoldGetElementPtr(Type *Ty, Constant *C, bool InBounds,
+                                      Optional<unsigned> InRangeIndex,
                                       ArrayRef<Value *> Idxs);
 } // End llvm namespace
 

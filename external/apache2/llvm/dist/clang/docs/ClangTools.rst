@@ -9,22 +9,9 @@ functionality such as fast syntax checking, automatic formatting,
 refactoring, etc.
 
 Only a couple of the most basic and fundamental tools are kept in the
-primary Clang Subversion project. The rest of the tools are kept in a
-side-project so that developers who don't want or need to build them
-don't. If you want to get access to the extra Clang Tools repository,
-simply check it out into the tools tree of your Clang checkout and
-follow the usual process for building and working with a combined
-LLVM/Clang checkout:
-
--  With Subversion:
-
-   -  ``cd llvm/tools/clang/tools``
-   -  ``svn co http://llvm.org/svn/llvm-project/clang-tools-extra/trunk extra``
-
--  Or with Git:
-
-   -  ``cd llvm/tools/clang/tools``
-   -  ``git clone http://llvm.org/git/clang-tools-extra.git extra``
+primary Clang tree. The rest of the tools are kept in a separate
+directory tree, `clang-tools-extra
+<https://github.com/llvm/llvm-project/tree/main/clang-tools-extra>`_.
 
 This document describes a high-level overview of the organization of
 Clang Tools within the project as well as giving an introduction to some
@@ -82,7 +69,7 @@ fixit-hints offered by clang. See :doc:`HowToSetupToolingForLLVM` for
 instructions on how to setup and used `clang-check`.
 
 ``clang-format``
-~~~~~~~~~~~~~~~~
+----------------
 
 Clang-format is both a :doc:`library <LibFormat>` and a :doc:`stand-alone tool
 <ClangFormat>` with the goal of automatically reformatting C++ sources files
@@ -93,18 +80,6 @@ as a user tool (ideally with powerful IDE integrations) and as part of other
 refactoring tools, e.g. to do a reformatting of all the lines changed during a
 renaming.
 
-``clang-modernize``
-~~~~~~~~~~~~~~~~~~~
-``clang-modernize`` migrates C++ code to use C++11 features where appropriate.
-Currently it can:
-
-* convert loops to range-based for loops;
-
-* convert null pointer constants (like ``NULL`` or ``0``) to C++11 ``nullptr``;
-
-* replace the type specifier in variable declarations with the ``auto`` type specifier;
-
-* add the ``override`` specifier to applicable member functions.
 
 Extra Clang Tools
 =================
@@ -113,6 +88,15 @@ As various categories of Clang Tools are added to the extra repository,
 they'll be tracked here. The focus of this documentation is on the scope
 and features of the tools for other tool developers; each tool should
 provide its own user-focused documentation.
+
+``clang-tidy``
+--------------
+
+`clang-tidy <https://clang.llvm.org/extra/clang-tidy/>`_ is a clang-based C++
+linter tool. It provides an extensible framework for building compiler-based
+static analyses detecting and fixing bug-prone patterns, performance,
+portability and maintainability issues.
+
 
 Ideas for new Tools
 ===================
@@ -124,27 +108,6 @@ Ideas for new Tools
   ``foo.begin()`` into ``begin(foo)`` and similarly for ``end()``, where
   ``foo`` is a standard container.  We could also detect similar patterns for
   arrays.
-* ``make_shared`` / ``make_unique`` conversion.  Part of this transformation
-  can be incorporated into the ``auto`` transformation.  Will convert
-
-  .. code-block:: c++
-
-    std::shared_ptr<Foo> sp(new Foo);
-    std::unique_ptr<Foo> up(new Foo);
-
-    func(std::shared_ptr<Foo>(new Foo), bar());
-
-  into:
-
-  .. code-block:: c++
-
-    auto sp = std::make_shared<Foo>();
-    auto up = std::make_unique<Foo>(); // In C++14 mode.
-
-    // This also affects correctness.  For the cases where bar() throws,
-    // make_shared() is safe and the original code may leak.
-    func(std::make_shared<Foo>(), bar());
-
 * ``tr1`` removal tool.  Will migrate source code from using TR1 library
   features to C++11 library.  For example:
 

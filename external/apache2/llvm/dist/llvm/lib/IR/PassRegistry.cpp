@@ -1,9 +1,8 @@
 //===- PassRegistry.cpp - Pass Registration Implementation ----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,12 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/PassRegistry.h"
-#include "llvm/IR/Function.h"
-#include "llvm/PassSupport.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Pass.h"
+#include "llvm/PassInfo.h"
 #include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/RWMutex.h"
-#include <vector>
+#include <cassert>
+#include <memory>
+#include <utility>
 
 using namespace llvm;
 
@@ -36,18 +36,16 @@ PassRegistry *PassRegistry::getPassRegistry() {
 // Accessors
 //
 
-PassRegistry::~PassRegistry() {}
+PassRegistry::~PassRegistry() = default;
 
 const PassInfo *PassRegistry::getPassInfo(const void *TI) const {
   sys::SmartScopedReader<true> Guard(Lock);
-  MapType::const_iterator I = PassInfoMap.find(TI);
-  return I != PassInfoMap.end() ? I->second : nullptr;
+  return PassInfoMap.lookup(TI);
 }
 
 const PassInfo *PassRegistry::getPassInfo(StringRef Arg) const {
   sys::SmartScopedReader<true> Guard(Lock);
-  StringMapType::const_iterator I = PassInfoStringMap.find(Arg);
-  return I != PassInfoStringMap.end() ? I->second : nullptr;
+  return PassInfoStringMap.lookup(Arg);
 }
 
 //===----------------------------------------------------------------------===//
@@ -108,8 +106,6 @@ void PassRegistry::registerAnalysisGroup(const void *InterfaceID,
           ImplementationInfo->getNormalCtor() &&
           "Cannot specify pass as default if it does not have a default ctor");
       InterfaceInfo->setNormalCtor(ImplementationInfo->getNormalCtor());
-      InterfaceInfo->setTargetMachineCtor(
-          ImplementationInfo->getTargetMachineCtor());
     }
   }
 
@@ -125,6 +121,6 @@ void PassRegistry::addRegistrationListener(PassRegistrationListener *L) {
 void PassRegistry::removeRegistrationListener(PassRegistrationListener *L) {
   sys::SmartScopedWriter<true> Guard(Lock);
 
-  auto I = std::find(Listeners.begin(), Listeners.end(), L);
+  auto I = llvm::find(Listeners, L);
   Listeners.erase(I);
 }

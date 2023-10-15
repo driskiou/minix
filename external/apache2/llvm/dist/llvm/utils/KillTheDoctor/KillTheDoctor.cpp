@@ -1,9 +1,8 @@
 //===- KillTheDoctor - Prevent Dr. Watson from stopping tests ---*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -38,6 +37,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/WindowsError.h"
@@ -51,9 +51,9 @@
 #include <system_error>
 
 // These includes must be last.
-#include <Windows.h>
-#include <WinError.h>
-#include <Dbghelp.h>
+#include <windows.h>
+#include <winerror.h>
+#include <dbghelp.h>
 #include <psapi.h>
 
 using namespace llvm;
@@ -217,7 +217,7 @@ static std::error_code GetFileNameFromHandle(HANDLE FileHandle,
   }
 }
 
-/// @brief Find program using shell lookup rules.
+/// Find program using shell lookup rules.
 /// @param Program This is either an absolute path, relative path, or simple a
 ///        program name. Look in PATH for any programs that match. If no
 ///        extension is present, try all extensions in PATHEXT.
@@ -295,7 +295,7 @@ static StringRef ExceptionCodeToString(DWORD ExceptionCode) {
 
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
 
@@ -327,18 +327,16 @@ int main(int argc, char **argv) {
   if (TraceExecution)
     errs() << ToolName << ": Found Program: " << ProgramToRun << '\n';
 
-  for (std::vector<std::string>::iterator i = Argv.begin(),
-                                          e = Argv.end();
-                                          i != e; ++i) {
+  for (const std::string &Arg : Argv) {
     CommandLine.push_back(' ');
-    CommandLine.append(*i);
+    CommandLine.append(Arg);
   }
 
   if (TraceExecution)
     errs() << ToolName << ": Program Image Path: " << ProgramToRun << '\n'
            << ToolName << ": Command Line: " << CommandLine << '\n';
 
-  STARTUPINFO StartupInfo;
+  STARTUPINFOA StartupInfo;
   PROCESS_INFORMATION ProcessInfo;
   std::memset(&StartupInfo, 0, sizeof(StartupInfo));
   StartupInfo.cb = sizeof(StartupInfo);
@@ -350,7 +348,7 @@ int main(int argc, char **argv) {
   ::_set_error_mode(_OUT_TO_STDERR);
 
   BOOL success = ::CreateProcessA(ProgramToRun.c_str(),
-                            LPSTR(CommandLine.c_str()),
+                                  const_cast<LPSTR>(CommandLine.c_str()),
                                   NULL,
                                   NULL,
                                   FALSE,

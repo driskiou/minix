@@ -1,9 +1,8 @@
 //===- CXComment.cpp - libclang APIs for manipulating CXComments ----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,23 +10,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang-c/Index.h"
 #include "CXComment.h"
 #include "CXCursor.h"
 #include "CXString.h"
 #include "clang-c/Documentation.h"
+#include "clang-c/Index.h"
 #include "clang/AST/Decl.h"
 #include "clang/Index/CommentToXML.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <climits>
 
 using namespace clang;
 using namespace clang::comments;
 using namespace clang::cxcomment;
-
-extern "C" {
 
 CXComment clang_Cursor_getParsedComment(CXCursor C) {
   using namespace clang::cxcursor;
@@ -163,6 +159,9 @@ clang_InlineCommandComment_getRenderKind(CXComment CXC) {
 
   case InlineCommandComment::RenderEmphasized:
     return CXCommentInlineCommandRenderKind_Emphasized;
+
+  case InlineCommandComment::RenderAnchor:
+    return CXCommentInlineCommandRenderKind_Anchor;
   }
   llvm_unreachable("unknown InlineCommandComment::RenderKind");
 }
@@ -406,6 +405,4 @@ CXString clang_FullComment_getAsXML(CXComment CXC) {
       ->convertCommentToXML(FC, XML, cxtu::getASTUnit(TU)->getASTContext());
   return cxstring::createDup(XML.str());
 }
-
-} // end extern "C"
 

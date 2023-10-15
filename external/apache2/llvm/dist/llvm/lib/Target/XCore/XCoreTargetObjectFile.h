@@ -1,9 +1,8 @@
 //===-- XCoreTargetObjectFile.h - XCore Object Info -------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,25 +16,23 @@ namespace llvm {
 static const unsigned CodeModelLargeSize = 256;
 
   class XCoreTargetObjectFile : public TargetLoweringObjectFileELF {
-   const MCSection *BSSSectionLarge;
-   const MCSection *DataSectionLarge;
-   const MCSection *ReadOnlySectionLarge;
-   const MCSection *DataRelROSectionLarge;
+    MCSection *BSSSectionLarge;
+    MCSection *DataSectionLarge;
+    MCSection *ReadOnlySectionLarge;
+    MCSection *DataRelROSectionLarge;
+
   public:
     void Initialize(MCContext &Ctx, const TargetMachine &TM) override;
 
-    const MCSection *
-      getExplicitSectionGlobal(const GlobalValue *GV,
-                               SectionKind Kind, Mangler &Mang,
-                               const TargetMachine &TM) const override;
+    MCSection *getExplicitSectionGlobal(const GlobalObject *GO, SectionKind Kind,
+                                        const TargetMachine &TM) const override;
 
-    const MCSection *
-      SelectSectionForGlobal(const GlobalValue *GV, SectionKind Kind,
-                             Mangler &Mang,
-                             const TargetMachine &TM) const override;
+    MCSection *SelectSectionForGlobal(const GlobalObject *GO, SectionKind Kind,
+                                      const TargetMachine &TM) const override;
 
-    const MCSection *getSectionForConstant(SectionKind Kind,
-                                           const Constant *C) const override;
+    MCSection *getSectionForConstant(const DataLayout &DL, SectionKind Kind,
+                                     const Constant *C,
+                                     Align &Alignment) const override;
   };
 } // end namespace llvm
 

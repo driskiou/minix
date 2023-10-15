@@ -1,32 +1,42 @@
-=======================
-Clang 3.6 Release Notes
-=======================
+========================================
+Clang 13.0.0 (In-Progress) Release Notes
+========================================
 
 .. contents::
    :local:
    :depth: 2
 
-Written by the `LLVM Team <http://llvm.org/>`_
+Written by the `LLVM Team <https://llvm.org/>`_
+
+.. warning::
+
+   These are in-progress notes for the upcoming Clang 13 release.
+   Release notes for previous releases can be found on
+   `the Download Page <https://releases.llvm.org/download.html>`_.
 
 Introduction
 ============
 
 This document contains the release notes for the Clang C/C++/Objective-C
-frontend, part of the LLVM Compiler Infrastructure, release 3.6. Here we
+frontend, part of the LLVM Compiler Infrastructure, release 13.0.0. Here we
 describe the status of Clang in some detail, including major
 improvements from the previous release and new feature work. For the
 general LLVM release notes, see `the LLVM
-documentation <http://llvm.org/releases/3.6.0/docs/ReleaseNotes.html>`_.
-All LLVM releases may be downloaded from the `LLVM releases web
-site <http://llvm.org/releases/>`_.
+documentation <https://llvm.org/docs/ReleaseNotes.html>`_. All LLVM
+releases may be downloaded from the `LLVM releases web
+site <https://llvm.org/releases/>`_.
 
-For more information about Clang or LLVM, including information about
-the latest release, please check out the main please see the `Clang Web
-Site <http://clang.llvm.org>`_ or the `LLVM Web
-Site <http://llvm.org>`_.
+For more information about Clang or LLVM, including information about the
+latest release, please see the `Clang Web Site <https://clang.llvm.org>`_ or the
+`LLVM Web Site <https://llvm.org>`_.
 
-What's New in Clang 3.6?
-========================
+Note that if you are reading this file from a Git checkout or the
+main Clang web page, this document applies to the *next* release, not
+the current one. To see the release notes for a specific release, please
+see the `releases page <https://llvm.org/releases/>`_.
+
+What's New in Clang 13.0.0?
+===========================
 
 Some of the major new features and improvements to Clang are listed
 here. Generic improvements to Clang as a whole or to its underlying
@@ -36,182 +46,256 @@ sections with improvements to Clang's support for those languages.
 Major New Features
 ------------------
 
-- The __has_attribute built-in macro no longer queries for attributes across
-  multiple attribute syntaxes (GNU, C++11, __declspec, etc). Instead, it only
-  queries GNU-style attributes. With the addition of __has_cpp_attribute and
-  __has_declspec_attribute, this allows for more precise coverage of attribute
-  syntax querying.
-
-- clang-format now supports formatting Java code.
-
+- Guaranteed tail calls are now supported with statement attributes
+  ``[[clang::musttail]]`` in C++ and ``__attribute__((musttail))`` in C. The
+  attribute is applied to a return statement (not a function declaration),
+  and an error is emitted if a tail call cannot be guaranteed, for example if
+  the function signatures of caller and callee are not compatible. Guaranteed
+  tail calls enable a class of algorithms that would otherwise use an
+  arbitrary amount of stack space.
 
 Improvements to Clang's diagnostics
------------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Clang's diagnostics are constantly being improved to catch more issues,
-explain them more clearly, and provide more accurate source information
-about them. The improvements since the 3.5 release include:
+- ...
 
-- Smarter typo correction. Clang now tries a bit harder to give a usable
-  suggestion in more cases, and can now successfully recover in more
-  situations where the suggestion changes how an expression is parsed.
+Non-comprehensive list of changes in this release
+-------------------------------------------------
 
+- ...
 
 New Compiler Flags
 ------------------
 
-The ``-fpic`` option now uses small pic on PowerPC.
+- ``-Wreserved-identifier`` emits warning when user code uses reserved
+  identifiers.
 
+- ``-fstack-usage`` generates an extra .su file per input source file. The .su
+  file contains frame size information for each function defined in the source
+  file.
 
-The __EXCEPTIONS macro
-----------------------
-``__EXCEPTIONS`` is now defined when landing pads are emitted, not when
-C++ exceptions are enabled. The two can be different in Objective-C files:
-If C++ exceptions are disabled but Objective-C exceptions are enabled,
-landing pads will be emitted. Clang 3.6 is switching the behavior of
-``__EXCEPTIONS``. Clang 3.5 confusingly changed the behavior of
-``has_feature(cxx_exceptions)``, which used to be set if landing pads were
-emitted, but is now set if C++ exceptions are enabled. So there are 3 cases:
+Deprecated Compiler Flags
+-------------------------
 
-Clang before 3.5:
-   ``__EXCEPTIONS`` is set if C++ exceptions are enabled, ``cxx_exceptions``
-   enabled if C++ or ObjC exceptions are enabled
+- ...
 
-Clang 3.5:
-   ``__EXCEPTIONS`` is set if C++ exceptions are enabled, ``cxx_exceptions``
-   enabled if C++ exceptions are enabled
-
-Clang 3.6:
-   ``__EXCEPTIONS`` is set if C++ or ObjC exceptions are enabled,
-   ``cxx_exceptions`` enabled if C++ exceptions are enabled
-
-To reliably test if C++ exceptions are enabled, use
-``__EXCEPTIONS && __has_feature(cxx_exceptions)``, else things won't work in
-all versions of Clang in Objective-C++ files.
-
-
-New Pragmas in Clang
+Modified Compiler Flags
 -----------------------
 
-Clang now supports the `#pragma unroll` and `#pragma nounroll` directives to
-specify loop unrolling optimization hints.  Placed just prior to the desired
-loop, `#pragma unroll` directs the loop unroller to attempt to fully unroll the
-loop.  The pragma may also be specified with a positive integer parameter
-indicating the desired unroll count: `#pragma unroll _value_`.  The unroll count
-parameter can be optionally enclosed in parentheses. The directive `#pragma
-nounroll` indicates that the loop should not be unrolled.  These unrolling hints
-may also be expressed using the `#pragma clang loop` directive.  See the Clang
-`language extensions
-<http://clang.llvm.org/docs/LanguageExtensions.html#extensions-for-loop-hint-optimizations>`_
-for details.
+- -Wshadow now also checks for shadowed structured bindings
+- ``-B <prefix>`` (when ``<prefix>`` is a directory) was overloaded to additionally
+  detect GCC installations under ``<prefix>`` (``lib{,32,64}/gcc{,-cross}/$triple``).
+  This behavior was incompatible with GCC, caused interop issues with
+  ``--gcc-toolchain``, and was thus dropped. Specify ``--gcc-toolchain=<dir>``
+  instead. ``-B``'s other GCC-compatible semantics are preserved:
+  ``$prefix/$triple-$file`` and ``$prefix$file`` are searched for executables,
+  libraries, includes, and data files used by the compiler.
+
+Removed Compiler Flags
+-------------------------
+
+- The clang-cl ``/fallback`` flag, which made clang-cl invoke Microsoft Visual
+  C++ on files it couldn't compile itself, has been removed.
+
+- ``-Wreturn-std-move-in-c++11``, which checked whether an entity is affected by
+  `CWG1579 <https://wg21.link/CWG1579>`_ to become implicitly movable, has been
+  removed.
+
+New Pragmas in Clang
+--------------------
+
+- ...
+
+Attribute Changes in Clang
+--------------------------
+
+- ...
 
 Windows Support
 ---------------
 
-- Many, many bug fixes.
-
-- Clang can now self-host using the ``msvc`` environment on x86 and x64
-  Windows. This means that Microsoft C++ ABI is more or less feature-complete,
-  minus exception support.
-
-- Added more MSVC compatibility hacks, such as allowing more lookup into
-  dependent bases of class templates when there is a known template pattern.
-  As a result, applications using Active Template Library (ATL) or Windows
-  Runtime Library (WRL) headers should compile correctly.
-
-- Added support for the Visual C++ ``__super`` keyword.
-
-- Added support for MSVC's ``__vectorcall`` calling convention, which is used
-  in the upcoming Visual Studio 2015 STL.
-
-- Added basic support for DWARF debug information in COFF files.
-
-
 C Language Changes in Clang
 ---------------------------
 
-- The default language mode for C compilations with Clang has been changed from
-  C99 with GNU extensions to C11 with GNU extensions. C11 is largely
-  backwards-compatible with C99, but if you want to restore the former behavior
-  you can do so with the `-std=gnu99` flag.
-
-C11 Feature Support
-^^^^^^^^^^^^^^^^^^^
-
-- Clang now provides an implementation of the standard C11 header `<stdatomic.h>`.
+- ...
 
 C++ Language Changes in Clang
 -----------------------------
 
-- An `upcoming change to C++ <http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3922.html>_`
-  changes the semantics of certain deductions of `auto` from a braced initializer
-  list. Following the intent of the C++ committee, this change will be applied to
-  our C++11 and C++14 modes as well as our experimental C++17 mode. Clang 3.6
-  does not yet implement this change, but to provide a transition period, it
-  warns on constructs whose meaning will change. The fix in all cases is to
-  add an `=` prior to the left brace.
+- The oldest supported GNU libstdc++ is now 4.8.3 (released 2014-05-22).
+  Clang workarounds for bugs in earlier versions have been removed.
 
-- Clang now supports putting identical constructors and destructors in
-  the C5/D5 comdat, reducing code duplication.
+- ...
 
-- Clang will put individual ``.init_array/.ctors`` sections in
-  comdats, reducing code duplication and speeding up startup.
-
-
-C++17 Feature Support
+C++20 Feature Support
 ^^^^^^^^^^^^^^^^^^^^^
+...
 
-Clang has experimental support for some proposed C++1z (tentatively, C++17)
-features. This support can be enabled using the `-std=c++1z` flag.
+C++2b Feature Support
+^^^^^^^^^^^^^^^^^^^^^
+...
 
-New in Clang 3.6 is support for:
+Objective-C Language Changes in Clang
+-------------------------------------
 
-- Fold expressions
+OpenCL C Language Changes in Clang
+----------------------------------
 
-- `u8` character literals
+...
 
-- Nested namespace definitions: `namespace A::B { ... }` as a shorthand for
-  `namespace A { namespace B { ... } }`
+ABI Changes in Clang
+--------------------
 
-- Attributes for namespaces and enumerators
+OpenMP Support in Clang
+-----------------------
 
-- Constant evaluation for all non-type template arguments
+- ...
 
-Note that these features may be changed or removed in future Clang releases
-without notice.
+CUDA Support in Clang
+---------------------
 
-Support for `for (identifier : range)` as a synonym for
-`for (auto &&identifier : range)` has been removed as it is no longer currently
-considered for C++17.
+- ...
 
-For more details on C++ feature support, see
-`the C++ status page <http://clang.llvm.org/cxx_status.html>`_.
+X86 Support in Clang
+--------------------
 
+- ...
 
-OpenMP Language Changes in Clang
---------------------------------
+Internal API Changes
+--------------------
 
-Clang 3.6 contains codegen for many individual OpenMP pragmas, but combinations are not completed yet.
-We plan to continue codegen code drop aiming for completion in 3.7. Please see this link for up-to-date
-`status <https://github.com/clang-omp/clang/wiki/Status-of-supported-OpenMP-constructs>_`.
-LLVM's OpenMP runtime library, originally developed by Intel, has been modified to work on ARM, PowerPC,
-as well as X86. The Runtime Library's compatibility with GCC 4.9 is improved
-- missed entry points added, barrier and fork/join code improved, one more type of barrier enabled.
-Support for ppc64le architecture is now available and automatically detected when using cmake system.
-Using makefile the new "ppc64le" arch type is available.
-Contributors to this work include AMD, Argonne National Lab., IBM, Intel, Texas Instruments, University of Houston and many others.
+These are major API changes that have happened since the 12.0.0 release of
+Clang. If upgrading an external codebase that uses Clang as a library,
+this section should help get you past the largest hurdles of upgrading.
 
+- ...
+
+Build System Changes
+--------------------
+
+These are major changes to the build system that have happened since the 12.0.0
+release of Clang. Users of the build system should adjust accordingly.
+
+- The option ``LIBCLANG_INCLUDE_CLANG_TOOLS_EXTRA`` no longer exists. There were
+  two releases with that flag forced off, and no uses were added that forced it
+  on. The recommended replacement is clangd.
+
+- ...
+
+AST Matchers
+------------
+
+- ...
+
+clang-format
+------------
+
+- Option ``SpacesInLineCommentPrefix`` has been added to control the
+  number of spaces in a line comments prefix.
+
+- Option ``SortIncludes`` has been updated from a ``bool`` to an
+  ``enum`` with backwards compatibility. In addition to the previous
+  ``true``/``false`` states (now ``CaseSensitive``/``Never``), a third
+  state has been added (``CaseInsensitive``) which causes an alphabetical sort
+  with case used as a tie-breaker.
+
+  .. code-block:: c++
+
+    // Never (previously false)
+    #include "B/A.h"
+    #include "A/B.h"
+    #include "a/b.h"
+    #include "A/b.h"
+    #include "B/a.h"
+
+    // CaseSensitive (previously true)
+    #include "A/B.h"
+    #include "A/b.h"
+    #include "B/A.h"
+    #include "B/a.h"
+    #include "a/b.h"
+
+    // CaseInsensitive
+    #include "A/B.h"
+    #include "A/b.h"
+    #include "a/b.h"
+    #include "B/A.h"
+    #include "B/a.h"
+
+- ``BasedOnStyle: InheritParentConfig`` allows to use the ``.clang-format`` of
+  the parent directories to overwrite only parts of it.
+
+- Option ``IndentAccessModifiers`` has been added to be able to give access
+  modifiers their own indentation level inside records.
+
+- Option ``ShortNamespaceLines`` has been added to give better control
+  over ``FixNamespaceComments`` when determining a namespace length.
+
+- Support for Whitesmiths has been improved, with fixes for ``namespace`` blocks
+  and ``case`` blocks and labels.
+
+- Option ``EmptyLineAfterAccessModifier`` has been added to remove, force or keep
+  new lines after access modifiers.
+
+- Checks for newlines in option ``EmptyLineBeforeAccessModifier`` are now based
+  on the formatted new lines and not on the new lines in the file. (Fixes
+  https://llvm.org/PR41870.)
+
+- Option ``SpacesInAngles`` has been improved, it now accepts ``Leave`` value
+  that allows to keep spaces where they are already present.
+
+- Option ``AllowShortIfStatementsOnASingleLine`` has been improved, it now
+  accepts ``AllIfsAndElse`` value that allows to put "else if" and "else" short
+  statements on a single line. (Fixes https://llvm.org/PR50019.)
+
+- ``git-clang-format`` no longer formats changes to symbolic links. (Fixes
+  https://llvm.org/PR46992.)
+
+libclang
+--------
+
+- ...
+
+Static Analyzer
+---------------
+
+- ...
+
+.. _release-notes-ubsan:
+
+Undefined Behavior Sanitizer (UBSan)
+------------------------------------
+
+Core Analysis Improvements
+==========================
+
+- ...
+
+New Issues Found
+================
+
+- ...
+
+Python Binding Changes
+----------------------
+
+The following methods have been added:
+
+-  ...
+
+Significant Known Problems
+==========================
 
 Additional Information
 ======================
 
 A wide variety of additional information is available on the `Clang web
-page <http://clang.llvm.org/>`_. The web page contains versions of the
-API documentation which are up-to-date with the Subversion version of
+page <https://clang.llvm.org/>`_. The web page contains versions of the
+API documentation which are up-to-date with the Git version of
 the source code. You can access versions of these documents specific to
 this release by going into the "``clang/docs/``" directory in the Clang
 tree.
 
 If you have any questions or comments about Clang, please feel free to
 contact us via the `mailing
-list <http://lists.cs.uiuc.edu/mailman/listinfo/cfe-dev>`_.
+list <https://lists.llvm.org/mailman/listinfo/cfe-dev>`_.

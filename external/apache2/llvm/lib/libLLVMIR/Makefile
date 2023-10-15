@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.9 2015/01/29 20:41:35 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:52 joerg Exp $
 
 LIB=	LLVMIR
 
@@ -6,52 +6,69 @@ LIB=	LLVMIR
 
 .PATH: ${LLVM_SRCDIR}/lib/IR
 
-SRCS+=	AsmWriter.cpp \
+.include "${.PARSEDIR}/../../tablegen.mk"
+
+SRCS+=	AbstractCallSite.cpp \
+	AsmWriter.cpp \
+	Assumptions.cpp \
 	Attributes.cpp \
 	AutoUpgrade.cpp \
 	BasicBlock.cpp \
+	BuiltinGCs.cpp \
 	Comdat.cpp \
 	ConstantFold.cpp \
 	ConstantRange.cpp \
 	Constants.cpp \
 	Core.cpp \
-	DIBuilder.cpp \
 	DataLayout.cpp \
 	DebugInfo.cpp \
+	DebugInfoMetadata.cpp \
 	DebugLoc.cpp \
+	DiagnosticHandler.cpp \
 	DiagnosticInfo.cpp \
 	DiagnosticPrinter.cpp \
+	DIBuilder.cpp \
 	Dominators.cpp \
+	FPEnv.cpp \
 	Function.cpp \
-	GCOV.cpp \
-	GVMaterializer.cpp \
+	GCStrategy.cpp \
 	Globals.cpp \
-	IRBuilder.cpp \
-	IRPrintingPasses.cpp \
+	GVMaterializer.cpp \
 	InlineAsm.cpp \
 	Instruction.cpp \
 	Instructions.cpp \
 	IntrinsicInst.cpp \
+	IRBuilder.cpp \
+	IRPrintingPasses.cpp \
+	LegacyPassManager.cpp \
 	LLVMContext.cpp \
 	LLVMContextImpl.cpp \
-	LegacyPassManager.cpp \
-	MDBuilder.cpp \
+	LLVMRemarkStreamer.cpp \
 	Mangler.cpp \
+	MDBuilder.cpp \
 	Metadata.cpp \
-	MetadataTracking.cpp \
 	Module.cpp \
+	ModuleSummaryIndex.cpp \
+	Operator.cpp \
+	OptBisect.cpp \
 	Pass.cpp \
+	PassInstrumentation.cpp \
 	PassManager.cpp \
 	PassRegistry.cpp \
+	PassTimingInfo.cpp \
+	PrintPasses.cpp \
+	ProfileSummary.cpp \
+	PseudoProbe.cpp \
+	ReplaceConstant.cpp \
+	SafepointIRVerifier.cpp \
 	Statepoint.cpp \
+	StructuralHash.cpp \
 	Type.cpp \
 	TypeFinder.cpp \
 	Use.cpp \
-	UseListOrder.cpp \
 	User.cpp \
 	Value.cpp \
 	ValueSymbolTable.cpp \
-	ValueTypes.cpp \
 	Verifier.cpp
 
 .if defined(HOSTLIB)

@@ -1,9 +1,8 @@
 // UndefCapturedBlockVarChecker.cpp - Uninitialized captured vars -*- C++ -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/Attr.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
@@ -40,13 +39,10 @@ static const DeclRefExpr *FindBlockDeclRefExpr(const Stmt *S,
     if (BR->getDecl() == VD)
       return BR;
 
-  for (Stmt::const_child_iterator I = S->child_begin(), E = S->child_end();
-       I!=E; ++I)
-    if (const Stmt *child = *I) {
-      const DeclRefExpr *BR = FindBlockDeclRefExpr(child, VD);
-      if (BR)
+  for (const Stmt *Child : S->children())
+    if (Child)
+      if (const DeclRefExpr *BR = FindBlockDeclRefExpr(Child, VD))
         return BR;
-    }
 
   return nullptr;
 }
@@ -58,9 +54,7 @@ UndefCapturedBlockVarChecker::checkPostStmt(const BlockExpr *BE,
     return;
 
   ProgramStateRef state = C.getState();
-  const BlockDataRegion *R =
-    cast<BlockDataRegion>(state->getSVal(BE,
-                                         C.getLocationContext()).getAsRegion());
+  auto *R = cast<BlockDataRegion>(C.getSVal(BE).getAsRegion());
 
   BlockDataRegion::referenced_vars_iterator I = R->referenced_vars_begin(),
                                             E = R->referenced_vars_end();
@@ -77,7 +71,7 @@ UndefCapturedBlockVarChecker::checkPostStmt(const BlockExpr *BE,
     // Get the VarRegion associated with VD in the local stack frame.
     if (Optional<UndefinedVal> V =
           state->getSVal(I.getOriginalRegion()).getAs<UndefinedVal>()) {
-      if (ExplodedNode *N = C.generateSink()) {
+      if (ExplodedNode *N = C.generateErrorNode()) {
         if (!BT)
           BT.reset(
               new BuiltinBug(this, "uninitialized variable captured by block"));
@@ -86,17 +80,18 @@ UndefCapturedBlockVarChecker::checkPostStmt(const BlockExpr *BE,
         SmallString<128> buf;
         llvm::raw_svector_ostream os(buf);
 
-        os << "Variable '" << VD->getName() 
+        os << "Variable '" << VD->getName()
            << "' is uninitialized when captured by block";
 
-        BugReport *R = new BugReport(*BT, os.str(), N);
+        auto R = std::make_unique<PathSensitiveBugReport>(*BT, os.str(), N);
         if (const Expr *Ex = FindBlockDeclRefExpr(BE->getBody(), VD))
           R->addRange(Ex->getSourceRange());
-        R->addVisitor(llvm::make_unique<FindLastStoreBRVisitor>(
-            *V, VR, /*EnableNullFPSuppression*/ false));
+        R->addVisitor(std::make_unique<FindLastStoreBRVisitor>(
+            *V, VR, /*EnableNullFPSuppression*/ false,
+            bugreporter::TrackingKind::Thorough));
         R->disablePathPruning();
         // need location of block
-        C.emitReport(R);
+        C.emitReport(std::move(R));
       }
     }
   }
@@ -104,4 +99,8 @@ UndefCapturedBlockVarChecker::checkPostStmt(const BlockExpr *BE,
 
 void ento::registerUndefCapturedBlockVarChecker(CheckerManager &mgr) {
   mgr.registerChecker<UndefCapturedBlockVarChecker>();
+}
+
+bool ento::shouldRegisterUndefCapturedBlockVarChecker(const CheckerManager &mgr) {
+  return true;
 }

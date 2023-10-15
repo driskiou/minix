@@ -4,7 +4,7 @@
 ./usr/include/altivec.h				comp-obsolete		obsolete
 ./usr/include/clang-3.4/altivec.h		comp-obsolete		obsolete
 ./usr/include/clang-3.5/altivec.h		comp-obsolete		obsolete
-./usr/include/clang-3.6/altivec.h		comp-c-include		llvm
+./usr/include/clang-13.0/altivec.h		comp-c-include		llvm
 ./usr/include/g++/bits/powerpc			comp-c-include		compat
 ./usr/include/g++/bits/powerpc/c++config.h	comp-c-include		compat,gcc
 ./usr/include/g++/bits/powerpc64		comp-c-include		compat

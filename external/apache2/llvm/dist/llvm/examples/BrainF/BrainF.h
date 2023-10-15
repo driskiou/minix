@@ -1,16 +1,15 @@
-//===-- BrainF.h - BrainF compiler class ----------------------*- C++ -*-===//
+//===-- BrainF.h - BrainF compiler class ------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // This class stores the data for the BrainF compiler so it doesn't have
 // to pass all of it around.  The main method is parse.
 //
-//===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 #ifndef BRAINF_H
 #define BRAINF_H
@@ -18,6 +17,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include <istream>
 
 using namespace llvm;
 
@@ -79,8 +79,8 @@ class BrainF {
     std::istream *in;
     Module *module;
     Function *brainf_func;
-    Function *getchar_func;
-    Function *putchar_func;
+    FunctionCallee getchar_func;
+    FunctionCallee putchar_func;
     Value *ptr_arr;
     Value *ptr_arrmax;
     BasicBlock *endbb;
@@ -91,4 +91,4 @@ class BrainF {
     Value *curhead;
 };
 
-#endif
+#endif // BRAINF_H

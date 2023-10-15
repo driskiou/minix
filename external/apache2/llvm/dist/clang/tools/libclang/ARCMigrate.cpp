@@ -1,9 +1,8 @@
 //===- ARCMigrate.cpp - Clang-C ARC Migration Library ---------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,6 +13,7 @@
 #include "clang-c/Index.h"
 #include "CXString.h"
 #include "clang/ARCMigrate/ARCMT.h"
+#include "clang/Config/config.h"
 #include "clang/Frontend/TextDiagnosticBuffer.h"
 #include "llvm/Support/FileSystem.h"
 
@@ -32,10 +32,8 @@ struct Remap {
 // libClang public APIs.
 //===----------------------------------------------------------------------===//
 
-extern "C" {
-
 CXRemapping clang_getRemappings(const char *migrate_dir_path) {
-#ifndef CLANG_ENABLE_ARCMT
+#if !CLANG_ENABLE_ARCMT
   llvm::errs() << "error: feature not enabled in this build\n";
   return nullptr;
 #else
@@ -78,7 +76,7 @@ CXRemapping clang_getRemappings(const char *migrate_dir_path) {
 
 CXRemapping clang_getRemappingsFromFileList(const char **filePaths,
                                             unsigned numFiles) {
-#ifndef CLANG_ENABLE_ARCMT
+#if !CLANG_ENABLE_ARCMT
   llvm::errs() << "error: feature not enabled in this build\n";
   return nullptr;
 #else
@@ -101,9 +99,7 @@ CXRemapping clang_getRemappingsFromFileList(const char **filePaths,
   }
 
   TextDiagnosticBuffer diagBuffer;
-  SmallVector<StringRef, 32> Files;
-  for (unsigned i = 0; i != numFiles; ++i)
-    Files.push_back(filePaths[i]);
+  SmallVector<StringRef, 32> Files(filePaths, filePaths + numFiles);
 
   bool err = arcmt::getFileRemappingsFromFileList(remap->Vec, Files,
                                                   &diagBuffer);
@@ -140,5 +136,3 @@ void clang_remap_getFilenames(CXRemapping map, unsigned index,
 void clang_remap_dispose(CXRemapping map) {
   delete static_cast<Remap *>(map);
 }
-
-} // end: extern "C"

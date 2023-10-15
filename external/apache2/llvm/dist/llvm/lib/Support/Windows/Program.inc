@@ -1,9 +1,8 @@
 //===- Win32/Program.cpp - Win32 Program Implementation ------- -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,16 +10,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "WindowsSupport.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/ConvertUTF.h"
+#include "llvm/Support/Errc.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Windows/WindowsSupport.h"
 #include "llvm/Support/WindowsError.h"
 #include "llvm/Support/raw_ostream.h"
+#include <psapi.h>
 #include <cstdio>
 #include <fcntl.h>
 #include <io.h>
 #include <malloc.h>
+#include <numeric>
 
 //===----------------------------------------------------------------------===//
 //=== WARNING: Implementation here must contain only Win32 specific code
@@ -28,9 +31,8 @@
 //===----------------------------------------------------------------------===//
 
 namespace llvm {
-using namespace sys;
 
-ProcessInfo::ProcessInfo() : ProcessHandle(0), Pid(0), ReturnCode(0) {}
+ProcessInfo::ProcessInfo() : Pid(0), Process(0), ReturnCode(0) {}
 
 ErrorOr<std::string> sys::findProgramByName(StringRef Name,
                                             ArrayRef<StringRef> Paths) {
@@ -65,40 +67,68 @@ ErrorOr<std::string> sys::findProgramByName(StringRef Name,
   if (const char *PathExtEnv = std::getenv("PATHEXT"))
     SplitString(PathExtEnv, PathExts, ";");
 
-  SmallVector<wchar_t, MAX_PATH> U16Result;
-  DWORD Len = MAX_PATH;
+  SmallVector<char, MAX_PATH> U8Result;
   for (StringRef Ext : PathExts) {
-    SmallVector<wchar_t, MAX_PATH> U16Ext;
-    if (std::error_code EC = windows::UTF8ToUTF16(Ext, U16Ext))
-      return EC;
-
+    SmallVector<wchar_t, MAX_PATH> U16Result;
+    DWORD Len = MAX_PATH;
     do {
       U16Result.reserve(Len);
-      Len = ::SearchPathW(Path, c_str(U16Name),
-                          U16Ext.empty() ? nullptr : c_str(U16Ext),
+      // Lets attach the extension manually. That is needed for files
+      // with a point in name like aaa.bbb. SearchPathW will not add extension
+      // from its argument to such files because it thinks they already had one.
+      SmallVector<wchar_t, MAX_PATH> U16NameExt;
+      if (std::error_code EC =
+              windows::UTF8ToUTF16(Twine(Name + Ext).str(), U16NameExt))
+        return EC;
+
+      Len = ::SearchPathW(Path, c_str(U16NameExt), nullptr,
                           U16Result.capacity(), U16Result.data(), nullptr);
     } while (Len > U16Result.capacity());
 
-    if (Len != 0)
+    if (Len == 0)
+      continue;
+
+    U16Result.set_size(Len);
+
+    if (std::error_code EC =
+        windows::UTF16ToUTF8(U16Result.data(), U16Result.size(), U8Result))
+      return EC;
+
+    if (sys::fs::can_execute(U8Result))
       break; // Found it.
+
+    U8Result.clear();
   }
 
-  if (Len == 0)
+  if (U8Result.empty())
     return mapWindowsError(::GetLastError());
-
-  U16Result.set_size(Len);
-
-  SmallVector<char, MAX_PATH> U8Result;
-  if (std::error_code EC =
-          windows::UTF16ToUTF8(U16Result.data(), U16Result.size(), U8Result))
-    return EC;
 
   return std::string(U8Result.begin(), U8Result.end());
 }
 
-static HANDLE RedirectIO(const StringRef *path, int fd, std::string* ErrMsg) {
+bool MakeErrMsg(std::string *ErrMsg, const std::string &prefix) {
+  if (!ErrMsg)
+    return true;
+  char *buffer = NULL;
+  DWORD LastError = GetLastError();
+  DWORD R = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                               FORMAT_MESSAGE_FROM_SYSTEM |
+                               FORMAT_MESSAGE_MAX_WIDTH_MASK,
+                           NULL, LastError, 0, (LPSTR)&buffer, 1, NULL);
+  if (R)
+    *ErrMsg = prefix + ": " + buffer;
+  else
+    *ErrMsg = prefix + ": Unknown error";
+  *ErrMsg += " (0x" + llvm::utohexstr(LastError) + ")";
+
+  LocalFree(buffer);
+  return R != 0;
+}
+
+static HANDLE RedirectIO(Optional<StringRef> Path, int fd,
+                         std::string *ErrMsg) {
   HANDLE h;
-  if (path == 0) {
+  if (!Path) {
     if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)_get_osfhandle(fd),
                          GetCurrentProcess(), &h,
                          0, TRUE, DUPLICATE_SAME_ACCESS))
@@ -107,10 +137,10 @@ static HANDLE RedirectIO(const StringRef *path, int fd, std::string* ErrMsg) {
   }
 
   std::string fname;
-  if (path->empty())
+  if (Path->empty())
     fname = "NUL";
   else
-    fname = *path;
+    fname = std::string(*Path);
 
   SECURITY_ATTRIBUTES sa;
   sa.nLength = sizeof(sa);
@@ -118,12 +148,12 @@ static HANDLE RedirectIO(const StringRef *path, int fd, std::string* ErrMsg) {
   sa.bInheritHandle = TRUE;
 
   SmallVector<wchar_t, 128> fnameUnicode;
-  if (path->empty()) {
+  if (Path->empty()) {
     // Don't play long-path tricks on "NUL".
     if (windows::UTF8ToUTF16(fname, fnameUnicode))
       return INVALID_HANDLE_VALUE;
   } else {
-    if (path::widenPath(fname, fnameUnicode))
+    if (sys::windows::widenPath(fname, fnameUnicode))
       return INVALID_HANDLE_VALUE;
   }
   h = CreateFileW(fnameUnicode.data(), fd ? GENERIC_WRITE : GENERIC_READ,
@@ -131,146 +161,60 @@ static HANDLE RedirectIO(const StringRef *path, int fd, std::string* ErrMsg) {
                   FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) {
     MakeErrMsg(ErrMsg, fname + ": Can't open file for " +
-        (fd ? "input: " : "output: "));
+        (fd ? "input" : "output"));
   }
 
   return h;
 }
 
-/// ArgNeedsQuotes - Check whether argument needs to be quoted when calling
-/// CreateProcess.
-static bool ArgNeedsQuotes(const char *Str) {
-  return Str[0] == '\0' || strpbrk(Str, "\t \"&\'()*<>\\`^|") != 0;
 }
 
-/// CountPrecedingBackslashes - Returns the number of backslashes preceding Cur
-/// in the C string Start.
-static unsigned int CountPrecedingBackslashes(const char *Start,
-                                              const char *Cur) {
-  unsigned int Count = 0;
-  --Cur;
-  while (Cur >= Start && *Cur == '\\') {
-    ++Count;
-    --Cur;
-  }
-  return Count;
-}
-
-/// EscapePrecedingEscapes - Append a backslash to Dst for every backslash
-/// preceding Cur in the Start string.  Assumes Dst has enough space.
-static char *EscapePrecedingEscapes(char *Dst, const char *Start,
-                                    const char *Cur) {
-  unsigned PrecedingEscapes = CountPrecedingBackslashes(Start, Cur);
-  while (PrecedingEscapes > 0) {
-    *Dst++ = '\\';
-    --PrecedingEscapes;
-  }
-  return Dst;
-}
-
-/// ArgLenWithQuotes - Check whether argument needs to be quoted when calling
-/// CreateProcess and returns length of quoted arg with escaped quotes
-static unsigned int ArgLenWithQuotes(const char *Str) {
-  const char *Start = Str;
-  bool Quoted = ArgNeedsQuotes(Str);
-  unsigned int len = Quoted ? 2 : 0;
-
-  while (*Str != '\0') {
-    if (*Str == '\"') {
-      // We need to add a backslash, but ensure that it isn't escaped.
-      unsigned PrecedingEscapes = CountPrecedingBackslashes(Start, Str);
-      len += PrecedingEscapes + 1;
-    }
-    // Note that we *don't* need to escape runs of backslashes that don't
-    // precede a double quote!  See MSDN:
-    // http://msdn.microsoft.com/en-us/library/17w5ykft%28v=vs.85%29.aspx
-
-    ++len;
-    ++Str;
-  }
-
-  if (Quoted) {
-    // Make sure the closing quote doesn't get escaped by a trailing backslash.
-    unsigned PrecedingEscapes = CountPrecedingBackslashes(Start, Str);
-    len += PrecedingEscapes + 1;
-  }
-
-  return len;
-}
-
-}
-
-static std::unique_ptr<char[]> flattenArgs(const char **args) {
-  // First, determine the length of the command line.
-  unsigned len = 0;
-  for (unsigned i = 0; args[i]; i++) {
-    len += ArgLenWithQuotes(args[i]) + 1;
-  }
-
-  // Now build the command line.
-  std::unique_ptr<char[]> command(new char[len+1]);
-  char *p = command.get();
-
-  for (unsigned i = 0; args[i]; i++) {
-    const char *arg = args[i];
-    const char *start = arg;
-
-    bool needsQuoting = ArgNeedsQuotes(arg);
-    if (needsQuoting)
-      *p++ = '"';
-
-    while (*arg != '\0') {
-      if (*arg == '\"') {
-        // Escape all preceding escapes (if any), and then escape the quote.
-        p = EscapePrecedingEscapes(p, start, arg);
-        *p++ = '\\';
-      }
-
-      *p++ = *arg++;
-    }
-
-    if (needsQuoting) {
-      // Make sure our quote doesn't get escaped by a trailing backslash.
-      p = EscapePrecedingEscapes(p, start, arg);
-      *p++ = '"';
-    }
-    *p++ = ' ';
-  }
-
-  *p = 0;
-  return command;
-}
-
-static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
-                    const char **envp, const StringRef **redirects,
-                    unsigned memoryLimit, std::string *ErrMsg) {
+static bool Execute(ProcessInfo &PI, StringRef Program,
+                    ArrayRef<StringRef> Args, Optional<ArrayRef<StringRef>> Env,
+                    ArrayRef<Optional<StringRef>> Redirects,
+                    unsigned MemoryLimit, std::string *ErrMsg,
+                    BitVector *AffinityMask) {
   if (!sys::fs::can_execute(Program)) {
     if (ErrMsg)
       *ErrMsg = "program not executable";
     return false;
   }
 
+  // can_execute may succeed by looking at Program + ".exe". CreateProcessW
+  // will implicitly add the .exe if we provide a command line without an
+  // executable path, but since we use an explicit executable, we have to add
+  // ".exe" ourselves.
+  SmallString<64> ProgramStorage;
+  if (!sys::fs::exists(Program))
+    Program = Twine(Program + ".exe").toStringRef(ProgramStorage);
+
   // Windows wants a command line, not an array of args, to pass to the new
   // process.  We have to concatenate them all, while quoting the args that
   // have embedded spaces (or are empty).
-  std::unique_ptr<char[]> command = flattenArgs(args);
+  auto Result = flattenWindowsCommandLine(Args);
+  if (std::error_code ec = Result.getError()) {
+    SetLastError(ec.value());
+    MakeErrMsg(ErrMsg, std::string("Unable to convert command-line to UTF-16"));
+    return false;
+  }
+  std::wstring Command = *Result;
 
   // The pointer to the environment block for the new process.
   std::vector<wchar_t> EnvBlock;
 
-  if (envp) {
+  if (Env) {
     // An environment block consists of a null-terminated block of
     // null-terminated strings. Convert the array of environment variables to
     // an environment block by concatenating them.
-    for (unsigned i = 0; envp[i]; ++i) {
+    for (StringRef E : *Env) {
       SmallVector<wchar_t, MAX_PATH> EnvString;
-      if (std::error_code ec = windows::UTF8ToUTF16(envp[i], EnvString)) {
+      if (std::error_code ec = windows::UTF8ToUTF16(E, EnvString)) {
         SetLastError(ec.value());
         MakeErrMsg(ErrMsg, "Unable to convert environment variable to UTF-16");
         return false;
       }
 
-      EnvBlock.insert(EnvBlock.end(), EnvString.begin(), EnvString.end());
+      llvm::append_range(EnvBlock, EnvString);
       EnvBlock.push_back(0);
     }
     EnvBlock.push_back(0);
@@ -284,21 +228,21 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
   si.hStdOutput = INVALID_HANDLE_VALUE;
   si.hStdError = INVALID_HANDLE_VALUE;
 
-  if (redirects) {
+  if (!Redirects.empty()) {
     si.dwFlags = STARTF_USESTDHANDLES;
 
-    si.hStdInput = RedirectIO(redirects[0], 0, ErrMsg);
+    si.hStdInput = RedirectIO(Redirects[0], 0, ErrMsg);
     if (si.hStdInput == INVALID_HANDLE_VALUE) {
       MakeErrMsg(ErrMsg, "can't redirect stdin");
       return false;
     }
-    si.hStdOutput = RedirectIO(redirects[1], 1, ErrMsg);
+    si.hStdOutput = RedirectIO(Redirects[1], 1, ErrMsg);
     if (si.hStdOutput == INVALID_HANDLE_VALUE) {
       CloseHandle(si.hStdInput);
       MakeErrMsg(ErrMsg, "can't redirect stdout");
       return false;
     }
-    if (redirects[1] && redirects[2] && *(redirects[1]) == *(redirects[2])) {
+    if (Redirects[1] && Redirects[2] && *Redirects[1] == *Redirects[2]) {
       // If stdout and stderr should go to the same place, redirect stderr
       // to the handle already open for stdout.
       if (!DuplicateHandle(GetCurrentProcess(), si.hStdOutput,
@@ -311,7 +255,7 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
       }
     } else {
       // Just redirect stderr
-      si.hStdError = RedirectIO(redirects[2], 2, ErrMsg);
+      si.hStdError = RedirectIO(Redirects[2], 2, ErrMsg);
       if (si.hStdError == INVALID_HANDLE_VALUE) {
         CloseHandle(si.hStdInput);
         CloseHandle(si.hStdOutput);
@@ -328,25 +272,22 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
   fflush(stderr);
 
   SmallVector<wchar_t, MAX_PATH> ProgramUtf16;
-  if (std::error_code ec = path::widenPath(Program, ProgramUtf16)) {
+  if (std::error_code ec = sys::windows::widenPath(Program, ProgramUtf16)) {
     SetLastError(ec.value());
     MakeErrMsg(ErrMsg,
                std::string("Unable to convert application name to UTF-16"));
     return false;
   }
 
-  SmallVector<wchar_t, MAX_PATH> CommandUtf16;
-  if (std::error_code ec = windows::UTF8ToUTF16(command.get(), CommandUtf16)) {
-    SetLastError(ec.value());
-    MakeErrMsg(ErrMsg,
-               std::string("Unable to convert command-line to UTF-16"));
-    return false;
-  }
+  unsigned CreateFlags = CREATE_UNICODE_ENVIRONMENT;
+  if (AffinityMask)
+    CreateFlags |= CREATE_SUSPENDED;
 
-  BOOL rc = CreateProcessW(ProgramUtf16.data(), CommandUtf16.data(), 0, 0,
-                           TRUE, CREATE_UNICODE_ENVIRONMENT,
-                           EnvBlock.empty() ? 0 : EnvBlock.data(), 0, &si,
-                           &pi);
+  std::vector<wchar_t> CommandUtf16(Command.size() + 1, 0);
+  std::copy(Command.begin(), Command.end(), CommandUtf16.begin());
+  BOOL rc = CreateProcessW(ProgramUtf16.data(), CommandUtf16.data(), 0, 0, TRUE,
+                           CreateFlags, EnvBlock.empty() ? 0 : EnvBlock.data(),
+                           0, &si, &pi);
   DWORD err = GetLastError();
 
   // Regardless of whether the process got created or not, we are done with
@@ -364,21 +305,21 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
   }
 
   PI.Pid = pi.dwProcessId;
-  PI.ProcessHandle = pi.hProcess;
+  PI.Process = pi.hProcess;
 
   // Make sure these get closed no matter what.
   ScopedCommonHandle hThread(pi.hThread);
 
   // Assign the process to a job if a memory limit is defined.
   ScopedJobHandle hJob;
-  if (memoryLimit != 0) {
+  if (MemoryLimit != 0) {
     hJob = CreateJobObjectW(0, 0);
     bool success = false;
     if (hJob) {
       JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
       memset(&jeli, 0, sizeof(jeli));
       jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-      jeli.ProcessMemoryLimit = uintptr_t(memoryLimit) * 1048576;
+      jeli.ProcessMemoryLimit = uintptr_t(MemoryLimit) * 1048576;
       if (SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
                                   &jeli, sizeof(jeli))) {
         if (AssignProcessToJobObject(hJob, pi.hProcess))
@@ -394,14 +335,82 @@ static bool Execute(ProcessInfo &PI, StringRef Program, const char **args,
     }
   }
 
+  // Set the affinity mask
+  if (AffinityMask) {
+    ::SetProcessAffinityMask(pi.hProcess,
+                             (DWORD_PTR)AffinityMask->getData().front());
+    ::ResumeThread(pi.hThread);
+  }
+
   return true;
 }
 
+static bool argNeedsQuotes(StringRef Arg) {
+  if (Arg.empty())
+    return true;
+  return StringRef::npos != Arg.find_first_of("\t \"&\'()*<>\\`^|\n");
+}
+
+static std::string quoteSingleArg(StringRef Arg) {
+  std::string Result;
+  Result.push_back('"');
+
+  while (!Arg.empty()) {
+    size_t FirstNonBackslash = Arg.find_first_not_of('\\');
+    size_t BackslashCount = FirstNonBackslash;
+    if (FirstNonBackslash == StringRef::npos) {
+      // The entire remainder of the argument is backslashes.  Escape all of
+      // them and just early out.
+      BackslashCount = Arg.size();
+      Result.append(BackslashCount * 2, '\\');
+      break;
+    }
+
+    if (Arg[FirstNonBackslash] == '\"') {
+      // This is an embedded quote.  Escape all preceding backslashes, then
+      // add one additional backslash to escape the quote.
+      Result.append(BackslashCount * 2 + 1, '\\');
+      Result.push_back('\"');
+    } else {
+      // This is just a normal character.  Don't escape any of the preceding
+      // backslashes, just append them as they are and then append the
+      // character.
+      Result.append(BackslashCount, '\\');
+      Result.push_back(Arg[FirstNonBackslash]);
+    }
+
+    // Drop all the backslashes, plus the following character.
+    Arg = Arg.drop_front(FirstNonBackslash + 1);
+  }
+
+  Result.push_back('"');
+  return Result;
+}
+
 namespace llvm {
+ErrorOr<std::wstring> sys::flattenWindowsCommandLine(ArrayRef<StringRef> Args) {
+  std::string Command;
+  for (StringRef Arg : Args) {
+    if (argNeedsQuotes(Arg))
+      Command += quoteSingleArg(Arg);
+    else
+      Command += Arg;
+
+    Command.push_back(' ');
+  }
+
+  SmallVector<wchar_t, MAX_PATH> CommandUtf16;
+  if (std::error_code ec = windows::UTF8ToUTF16(Command, CommandUtf16))
+    return ec;
+
+  return std::wstring(CommandUtf16.begin(), CommandUtf16.end());
+}
+
 ProcessInfo sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
-                      bool WaitUntilChildTerminates, std::string *ErrMsg) {
+                      bool WaitUntilChildTerminates, std::string *ErrMsg,
+                      Optional<ProcessStatistics> *ProcStat) {
   assert(PI.Pid && "invalid pid to wait on, process not started?");
-  assert(PI.ProcessHandle &&
+  assert((PI.Process && PI.Process != INVALID_HANDLE_VALUE) &&
          "invalid process handle to wait on, process not started?");
   DWORD milliSecondsToWait = 0;
   if (WaitUntilChildTerminates)
@@ -410,36 +419,55 @@ ProcessInfo sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
     milliSecondsToWait = SecondsToWait * 1000;
 
   ProcessInfo WaitResult = PI;
-  DWORD WaitStatus = WaitForSingleObject(PI.ProcessHandle, milliSecondsToWait);
+  if (ProcStat)
+    ProcStat->reset();
+  DWORD WaitStatus = WaitForSingleObject(PI.Process, milliSecondsToWait);
   if (WaitStatus == WAIT_TIMEOUT) {
     if (SecondsToWait) {
-      if (!TerminateProcess(PI.ProcessHandle, 1)) {
+      if (!TerminateProcess(PI.Process, 1)) {
         if (ErrMsg)
-          MakeErrMsg(ErrMsg, "Failed to terminate timed-out program.");
+          MakeErrMsg(ErrMsg, "Failed to terminate timed-out program");
 
         // -2 indicates a crash or timeout as opposed to failure to execute.
         WaitResult.ReturnCode = -2;
-        CloseHandle(PI.ProcessHandle);
+        CloseHandle(PI.Process);
         return WaitResult;
       }
-      WaitForSingleObject(PI.ProcessHandle, INFINITE);
-      CloseHandle(PI.ProcessHandle);
+      WaitForSingleObject(PI.Process, INFINITE);
+      CloseHandle(PI.Process);
     } else {
       // Non-blocking wait.
       return ProcessInfo();
     }
   }
 
+  // Get process execution statistics.
+  if (ProcStat) {
+    FILETIME CreationTime, ExitTime, KernelTime, UserTime;
+    PROCESS_MEMORY_COUNTERS MemInfo;
+    if (GetProcessTimes(PI.Process, &CreationTime, &ExitTime, &KernelTime,
+                        &UserTime) &&
+        GetProcessMemoryInfo(PI.Process, &MemInfo, sizeof(MemInfo))) {
+      auto UserT = std::chrono::duration_cast<std::chrono::microseconds>(
+          toDuration(UserTime));
+      auto KernelT = std::chrono::duration_cast<std::chrono::microseconds>(
+          toDuration(KernelTime));
+      uint64_t PeakMemory = MemInfo.PeakPagefileUsage / 1024;
+      *ProcStat = ProcessStatistics{UserT + KernelT, UserT, PeakMemory};
+    }
+  }
+
   // Get its exit status.
   DWORD status;
-  BOOL rc = GetExitCodeProcess(PI.ProcessHandle, &status);
+  BOOL rc = GetExitCodeProcess(PI.Process, &status);
   DWORD err = GetLastError();
-  CloseHandle(PI.ProcessHandle);
+  if (err != ERROR_INVALID_HANDLE)
+    CloseHandle(PI.Process);
 
   if (!rc) {
     SetLastError(err);
     if (ErrMsg)
-      MakeErrMsg(ErrMsg, "Failed getting status for program.");
+      MakeErrMsg(ErrMsg, "Failed getting status for program");
 
     // -2 indicates a crash or timeout as opposed to failure to execute.
     WaitResult.ReturnCode = -2;
@@ -460,6 +488,18 @@ ProcessInfo sys::Wait(const ProcessInfo &PI, unsigned SecondsToWait,
   return WaitResult;
 }
 
+std::error_code llvm::sys::ChangeStdinMode(sys::fs::OpenFlags Flags){
+  if (!(Flags & fs::OF_CRLF))
+    return ChangeStdinToBinary();
+  return std::error_code();
+}
+
+std::error_code llvm::sys::ChangeStdoutMode(sys::fs::OpenFlags Flags){
+  if (!(Flags & fs::OF_CRLF))
+    return ChangeStdoutToBinary();
+  return std::error_code();
+}
+
 std::error_code sys::ChangeStdinToBinary() {
   int result = _setmode(_fileno(stdin), _O_BINARY);
   if (result == -1)
@@ -478,7 +518,7 @@ std::error_code
 llvm::sys::writeFileWithEncoding(StringRef FileName, StringRef Contents,
                                  WindowsEncodingMethod Encoding) {
   std::error_code EC;
-  llvm::raw_fd_ostream OS(FileName, EC, llvm::sys::fs::OpenFlags::F_Text);
+  llvm::raw_fd_ostream OS(FileName, EC, llvm::sys::fs::OF_TextWithCRLF);
   if (EC)
     return EC;
 
@@ -513,24 +553,23 @@ llvm::sys::writeFileWithEncoding(StringRef FileName, StringRef Contents,
   }
 
   if (OS.has_error())
-    return std::make_error_code(std::errc::io_error);
+    return make_error_code(errc::io_error);
 
   return EC;
 }
 
-bool llvm::sys::argumentsFitWithinSystemLimits(ArrayRef<const char*> Args) {
-  // The documented max length of the command line passed to CreateProcess.
-  static const size_t MaxCommandStringLength = 32768;
-  size_t ArgLength = 0;
-  for (ArrayRef<const char*>::iterator I = Args.begin(), E = Args.end();
-       I != E; ++I) {
-    // Account for the trailing space for every arg but the last one and the
-    // trailing NULL of the last argument.
-    ArgLength += ArgLenWithQuotes(*I) + 1;
-    if (ArgLength > MaxCommandStringLength) {
-      return false;
-    }
-  }
-  return true;
+bool llvm::sys::commandLineFitsWithinSystemLimits(StringRef Program,
+                                                  ArrayRef<StringRef> Args) {
+  // The documentation on CreateProcessW states that the size of the argument
+  // lpCommandLine must not be greater than 32767 characters, including the
+  // Unicode terminating null character. We use smaller value to reduce risk
+  // of getting invalid command line due to unaccounted factors.
+  static const size_t MaxCommandStringLength = 32000;
+  SmallVector<StringRef, 8> FullArgs;
+  FullArgs.push_back(Program);
+  FullArgs.append(Args.begin(), Args.end());
+  auto Result = flattenWindowsCommandLine(FullArgs);
+  assert(!Result.getError());
+  return (Result->size() + 1) <= MaxCommandStringLength;
 }
 }

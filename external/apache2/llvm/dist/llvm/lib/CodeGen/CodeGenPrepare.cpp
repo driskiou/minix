@@ -1,9 +1,8 @@
 //===- CodeGenPrepare.cpp - Prepare a function for code generation --------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,39 +12,95 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CodeGen/Passes.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/PointerIntPair.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
+#include "llvm/Analysis/BranchProbabilityInfo.h"
+#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/InstructionSimplify.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
-#include "llvm/IR/CallSite.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/VectorUtils.h"
+#include "llvm/CodeGen/Analysis.h"
+#include "llvm/CodeGen/ISDOpcodes.h"
+#include "llvm/CodeGen/SelectionDAGNodes.h"
+#include "llvm/CodeGen/TargetLowering.h"
+#include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/CodeGen/ValueTypes.h"
+#include "llvm/Config/llvm-config.h"
+#include "llvm/IR/Argument.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GetElementPtrTypeIterator.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsAArch64.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/Statepoint.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Use.h"
+#include "llvm/IR/User.h"
+#include "llvm/IR/Value.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/IR/ValueMap.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/BlockFrequency.h"
+#include "llvm/Support/BranchProbability.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MachineValueType.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetLibraryInfo.h"
-#include "llvm/Target/TargetLowering.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/BuildLibCalls.h"
 #include "llvm/Transforms/Utils/BypassSlowDivision.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SimplifyLibCalls.h"
+#include "llvm/Transforms/Utils/SizeOpts.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <utility>
+#include <vector>
+
 using namespace llvm;
 using namespace llvm::PatternMatch;
 
@@ -60,24 +115,36 @@ STATISTIC(NumCastUses, "Number of uses of Cast expressions replaced with uses "
                        "of sunken Casts");
 STATISTIC(NumMemoryInsts, "Number of memory instructions whose address "
                           "computations were sunk");
+STATISTIC(NumMemoryInstsPhiCreated,
+          "Number of phis created when address "
+          "computations were sunk to memory instructions");
+STATISTIC(NumMemoryInstsSelectCreated,
+          "Number of select created when address "
+          "computations were sunk to memory instructions");
 STATISTIC(NumExtsMoved,  "Number of [s|z]ext instructions combined with loads");
 STATISTIC(NumExtUses,    "Number of uses of [s|z]ext instructions optimized");
+STATISTIC(NumAndsAdded,
+          "Number of and mask instructions added to form ext loads");
+STATISTIC(NumAndUses, "Number of uses of and mask instructions optimized");
 STATISTIC(NumRetsDup,    "Number of return instructions duplicated");
 STATISTIC(NumDbgValueMoved, "Number of debug value instructions moved");
 STATISTIC(NumSelectsExpanded, "Number of selects turned into branches");
-STATISTIC(NumAndCmpsMoved, "Number of and/cmp's pushed into branches");
 STATISTIC(NumStoreExtractExposed, "Number of store(extractelement) exposed");
 
 static cl::opt<bool> DisableBranchOpts(
   "disable-cgp-branch-opts", cl::Hidden, cl::init(false),
   cl::desc("Disable branch optimizations in CodeGenPrepare"));
 
+static cl::opt<bool>
+    DisableGCOpts("disable-cgp-gc-opts", cl::Hidden, cl::init(false),
+                  cl::desc("Disable GC optimizations in CodeGenPrepare"));
+
 static cl::opt<bool> DisableSelectToBranch(
   "disable-cgp-select2branch", cl::Hidden, cl::init(false),
   cl::desc("Disable select to branch conversion."));
 
 static cl::opt<bool> AddrSinkUsingGEPs(
-  "addr-sink-using-gep", cl::Hidden, cl::init(false),
+  "addr-sink-using-gep", cl::Hidden, cl::init(true),
   cl::desc("Address sinking in CGP using GEPs."));
 
 static cl::opt<bool> EnableAndCmpSinking(
@@ -102,216 +169,533 @@ static cl::opt<bool> StressExtLdPromotion(
     cl::desc("Stress test ext(promotable(ld)) -> promoted(ext(ld)) "
              "optimization in CodeGenPrepare"));
 
+static cl::opt<bool> DisablePreheaderProtect(
+    "disable-preheader-prot", cl::Hidden, cl::init(false),
+    cl::desc("Disable protection against removing loop preheaders"));
+
+static cl::opt<bool> ProfileGuidedSectionPrefix(
+    "profile-guided-section-prefix", cl::Hidden, cl::init(true), cl::ZeroOrMore,
+    cl::desc("Use profile info to add section prefix for hot/cold functions"));
+
+static cl::opt<bool> ProfileUnknownInSpecialSection(
+    "profile-unknown-in-special-section", cl::Hidden, cl::init(false),
+    cl::ZeroOrMore,
+    cl::desc("In profiling mode like sampleFDO, if a function doesn't have "
+             "profile, we cannot tell the function is cold for sure because "
+             "it may be a function newly added without ever being sampled. "
+             "With the flag enabled, compiler can put such profile unknown "
+             "functions into a special section, so runtime system can choose "
+             "to handle it in a different way than .text section, to save "
+             "RAM for example. "));
+
+static cl::opt<unsigned> FreqRatioToSkipMerge(
+    "cgp-freq-ratio-to-skip-merge", cl::Hidden, cl::init(2),
+    cl::desc("Skip merging empty blocks if (frequency of empty block) / "
+             "(frequency of destination block) is greater than this ratio"));
+
+static cl::opt<bool> ForceSplitStore(
+    "force-split-store", cl::Hidden, cl::init(false),
+    cl::desc("Force store splitting no matter what the target query says."));
+
+static cl::opt<bool>
+EnableTypePromotionMerge("cgp-type-promotion-merge", cl::Hidden,
+    cl::desc("Enable merging of redundant sexts when one is dominating"
+    " the other."), cl::init(true));
+
+static cl::opt<bool> DisableComplexAddrModes(
+    "disable-complex-addr-modes", cl::Hidden, cl::init(false),
+    cl::desc("Disables combining addressing modes with different parts "
+             "in optimizeMemoryInst."));
+
+static cl::opt<bool>
+AddrSinkNewPhis("addr-sink-new-phis", cl::Hidden, cl::init(false),
+                cl::desc("Allow creation of Phis in Address sinking."));
+
+static cl::opt<bool>
+AddrSinkNewSelects("addr-sink-new-select", cl::Hidden, cl::init(true),
+                   cl::desc("Allow creation of selects in Address sinking."));
+
+static cl::opt<bool> AddrSinkCombineBaseReg(
+    "addr-sink-combine-base-reg", cl::Hidden, cl::init(true),
+    cl::desc("Allow combining of BaseReg field in Address sinking."));
+
+static cl::opt<bool> AddrSinkCombineBaseGV(
+    "addr-sink-combine-base-gv", cl::Hidden, cl::init(true),
+    cl::desc("Allow combining of BaseGV field in Address sinking."));
+
+static cl::opt<bool> AddrSinkCombineBaseOffs(
+    "addr-sink-combine-base-offs", cl::Hidden, cl::init(true),
+    cl::desc("Allow combining of BaseOffs field in Address sinking."));
+
+static cl::opt<bool> AddrSinkCombineScaledReg(
+    "addr-sink-combine-scaled-reg", cl::Hidden, cl::init(true),
+    cl::desc("Allow combining of ScaledReg field in Address sinking."));
+
+static cl::opt<bool>
+    EnableGEPOffsetSplit("cgp-split-large-offset-gep", cl::Hidden,
+                         cl::init(true),
+                         cl::desc("Enable splitting large offset of GEP."));
+
+static cl::opt<bool> EnableICMP_EQToICMP_ST(
+    "cgp-icmp-eq2icmp-st", cl::Hidden, cl::init(false),
+    cl::desc("Enable ICMP_EQ to ICMP_S(L|G)T conversion."));
+
+static cl::opt<bool>
+    VerifyBFIUpdates("cgp-verify-bfi-updates", cl::Hidden, cl::init(false),
+                     cl::desc("Enable BFI update verification for "
+                              "CodeGenPrepare."));
+
+static cl::opt<bool> OptimizePhiTypes(
+    "cgp-optimize-phi-types", cl::Hidden, cl::init(false),
+    cl::desc("Enable converting phi types in CodeGenPrepare"));
+
 namespace {
-typedef SmallPtrSet<Instruction *, 16> SetOfInstrs;
-struct TypeIsSExt {
-  Type *Ty;
-  bool IsSExt;
-  TypeIsSExt(Type *Ty, bool IsSExt) : Ty(Ty), IsSExt(IsSExt) {}
+
+enum ExtType {
+  ZeroExtension,   // Zero extension has been seen.
+  SignExtension,   // Sign extension has been seen.
+  BothExtension    // This extension type is used if we saw sext after
+                   // ZeroExtension had been set, or if we saw zext after
+                   // SignExtension had been set. It makes the type
+                   // information of a promoted instruction invalid.
 };
-typedef DenseMap<Instruction *, TypeIsSExt> InstrToOrigTy;
+
+using SetOfInstrs = SmallPtrSet<Instruction *, 16>;
+using TypeIsSExt = PointerIntPair<Type *, 2, ExtType>;
+using InstrToOrigTy = DenseMap<Instruction *, TypeIsSExt>;
+using SExts = SmallVector<Instruction *, 16>;
+using ValueToSExts = DenseMap<Value *, SExts>;
+
 class TypePromotionTransaction;
 
   class CodeGenPrepare : public FunctionPass {
-    /// TLI - Keep a pointer of a TargetLowering to consult for determining
-    /// transformation profitability.
-    const TargetMachine *TM;
-    const TargetLowering *TLI;
-    const TargetTransformInfo *TTI;
+    const TargetMachine *TM = nullptr;
+    const TargetSubtargetInfo *SubtargetInfo;
+    const TargetLowering *TLI = nullptr;
+    const TargetRegisterInfo *TRI;
+    const TargetTransformInfo *TTI = nullptr;
     const TargetLibraryInfo *TLInfo;
-    DominatorTree *DT;
+    const LoopInfo *LI;
+    std::unique_ptr<BlockFrequencyInfo> BFI;
+    std::unique_ptr<BranchProbabilityInfo> BPI;
+    ProfileSummaryInfo *PSI;
 
-    /// CurInstIterator - As we scan instructions optimizing them, this is the
-    /// next instruction to optimize.  Xforms that can invalidate this should
-    /// update it.
+    /// As we scan instructions optimizing them, this is the next instruction
+    /// to optimize. Transforms that can invalidate this should update it.
     BasicBlock::iterator CurInstIterator;
 
     /// Keeps track of non-local addresses that have been sunk into a block.
     /// This allows us to avoid inserting duplicate code for blocks with
-    /// multiple load/stores of the same address.
-    ValueMap<Value*, Value*> SunkAddrs;
+    /// multiple load/stores of the same address. The usage of WeakTrackingVH
+    /// enables SunkAddrs to be treated as a cache whose entries can be
+    /// invalidated if a sunken address computation has been erased.
+    ValueMap<Value*, WeakTrackingVH> SunkAddrs;
 
-    /// Keeps track of all truncates inserted for the current function.
-    SetOfInstrs InsertedTruncsSet;
+    /// Keeps track of all instructions inserted for the current function.
+    SetOfInstrs InsertedInsts;
+
     /// Keeps track of the type of the related instruction before their
     /// promotion for the current function.
     InstrToOrigTy PromotedInsts;
 
-    /// ModifiedDT - If CFG is modified in anyway, dominator tree may need to
-    /// be updated.
-    bool ModifiedDT;
+    /// Keep track of instructions removed during promotion.
+    SetOfInstrs RemovedInsts;
 
-    /// OptSize - True if optimizing for size.
+    /// Keep track of sext chains based on their initial value.
+    DenseMap<Value *, Instruction *> SeenChainsForSExt;
+
+    /// Keep track of GEPs accessing the same data structures such as structs or
+    /// arrays that are candidates to be split later because of their large
+    /// size.
+    MapVector<
+        AssertingVH<Value>,
+        SmallVector<std::pair<AssertingVH<GetElementPtrInst>, int64_t>, 32>>
+        LargeOffsetGEPMap;
+
+    /// Keep track of new GEP base after splitting the GEPs having large offset.
+    SmallSet<AssertingVH<Value>, 2> NewGEPBases;
+
+    /// Map serial numbers to Large offset GEPs.
+    DenseMap<AssertingVH<GetElementPtrInst>, int> LargeOffsetGEPID;
+
+    /// Keep track of SExt promoted.
+    ValueToSExts ValToSExtendedUses;
+
+    /// True if the function has the OptSize attribute.
     bool OptSize;
+
+    /// DataLayout for the Function being processed.
+    const DataLayout *DL = nullptr;
+
+    /// Building the dominator tree can be expensive, so we only build it
+    /// lazily and update it when required.
+    std::unique_ptr<DominatorTree> DT;
 
   public:
     static char ID; // Pass identification, replacement for typeid
-    explicit CodeGenPrepare(const TargetMachine *TM = nullptr)
-        : FunctionPass(ID), TM(TM), TLI(nullptr), TTI(nullptr) {
-        initializeCodeGenPreparePass(*PassRegistry::getPassRegistry());
-      }
+
+    CodeGenPrepare() : FunctionPass(ID) {
+      initializeCodeGenPreparePass(*PassRegistry::getPassRegistry());
+    }
+
     bool runOnFunction(Function &F) override;
 
-    const char *getPassName() const override { return "CodeGen Prepare"; }
+    StringRef getPassName() const override { return "CodeGen Prepare"; }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.addPreserved<DominatorTreeWrapperPass>();
-      AU.addRequired<TargetLibraryInfo>();
-      AU.addRequired<TargetTransformInfo>();
+      // FIXME: When we can selectively preserve passes, preserve the domtree.
+      AU.addRequired<ProfileSummaryInfoWrapperPass>();
+      AU.addRequired<TargetLibraryInfoWrapperPass>();
+      AU.addRequired<TargetPassConfig>();
+      AU.addRequired<TargetTransformInfoWrapperPass>();
+      AU.addRequired<LoopInfoWrapperPass>();
     }
 
   private:
-    bool EliminateFallThrough(Function &F);
-    bool EliminateMostlyEmptyBlocks(Function &F);
-    bool CanMergeBlocks(const BasicBlock *BB, const BasicBlock *DestBB) const;
-    void EliminateMostlyEmptyBlock(BasicBlock *BB);
-    bool OptimizeBlock(BasicBlock &BB, bool& ModifiedDT);
-    bool OptimizeInst(Instruction *I, bool& ModifiedDT);
-    bool OptimizeMemoryInst(Instruction *I, Value *Addr, Type *AccessTy);
-    bool OptimizeInlineAsmInst(CallInst *CS);
-    bool OptimizeCallInst(CallInst *CI, bool& ModifiedDT);
-    bool MoveExtToFormExtLoad(Instruction *&I);
-    bool OptimizeExtUses(Instruction *I);
-    bool OptimizeSelectInst(SelectInst *SI);
-    bool OptimizeShuffleVectorInst(ShuffleVectorInst *SI);
-    bool OptimizeExtractElementInst(Instruction *Inst);
-    bool DupRetToEnableTailCallOpts(BasicBlock *BB);
-    bool PlaceDbgValues(Function &F);
-    bool sinkAndCmp(Function &F);
-    bool ExtLdPromotion(TypePromotionTransaction &TPT, LoadInst *&LI,
-                        Instruction *&Inst,
-                        const SmallVectorImpl<Instruction *> &Exts,
-                        unsigned CreatedInst);
-    bool splitBranchCondition(Function &F);
+    template <typename F>
+    void resetIteratorIfInvalidatedWhileCalling(BasicBlock *BB, F f) {
+      // Substituting can cause recursive simplifications, which can invalidate
+      // our iterator.  Use a WeakTrackingVH to hold onto it in case this
+      // happens.
+      Value *CurValue = &*CurInstIterator;
+      WeakTrackingVH IterHandle(CurValue);
+
+      f();
+
+      // If the iterator instruction was recursively deleted, start over at the
+      // start of the block.
+      if (IterHandle != CurValue) {
+        CurInstIterator = BB->begin();
+        SunkAddrs.clear();
+      }
+    }
+
+    // Get the DominatorTree, building if necessary.
+    DominatorTree &getDT(Function &F) {
+      if (!DT)
+        DT = std::make_unique<DominatorTree>(F);
+      return *DT;
+    }
+
+    void removeAllAssertingVHReferences(Value *V);
+    bool eliminateAssumptions(Function &F);
+    bool eliminateFallThrough(Function &F);
+    bool eliminateMostlyEmptyBlocks(Function &F);
+    BasicBlock *findDestBlockOfMergeableEmptyBlock(BasicBlock *BB);
+    bool canMergeBlocks(const BasicBlock *BB, const BasicBlock *DestBB) const;
+    void eliminateMostlyEmptyBlock(BasicBlock *BB);
+    bool isMergingEmptyBlockProfitable(BasicBlock *BB, BasicBlock *DestBB,
+                                       bool isPreheader);
+    bool makeBitReverse(Instruction &I);
+    bool optimizeBlock(BasicBlock &BB, bool &ModifiedDT);
+    bool optimizeInst(Instruction *I, bool &ModifiedDT);
+    bool optimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
+                            Type *AccessTy, unsigned AddrSpace);
+    bool optimizeGatherScatterInst(Instruction *MemoryInst, Value *Ptr);
+    bool optimizeInlineAsmInst(CallInst *CS);
+    bool optimizeCallInst(CallInst *CI, bool &ModifiedDT);
+    bool optimizeExt(Instruction *&I);
+    bool optimizeExtUses(Instruction *I);
+    bool optimizeLoadExt(LoadInst *Load);
+    bool optimizeShiftInst(BinaryOperator *BO);
+    bool optimizeFunnelShift(IntrinsicInst *Fsh);
+    bool optimizeSelectInst(SelectInst *SI);
+    bool optimizeShuffleVectorInst(ShuffleVectorInst *SVI);
+    bool optimizeSwitchInst(SwitchInst *SI);
+    bool optimizeExtractElementInst(Instruction *Inst);
+    bool dupRetToEnableTailCallOpts(BasicBlock *BB, bool &ModifiedDT);
+    bool fixupDbgValue(Instruction *I);
+    bool placeDbgValues(Function &F);
+    bool placePseudoProbes(Function &F);
+    bool canFormExtLd(const SmallVectorImpl<Instruction *> &MovedExts,
+                      LoadInst *&LI, Instruction *&Inst, bool HasPromoted);
+    bool tryToPromoteExts(TypePromotionTransaction &TPT,
+                          const SmallVectorImpl<Instruction *> &Exts,
+                          SmallVectorImpl<Instruction *> &ProfitablyMovedExts,
+                          unsigned CreatedInstsCost = 0);
+    bool mergeSExts(Function &F);
+    bool splitLargeGEPOffsets();
+    bool optimizePhiType(PHINode *Inst, SmallPtrSetImpl<PHINode *> &Visited,
+                         SmallPtrSetImpl<Instruction *> &DeletedInstrs);
+    bool optimizePhiTypes(Function &F);
+    bool performAddressTypePromotion(
+        Instruction *&Inst,
+        bool AllowPromotionWithoutCommonHeader,
+        bool HasPromoted, TypePromotionTransaction &TPT,
+        SmallVectorImpl<Instruction *> &SpeculativelyMovedExts);
+    bool splitBranchCondition(Function &F, bool &ModifiedDT);
+    bool simplifyOffsetableRelocate(GCStatepointInst &I);
+
+    bool tryToSinkFreeOperands(Instruction *I);
+    bool replaceMathCmpWithIntrinsic(BinaryOperator *BO, Value *Arg0,
+                                     Value *Arg1, CmpInst *Cmp,
+                                     Intrinsic::ID IID);
+    bool optimizeCmp(CmpInst *Cmp, bool &ModifiedDT);
+    bool combineToUSubWithOverflow(CmpInst *Cmp, bool &ModifiedDT);
+    bool combineToUAddWithOverflow(CmpInst *Cmp, bool &ModifiedDT);
+    void verifyBFIUpdates(Function &F);
   };
-}
+
+} // end anonymous namespace
 
 char CodeGenPrepare::ID = 0;
-INITIALIZE_TM_PASS(CodeGenPrepare, "codegenprepare",
-                   "Optimize for code generation", false, false)
 
-FunctionPass *llvm::createCodeGenPreparePass(const TargetMachine *TM) {
-  return new CodeGenPrepare(TM);
-}
+INITIALIZE_PASS_BEGIN(CodeGenPrepare, DEBUG_TYPE,
+                      "Optimize for code generation", false, false)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(ProfileSummaryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetPassConfig)
+INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
+INITIALIZE_PASS_END(CodeGenPrepare, DEBUG_TYPE,
+                    "Optimize for code generation", false, false)
+
+FunctionPass *llvm::createCodeGenPreparePass() { return new CodeGenPrepare(); }
 
 bool CodeGenPrepare::runOnFunction(Function &F) {
-  if (skipOptnoneFunction(F))
+  if (skipFunction(F))
     return false;
+
+  DL = &F.getParent()->getDataLayout();
 
   bool EverMadeChange = false;
   // Clear per function information.
-  InsertedTruncsSet.clear();
+  InsertedInsts.clear();
   PromotedInsts.clear();
 
-  ModifiedDT = false;
-  if (TM)
-    TLI = TM->getSubtargetImpl()->getTargetLowering();
-  TLInfo = &getAnalysis<TargetLibraryInfo>();
-  TTI = &getAnalysis<TargetTransformInfo>();
-  DominatorTreeWrapperPass *DTWP =
-      getAnalysisIfAvailable<DominatorTreeWrapperPass>();
-  DT = DTWP ? &DTWP->getDomTree() : nullptr;
-  OptSize = F.getAttributes().hasAttribute(AttributeSet::FunctionIndex,
-                                           Attribute::OptimizeForSize);
+  TM = &getAnalysis<TargetPassConfig>().getTM<TargetMachine>();
+  SubtargetInfo = TM->getSubtargetImpl(F);
+  TLI = SubtargetInfo->getTargetLowering();
+  TRI = SubtargetInfo->getRegisterInfo();
+  TLInfo = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
+  TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
+  LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+  BPI.reset(new BranchProbabilityInfo(F, *LI));
+  BFI.reset(new BlockFrequencyInfo(F, *BPI, *LI));
+  PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  OptSize = F.hasOptSize();
+  if (ProfileGuidedSectionPrefix) {
+    // The hot attribute overwrites profile count based hotness while profile
+    // counts based hotness overwrite the cold attribute.
+    // This is a conservative behabvior.
+    if (F.hasFnAttribute(Attribute::Hot) ||
+        PSI->isFunctionHotInCallGraph(&F, *BFI))
+      F.setSectionPrefix("hot");
+    // If PSI shows this function is not hot, we will placed the function
+    // into unlikely section if (1) PSI shows this is a cold function, or
+    // (2) the function has a attribute of cold.
+    else if (PSI->isFunctionColdInCallGraph(&F, *BFI) ||
+             F.hasFnAttribute(Attribute::Cold))
+      F.setSectionPrefix("unlikely");
+    else if (ProfileUnknownInSpecialSection && PSI->hasPartialSampleProfile() &&
+             PSI->isFunctionHotnessUnknown(F))
+      F.setSectionPrefix("unknown");
+  }
 
   /// This optimization identifies DIV instructions that can be
   /// profitably bypassed and carried out with a shorter, faster divide.
-  if (!OptSize && TLI && TLI->isSlowDivBypassed()) {
+  if (!OptSize && !PSI->hasHugeWorkingSetSize() && TLI->isSlowDivBypassed()) {
     const DenseMap<unsigned int, unsigned int> &BypassWidths =
-       TLI->getBypassSlowDivWidths();
-    for (Function::iterator I = F.begin(); I != F.end(); I++)
-      EverMadeChange |= bypassSlowDivision(F, I, BypassWidths);
+        TLI->getBypassSlowDivWidths();
+    BasicBlock* BB = &*F.begin();
+    while (BB != nullptr) {
+      // bypassSlowDivision may create new BBs, but we don't want to reapply the
+      // optimization to those blocks.
+      BasicBlock* Next = BB->getNextNode();
+      // F.hasOptSize is already checked in the outer if statement.
+      if (!llvm::shouldOptimizeForSize(BB, PSI, BFI.get()))
+        EverMadeChange |= bypassSlowDivision(BB, BypassWidths);
+      BB = Next;
+    }
   }
+
+  // Get rid of @llvm.assume builtins before attempting to eliminate empty
+  // blocks, since there might be blocks that only contain @llvm.assume calls
+  // (plus arguments that we can get rid of).
+  EverMadeChange |= eliminateAssumptions(F);
 
   // Eliminate blocks that contain only PHI nodes and an
   // unconditional branch.
-  EverMadeChange |= EliminateMostlyEmptyBlocks(F);
+  EverMadeChange |= eliminateMostlyEmptyBlocks(F);
 
-  // llvm.dbg.value is far away from the value then iSel may not be able
-  // handle it properly. iSel will drop llvm.dbg.value if it can not
-  // find a node corresponding to the value.
-  EverMadeChange |= PlaceDbgValues(F);
+  bool ModifiedDT = false;
+  if (!DisableBranchOpts)
+    EverMadeChange |= splitBranchCondition(F, ModifiedDT);
 
-  // If there is a mask, compare against zero, and branch that can be combined
-  // into a single target instruction, push the mask and compare into branch
-  // users. Do this before OptimizeBlock -> OptimizeInst ->
-  // OptimizeCmpExpression, which perturbs the pattern being searched for.
-  if (!DisableBranchOpts) {
-    EverMadeChange |= sinkAndCmp(F);
-    EverMadeChange |= splitBranchCondition(F);
-  }
+  // Split some critical edges where one of the sources is an indirect branch,
+  // to help generate sane code for PHIs involving such edges.
+  EverMadeChange |= SplitIndirectBrCriticalEdges(F);
 
   bool MadeChange = true;
   while (MadeChange) {
     MadeChange = false;
+    DT.reset();
     for (Function::iterator I = F.begin(); I != F.end(); ) {
-      BasicBlock *BB = I++;
+      BasicBlock *BB = &*I++;
       bool ModifiedDTOnIteration = false;
-      MadeChange |= OptimizeBlock(*BB, ModifiedDTOnIteration);
-      
+      MadeChange |= optimizeBlock(*BB, ModifiedDTOnIteration);
+
       // Restart BB iteration if the dominator tree of the Function was changed
-      ModifiedDT |= ModifiedDTOnIteration;
       if (ModifiedDTOnIteration)
         break;
     }
+    if (EnableTypePromotionMerge && !ValToSExtendedUses.empty())
+      MadeChange |= mergeSExts(F);
+    if (!LargeOffsetGEPMap.empty())
+      MadeChange |= splitLargeGEPOffsets();
+    MadeChange |= optimizePhiTypes(F);
+
+    if (MadeChange)
+      eliminateFallThrough(F);
+
+    // Really free removed instructions during promotion.
+    for (Instruction *I : RemovedInsts)
+      I->deleteValue();
+
     EverMadeChange |= MadeChange;
+    SeenChainsForSExt.clear();
+    ValToSExtendedUses.clear();
+    RemovedInsts.clear();
+    LargeOffsetGEPMap.clear();
+    LargeOffsetGEPID.clear();
   }
 
+  NewGEPBases.clear();
   SunkAddrs.clear();
 
   if (!DisableBranchOpts) {
     MadeChange = false;
-    SmallPtrSet<BasicBlock*, 8> WorkList;
+    // Use a set vector to get deterministic iteration order. The order the
+    // blocks are removed may affect whether or not PHI nodes in successors
+    // are removed.
+    SmallSetVector<BasicBlock*, 8> WorkList;
     for (BasicBlock &BB : F) {
-      SmallVector<BasicBlock *, 2> Successors(succ_begin(&BB), succ_end(&BB));
+      SmallVector<BasicBlock *, 2> Successors(successors(&BB));
       MadeChange |= ConstantFoldTerminator(&BB, true);
       if (!MadeChange) continue;
 
-      for (SmallVectorImpl<BasicBlock*>::iterator
-             II = Successors.begin(), IE = Successors.end(); II != IE; ++II)
-        if (pred_begin(*II) == pred_end(*II))
-          WorkList.insert(*II);
+      for (BasicBlock *Succ : Successors)
+        if (pred_empty(Succ))
+          WorkList.insert(Succ);
     }
 
     // Delete the dead blocks and any of their dead successors.
     MadeChange |= !WorkList.empty();
     while (!WorkList.empty()) {
-      BasicBlock *BB = *WorkList.begin();
-      WorkList.erase(BB);
-      SmallVector<BasicBlock*, 2> Successors(succ_begin(BB), succ_end(BB));
+      BasicBlock *BB = WorkList.pop_back_val();
+      SmallVector<BasicBlock*, 2> Successors(successors(BB));
 
       DeleteDeadBlock(BB);
 
-      for (SmallVectorImpl<BasicBlock*>::iterator
-             II = Successors.begin(), IE = Successors.end(); II != IE; ++II)
-        if (pred_begin(*II) == pred_end(*II))
-          WorkList.insert(*II);
+      for (BasicBlock *Succ : Successors)
+        if (pred_empty(Succ))
+          WorkList.insert(Succ);
     }
 
     // Merge pairs of basic blocks with unconditional branches, connected by
     // a single edge.
     if (EverMadeChange || MadeChange)
-      MadeChange |= EliminateFallThrough(F);
+      MadeChange |= eliminateFallThrough(F);
 
-    if (MadeChange)
-      ModifiedDT = true;
     EverMadeChange |= MadeChange;
   }
 
-  if (ModifiedDT && DT)
-    DT->recalculate(F);
+  if (!DisableGCOpts) {
+    SmallVector<GCStatepointInst *, 2> Statepoints;
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        if (auto *SP = dyn_cast<GCStatepointInst>(&I))
+          Statepoints.push_back(SP);
+    for (auto &I : Statepoints)
+      EverMadeChange |= simplifyOffsetableRelocate(*I);
+  }
+
+  // Do this last to clean up use-before-def scenarios introduced by other
+  // preparatory transforms.
+  EverMadeChange |= placeDbgValues(F);
+  EverMadeChange |= placePseudoProbes(F);
+
+#ifndef NDEBUG
+  if (VerifyBFIUpdates)
+    verifyBFIUpdates(F);
+#endif
 
   return EverMadeChange;
 }
 
-/// EliminateFallThrough - Merge basic blocks which are connected
-/// by a single edge, where one of the basic blocks has a single successor
-/// pointing to the other basic block, which has a single predecessor.
-bool CodeGenPrepare::EliminateFallThrough(Function &F) {
+bool CodeGenPrepare::eliminateAssumptions(Function &F) {
+  bool MadeChange = false;
+  for (BasicBlock &BB : F) {
+    CurInstIterator = BB.begin();
+    while (CurInstIterator != BB.end()) {
+      Instruction *I = &*(CurInstIterator++);
+      if (auto *Assume = dyn_cast<AssumeInst>(I)) {
+        MadeChange = true;
+        Value *Operand = Assume->getOperand(0);
+        Assume->eraseFromParent();
+
+        resetIteratorIfInvalidatedWhileCalling(&BB, [&]() {
+          RecursivelyDeleteTriviallyDeadInstructions(Operand, TLInfo, nullptr);
+        });
+      }
+    }
+  }
+  return MadeChange;
+}
+
+/// An instruction is about to be deleted, so remove all references to it in our
+/// GEP-tracking data strcutures.
+void CodeGenPrepare::removeAllAssertingVHReferences(Value *V) {
+  LargeOffsetGEPMap.erase(V);
+  NewGEPBases.erase(V);
+
+  auto GEP = dyn_cast<GetElementPtrInst>(V);
+  if (!GEP)
+    return;
+
+  LargeOffsetGEPID.erase(GEP);
+
+  auto VecI = LargeOffsetGEPMap.find(GEP->getPointerOperand());
+  if (VecI == LargeOffsetGEPMap.end())
+    return;
+
+  auto &GEPVector = VecI->second;
+  const auto &I =
+      llvm::find_if(GEPVector, [=](auto &Elt) { return Elt.first == GEP; });
+  if (I == GEPVector.end())
+    return;
+
+  GEPVector.erase(I);
+  if (GEPVector.empty())
+    LargeOffsetGEPMap.erase(VecI);
+}
+
+// Verify BFI has been updated correctly by recomputing BFI and comparing them.
+void LLVM_ATTRIBUTE_UNUSED CodeGenPrepare::verifyBFIUpdates(Function &F) {
+  DominatorTree NewDT(F);
+  LoopInfo NewLI(NewDT);
+  BranchProbabilityInfo NewBPI(F, NewLI, TLInfo);
+  BlockFrequencyInfo NewBFI(F, NewBPI, NewLI);
+  NewBFI.verifyMatch(*BFI);
+}
+
+/// Merge basic blocks which are connected by a single edge, where one of the
+/// basic blocks has a single successor pointing to the other basic block,
+/// which has a single predecessor.
+bool CodeGenPrepare::eliminateFallThrough(Function &F) {
   bool Changed = false;
   // Scan all of the blocks in the function, except for the entry block.
-  for (Function::iterator I = std::next(F.begin()), E = F.end(); I != E;) {
-    BasicBlock *BB = I++;
+  // Use a temporary array to avoid iterator being invalidated when
+  // deleting blocks.
+  SmallVector<WeakTrackingVH, 16> Blocks;
+  for (auto &Block : llvm::drop_begin(F))
+    Blocks.push_back(&Block);
+
+  SmallSet<WeakTrackingVH, 16> Preds;
+  for (auto &Block : Blocks) {
+    auto *BB = cast_or_null<BasicBlock>(Block);
+    if (!BB)
+      continue;
     // If the destination block has a single pred, then this is a trivial
     // edge, just collapse it.
     BasicBlock *SinglePred = BB->getSinglePredecessor();
@@ -322,77 +706,188 @@ bool CodeGenPrepare::EliminateFallThrough(Function &F) {
     BranchInst *Term = dyn_cast<BranchInst>(SinglePred->getTerminator());
     if (Term && !Term->isConditional()) {
       Changed = true;
-      DEBUG(dbgs() << "To merge:\n"<< *SinglePred << "\n\n\n");
-      // Remember if SinglePred was the entry block of the function.
-      // If so, we will need to move BB back to the entry position.
-      bool isEntry = SinglePred == &SinglePred->getParent()->getEntryBlock();
-      MergeBasicBlockIntoOnlyPred(BB, this);
+      LLVM_DEBUG(dbgs() << "To merge:\n" << *BB << "\n\n\n");
 
-      if (isEntry && BB != &BB->getParent()->getEntryBlock())
-        BB->moveBefore(&BB->getParent()->getEntryBlock());
-
-      // We have erased a block. Update the iterator.
-      I = BB;
+      // Merge BB into SinglePred and delete it.
+      MergeBlockIntoPredecessor(BB);
+      Preds.insert(SinglePred);
     }
   }
+
+  // (Repeatedly) merging blocks into their predecessors can create redundant
+  // debug intrinsics.
+  for (auto &Pred : Preds)
+    if (auto *BB = cast_or_null<BasicBlock>(Pred))
+      RemoveRedundantDbgInstrs(BB);
+
   return Changed;
 }
 
-/// EliminateMostlyEmptyBlocks - eliminate blocks that contain only PHI nodes,
-/// debug info directives, and an unconditional branch.  Passes before isel
-/// (e.g. LSR/loopsimplify) often split edges in ways that are non-optimal for
-/// isel.  Start by eliminating these blocks so we can split them the way we
-/// want them.
-bool CodeGenPrepare::EliminateMostlyEmptyBlocks(Function &F) {
-  bool MadeChange = false;
-  // Note that this intentionally skips the entry block.
-  for (Function::iterator I = std::next(F.begin()), E = F.end(); I != E;) {
-    BasicBlock *BB = I++;
+/// Find a destination block from BB if BB is mergeable empty block.
+BasicBlock *CodeGenPrepare::findDestBlockOfMergeableEmptyBlock(BasicBlock *BB) {
+  // If this block doesn't end with an uncond branch, ignore it.
+  BranchInst *BI = dyn_cast<BranchInst>(BB->getTerminator());
+  if (!BI || !BI->isUnconditional())
+    return nullptr;
 
-    // If this block doesn't end with an uncond branch, ignore it.
-    BranchInst *BI = dyn_cast<BranchInst>(BB->getTerminator());
-    if (!BI || !BI->isUnconditional())
-      continue;
-
-    // If the instruction before the branch (skipping debug info) isn't a phi
-    // node, then other stuff is happening here.
-    BasicBlock::iterator BBI = BI;
-    if (BBI != BB->begin()) {
+  // If the instruction before the branch (skipping debug info) isn't a phi
+  // node, then other stuff is happening here.
+  BasicBlock::iterator BBI = BI->getIterator();
+  if (BBI != BB->begin()) {
+    --BBI;
+    while (isa<DbgInfoIntrinsic>(BBI)) {
+      if (BBI == BB->begin())
+        break;
       --BBI;
-      while (isa<DbgInfoIntrinsic>(BBI)) {
-        if (BBI == BB->begin())
-          break;
-        --BBI;
-      }
-      if (!isa<DbgInfoIntrinsic>(BBI) && !isa<PHINode>(BBI))
-        continue;
     }
+    if (!isa<DbgInfoIntrinsic>(BBI) && !isa<PHINode>(BBI))
+      return nullptr;
+  }
 
-    // Do not break infinite loops.
-    BasicBlock *DestBB = BI->getSuccessor(0);
-    if (DestBB == BB)
+  // Do not break infinite loops.
+  BasicBlock *DestBB = BI->getSuccessor(0);
+  if (DestBB == BB)
+    return nullptr;
+
+  if (!canMergeBlocks(BB, DestBB))
+    DestBB = nullptr;
+
+  return DestBB;
+}
+
+/// Eliminate blocks that contain only PHI nodes, debug info directives, and an
+/// unconditional branch. Passes before isel (e.g. LSR/loopsimplify) often split
+/// edges in ways that are non-optimal for isel. Start by eliminating these
+/// blocks so we can split them the way we want them.
+bool CodeGenPrepare::eliminateMostlyEmptyBlocks(Function &F) {
+  SmallPtrSet<BasicBlock *, 16> Preheaders;
+  SmallVector<Loop *, 16> LoopList(LI->begin(), LI->end());
+  while (!LoopList.empty()) {
+    Loop *L = LoopList.pop_back_val();
+    llvm::append_range(LoopList, *L);
+    if (BasicBlock *Preheader = L->getLoopPreheader())
+      Preheaders.insert(Preheader);
+  }
+
+  bool MadeChange = false;
+  // Copy blocks into a temporary array to avoid iterator invalidation issues
+  // as we remove them.
+  // Note that this intentionally skips the entry block.
+  SmallVector<WeakTrackingVH, 16> Blocks;
+  for (auto &Block : llvm::drop_begin(F))
+    Blocks.push_back(&Block);
+
+  for (auto &Block : Blocks) {
+    BasicBlock *BB = cast_or_null<BasicBlock>(Block);
+    if (!BB)
+      continue;
+    BasicBlock *DestBB = findDestBlockOfMergeableEmptyBlock(BB);
+    if (!DestBB ||
+        !isMergingEmptyBlockProfitable(BB, DestBB, Preheaders.count(BB)))
       continue;
 
-    if (!CanMergeBlocks(BB, DestBB))
-      continue;
-
-    EliminateMostlyEmptyBlock(BB);
+    eliminateMostlyEmptyBlock(BB);
     MadeChange = true;
   }
   return MadeChange;
 }
 
-/// CanMergeBlocks - Return true if we can merge BB into DestBB if there is a
-/// single uncond branch between them, and BB contains no other non-phi
+bool CodeGenPrepare::isMergingEmptyBlockProfitable(BasicBlock *BB,
+                                                   BasicBlock *DestBB,
+                                                   bool isPreheader) {
+  // Do not delete loop preheaders if doing so would create a critical edge.
+  // Loop preheaders can be good locations to spill registers. If the
+  // preheader is deleted and we create a critical edge, registers may be
+  // spilled in the loop body instead.
+  if (!DisablePreheaderProtect && isPreheader &&
+      !(BB->getSinglePredecessor() &&
+        BB->getSinglePredecessor()->getSingleSuccessor()))
+    return false;
+
+  // Skip merging if the block's successor is also a successor to any callbr
+  // that leads to this block.
+  // FIXME: Is this really needed? Is this a correctness issue?
+  for (BasicBlock *Pred : predecessors(BB)) {
+    if (auto *CBI = dyn_cast<CallBrInst>((Pred)->getTerminator()))
+      for (unsigned i = 0, e = CBI->getNumSuccessors(); i != e; ++i)
+        if (DestBB == CBI->getSuccessor(i))
+          return false;
+  }
+
+  // Try to skip merging if the unique predecessor of BB is terminated by a
+  // switch or indirect branch instruction, and BB is used as an incoming block
+  // of PHIs in DestBB. In such case, merging BB and DestBB would cause ISel to
+  // add COPY instructions in the predecessor of BB instead of BB (if it is not
+  // merged). Note that the critical edge created by merging such blocks wont be
+  // split in MachineSink because the jump table is not analyzable. By keeping
+  // such empty block (BB), ISel will place COPY instructions in BB, not in the
+  // predecessor of BB.
+  BasicBlock *Pred = BB->getUniquePredecessor();
+  if (!Pred ||
+      !(isa<SwitchInst>(Pred->getTerminator()) ||
+        isa<IndirectBrInst>(Pred->getTerminator())))
+    return true;
+
+  if (BB->getTerminator() != BB->getFirstNonPHIOrDbg())
+    return true;
+
+  // We use a simple cost heuristic which determine skipping merging is
+  // profitable if the cost of skipping merging is less than the cost of
+  // merging : Cost(skipping merging) < Cost(merging BB), where the
+  // Cost(skipping merging) is Freq(BB) * (Cost(Copy) + Cost(Branch)), and
+  // the Cost(merging BB) is Freq(Pred) * Cost(Copy).
+  // Assuming Cost(Copy) == Cost(Branch), we could simplify it to :
+  //   Freq(Pred) / Freq(BB) > 2.
+  // Note that if there are multiple empty blocks sharing the same incoming
+  // value for the PHIs in the DestBB, we consider them together. In such
+  // case, Cost(merging BB) will be the sum of their frequencies.
+
+  if (!isa<PHINode>(DestBB->begin()))
+    return true;
+
+  SmallPtrSet<BasicBlock *, 16> SameIncomingValueBBs;
+
+  // Find all other incoming blocks from which incoming values of all PHIs in
+  // DestBB are the same as the ones from BB.
+  for (BasicBlock *DestBBPred : predecessors(DestBB)) {
+    if (DestBBPred == BB)
+      continue;
+
+    if (llvm::all_of(DestBB->phis(), [&](const PHINode &DestPN) {
+          return DestPN.getIncomingValueForBlock(BB) ==
+                 DestPN.getIncomingValueForBlock(DestBBPred);
+        }))
+      SameIncomingValueBBs.insert(DestBBPred);
+  }
+
+  // See if all BB's incoming values are same as the value from Pred. In this
+  // case, no reason to skip merging because COPYs are expected to be place in
+  // Pred already.
+  if (SameIncomingValueBBs.count(Pred))
+    return true;
+
+  BlockFrequency PredFreq = BFI->getBlockFreq(Pred);
+  BlockFrequency BBFreq = BFI->getBlockFreq(BB);
+
+  for (auto *SameValueBB : SameIncomingValueBBs)
+    if (SameValueBB->getUniquePredecessor() == Pred &&
+        DestBB == findDestBlockOfMergeableEmptyBlock(SameValueBB))
+      BBFreq += BFI->getBlockFreq(SameValueBB);
+
+  return PredFreq.getFrequency() <=
+         BBFreq.getFrequency() * FreqRatioToSkipMerge;
+}
+
+/// Return true if we can merge BB into DestBB if there is a single
+/// unconditional branch between them, and BB contains no other non-phi
 /// instructions.
-bool CodeGenPrepare::CanMergeBlocks(const BasicBlock *BB,
+bool CodeGenPrepare::canMergeBlocks(const BasicBlock *BB,
                                     const BasicBlock *DestBB) const {
   // We only want to eliminate blocks whose phi nodes are used by phi nodes in
   // the successor.  If there are more complex condition (e.g. preheaders),
   // don't mess around with them.
-  BasicBlock::const_iterator BBI = BB->begin();
-  while (const PHINode *PN = dyn_cast<PHINode>(BBI++)) {
-    for (const User *U : PN->users()) {
+  for (const PHINode &PN : BB->phis()) {
+    for (const User *U : PN.users()) {
       const Instruction *UI = cast<Instruction>(U);
       if (UI->getParent() != DestBB || !isa<PHINode>(UI))
         return false;
@@ -431,10 +926,9 @@ bool CodeGenPrepare::CanMergeBlocks(const BasicBlock *BB,
   for (unsigned i = 0, e = DestBBPN->getNumIncomingValues(); i != e; ++i) {
     BasicBlock *Pred = DestBBPN->getIncomingBlock(i);
     if (BBPreds.count(Pred)) {   // Common predecessor?
-      BBI = DestBB->begin();
-      while (const PHINode *PN = dyn_cast<PHINode>(BBI++)) {
-        const Value *V1 = PN->getIncomingValueForBlock(Pred);
-        const Value *V2 = PN->getIncomingValueForBlock(BB);
+      for (const PHINode &PN : DestBB->phis()) {
+        const Value *V1 = PN.getIncomingValueForBlock(Pred);
+        const Value *V2 = PN.getIncomingValueForBlock(BB);
 
         // If V2 is a phi node in BB, look up what the mapped value will be.
         if (const PHINode *V2PN = dyn_cast<PHINode>(V2))
@@ -450,39 +944,35 @@ bool CodeGenPrepare::CanMergeBlocks(const BasicBlock *BB,
   return true;
 }
 
-
-/// EliminateMostlyEmptyBlock - Eliminate a basic block that have only phi's and
-/// an unconditional branch in it.
-void CodeGenPrepare::EliminateMostlyEmptyBlock(BasicBlock *BB) {
+/// Eliminate a basic block that has only phi's and an unconditional branch in
+/// it.
+void CodeGenPrepare::eliminateMostlyEmptyBlock(BasicBlock *BB) {
   BranchInst *BI = cast<BranchInst>(BB->getTerminator());
   BasicBlock *DestBB = BI->getSuccessor(0);
 
-  DEBUG(dbgs() << "MERGING MOSTLY EMPTY BLOCKS - BEFORE:\n" << *BB << *DestBB);
+  LLVM_DEBUG(dbgs() << "MERGING MOSTLY EMPTY BLOCKS - BEFORE:\n"
+                    << *BB << *DestBB);
 
   // If the destination block has a single pred, then this is a trivial edge,
   // just collapse it.
   if (BasicBlock *SinglePred = DestBB->getSinglePredecessor()) {
     if (SinglePred != DestBB) {
-      // Remember if SinglePred was the entry block of the function.  If so, we
-      // will need to move BB back to the entry position.
-      bool isEntry = SinglePred == &SinglePred->getParent()->getEntryBlock();
-      MergeBasicBlockIntoOnlyPred(DestBB, this);
-
-      if (isEntry && BB != &BB->getParent()->getEntryBlock())
-        BB->moveBefore(&BB->getParent()->getEntryBlock());
-
-      DEBUG(dbgs() << "AFTER:\n" << *DestBB << "\n\n\n");
+      assert(SinglePred == BB &&
+             "Single predecessor not the same as predecessor");
+      // Merge DestBB into SinglePred/BB and delete it.
+      MergeBlockIntoPredecessor(DestBB);
+      // Note: BB(=SinglePred) will not be deleted on this path.
+      // DestBB(=its single successor) is the one that was deleted.
+      LLVM_DEBUG(dbgs() << "AFTER:\n" << *SinglePred << "\n\n\n");
       return;
     }
   }
 
   // Otherwise, we have multiple predecessors of BB.  Update the PHIs in DestBB
   // to handle the new incoming edges it is about to have.
-  PHINode *PN;
-  for (BasicBlock::iterator BBI = DestBB->begin();
-       (PN = dyn_cast<PHINode>(BBI)); ++BBI) {
+  for (PHINode &PN : DestBB->phis()) {
     // Remove the incoming value for BB, and remember it.
-    Value *InVal = PN->removeIncomingValue(BB, false);
+    Value *InVal = PN.removeIncomingValue(BB, false);
 
     // Two options: either the InVal is a phi node defined in BB or it is some
     // value that dominates BB.
@@ -490,17 +980,17 @@ void CodeGenPrepare::EliminateMostlyEmptyBlock(BasicBlock *BB) {
     if (InValPhi && InValPhi->getParent() == BB) {
       // Add all of the input values of the input PHI as inputs of this phi.
       for (unsigned i = 0, e = InValPhi->getNumIncomingValues(); i != e; ++i)
-        PN->addIncoming(InValPhi->getIncomingValue(i),
-                        InValPhi->getIncomingBlock(i));
+        PN.addIncoming(InValPhi->getIncomingValue(i),
+                       InValPhi->getIncomingBlock(i));
     } else {
       // Otherwise, add one instance of the dominating value for each edge that
       // we will be adding.
       if (PHINode *BBPN = dyn_cast<PHINode>(BB->begin())) {
         for (unsigned i = 0, e = BBPN->getNumIncomingValues(); i != e; ++i)
-          PN->addIncoming(InVal, BBPN->getIncomingBlock(i));
+          PN.addIncoming(InVal, BBPN->getIncomingBlock(i));
       } else {
-        for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI)
-          PN->addIncoming(InVal, *PI);
+        for (BasicBlock *Pred : predecessors(BB))
+          PN.addIncoming(InVal, Pred);
       }
     }
   }
@@ -508,20 +998,206 @@ void CodeGenPrepare::EliminateMostlyEmptyBlock(BasicBlock *BB) {
   // The PHIs are now updated, change everything that refers to BB to use
   // DestBB and remove BB.
   BB->replaceAllUsesWith(DestBB);
-  if (DT && !ModifiedDT) {
-    BasicBlock *BBIDom  = DT->getNode(BB)->getIDom()->getBlock();
-    BasicBlock *DestBBIDom = DT->getNode(DestBB)->getIDom()->getBlock();
-    BasicBlock *NewIDom = DT->findNearestCommonDominator(BBIDom, DestBBIDom);
-    DT->changeImmediateDominator(DestBB, NewIDom);
-    DT->eraseNode(BB);
-  }
   BB->eraseFromParent();
   ++NumBlocksElim;
 
-  DEBUG(dbgs() << "AFTER:\n" << *DestBB << "\n\n\n");
+  LLVM_DEBUG(dbgs() << "AFTER:\n" << *DestBB << "\n\n\n");
 }
 
-/// SinkCast - Sink the specified cast instruction into its user blocks
+// Computes a map of base pointer relocation instructions to corresponding
+// derived pointer relocation instructions given a vector of all relocate calls
+static void computeBaseDerivedRelocateMap(
+    const SmallVectorImpl<GCRelocateInst *> &AllRelocateCalls,
+    DenseMap<GCRelocateInst *, SmallVector<GCRelocateInst *, 2>>
+        &RelocateInstMap) {
+  // Collect information in two maps: one primarily for locating the base object
+  // while filling the second map; the second map is the final structure holding
+  // a mapping between Base and corresponding Derived relocate calls
+  DenseMap<std::pair<unsigned, unsigned>, GCRelocateInst *> RelocateIdxMap;
+  for (auto *ThisRelocate : AllRelocateCalls) {
+    auto K = std::make_pair(ThisRelocate->getBasePtrIndex(),
+                            ThisRelocate->getDerivedPtrIndex());
+    RelocateIdxMap.insert(std::make_pair(K, ThisRelocate));
+  }
+  for (auto &Item : RelocateIdxMap) {
+    std::pair<unsigned, unsigned> Key = Item.first;
+    if (Key.first == Key.second)
+      // Base relocation: nothing to insert
+      continue;
+
+    GCRelocateInst *I = Item.second;
+    auto BaseKey = std::make_pair(Key.first, Key.first);
+
+    // We're iterating over RelocateIdxMap so we cannot modify it.
+    auto MaybeBase = RelocateIdxMap.find(BaseKey);
+    if (MaybeBase == RelocateIdxMap.end())
+      // TODO: We might want to insert a new base object relocate and gep off
+      // that, if there are enough derived object relocates.
+      continue;
+
+    RelocateInstMap[MaybeBase->second].push_back(I);
+  }
+}
+
+// Accepts a GEP and extracts the operands into a vector provided they're all
+// small integer constants
+static bool getGEPSmallConstantIntOffsetV(GetElementPtrInst *GEP,
+                                          SmallVectorImpl<Value *> &OffsetV) {
+  for (unsigned i = 1; i < GEP->getNumOperands(); i++) {
+    // Only accept small constant integer operands
+    auto *Op = dyn_cast<ConstantInt>(GEP->getOperand(i));
+    if (!Op || Op->getZExtValue() > 20)
+      return false;
+  }
+
+  for (unsigned i = 1; i < GEP->getNumOperands(); i++)
+    OffsetV.push_back(GEP->getOperand(i));
+  return true;
+}
+
+// Takes a RelocatedBase (base pointer relocation instruction) and Targets to
+// replace, computes a replacement, and affects it.
+static bool
+simplifyRelocatesOffABase(GCRelocateInst *RelocatedBase,
+                          const SmallVectorImpl<GCRelocateInst *> &Targets) {
+  bool MadeChange = false;
+  // We must ensure the relocation of derived pointer is defined after
+  // relocation of base pointer. If we find a relocation corresponding to base
+  // defined earlier than relocation of base then we move relocation of base
+  // right before found relocation. We consider only relocation in the same
+  // basic block as relocation of base. Relocations from other basic block will
+  // be skipped by optimization and we do not care about them.
+  for (auto R = RelocatedBase->getParent()->getFirstInsertionPt();
+       &*R != RelocatedBase; ++R)
+    if (auto *RI = dyn_cast<GCRelocateInst>(R))
+      if (RI->getStatepoint() == RelocatedBase->getStatepoint())
+        if (RI->getBasePtrIndex() == RelocatedBase->getBasePtrIndex()) {
+          RelocatedBase->moveBefore(RI);
+          break;
+        }
+
+  for (GCRelocateInst *ToReplace : Targets) {
+    assert(ToReplace->getBasePtrIndex() == RelocatedBase->getBasePtrIndex() &&
+           "Not relocating a derived object of the original base object");
+    if (ToReplace->getBasePtrIndex() == ToReplace->getDerivedPtrIndex()) {
+      // A duplicate relocate call. TODO: coalesce duplicates.
+      continue;
+    }
+
+    if (RelocatedBase->getParent() != ToReplace->getParent()) {
+      // Base and derived relocates are in different basic blocks.
+      // In this case transform is only valid when base dominates derived
+      // relocate. However it would be too expensive to check dominance
+      // for each such relocate, so we skip the whole transformation.
+      continue;
+    }
+
+    Value *Base = ToReplace->getBasePtr();
+    auto *Derived = dyn_cast<GetElementPtrInst>(ToReplace->getDerivedPtr());
+    if (!Derived || Derived->getPointerOperand() != Base)
+      continue;
+
+    SmallVector<Value *, 2> OffsetV;
+    if (!getGEPSmallConstantIntOffsetV(Derived, OffsetV))
+      continue;
+
+    // Create a Builder and replace the target callsite with a gep
+    assert(RelocatedBase->getNextNode() &&
+           "Should always have one since it's not a terminator");
+
+    // Insert after RelocatedBase
+    IRBuilder<> Builder(RelocatedBase->getNextNode());
+    Builder.SetCurrentDebugLocation(ToReplace->getDebugLoc());
+
+    // If gc_relocate does not match the actual type, cast it to the right type.
+    // In theory, there must be a bitcast after gc_relocate if the type does not
+    // match, and we should reuse it to get the derived pointer. But it could be
+    // cases like this:
+    // bb1:
+    //  ...
+    //  %g1 = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(...)
+    //  br label %merge
+    //
+    // bb2:
+    //  ...
+    //  %g2 = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(...)
+    //  br label %merge
+    //
+    // merge:
+    //  %p1 = phi i8 addrspace(1)* [ %g1, %bb1 ], [ %g2, %bb2 ]
+    //  %cast = bitcast i8 addrspace(1)* %p1 in to i32 addrspace(1)*
+    //
+    // In this case, we can not find the bitcast any more. So we insert a new bitcast
+    // no matter there is already one or not. In this way, we can handle all cases, and
+    // the extra bitcast should be optimized away in later passes.
+    Value *ActualRelocatedBase = RelocatedBase;
+    if (RelocatedBase->getType() != Base->getType()) {
+      ActualRelocatedBase =
+          Builder.CreateBitCast(RelocatedBase, Base->getType());
+    }
+    Value *Replacement = Builder.CreateGEP(
+        Derived->getSourceElementType(), ActualRelocatedBase, makeArrayRef(OffsetV));
+    Replacement->takeName(ToReplace);
+    // If the newly generated derived pointer's type does not match the original derived
+    // pointer's type, cast the new derived pointer to match it. Same reasoning as above.
+    Value *ActualReplacement = Replacement;
+    if (Replacement->getType() != ToReplace->getType()) {
+      ActualReplacement =
+          Builder.CreateBitCast(Replacement, ToReplace->getType());
+    }
+    ToReplace->replaceAllUsesWith(ActualReplacement);
+    ToReplace->eraseFromParent();
+
+    MadeChange = true;
+  }
+  return MadeChange;
+}
+
+// Turns this:
+//
+// %base = ...
+// %ptr = gep %base + 15
+// %tok = statepoint (%fun, i32 0, i32 0, i32 0, %base, %ptr)
+// %base' = relocate(%tok, i32 4, i32 4)
+// %ptr' = relocate(%tok, i32 4, i32 5)
+// %val = load %ptr'
+//
+// into this:
+//
+// %base = ...
+// %ptr = gep %base + 15
+// %tok = statepoint (%fun, i32 0, i32 0, i32 0, %base, %ptr)
+// %base' = gc.relocate(%tok, i32 4, i32 4)
+// %ptr' = gep %base' + 15
+// %val = load %ptr'
+bool CodeGenPrepare::simplifyOffsetableRelocate(GCStatepointInst &I) {
+  bool MadeChange = false;
+  SmallVector<GCRelocateInst *, 2> AllRelocateCalls;
+  for (auto *U : I.users())
+    if (GCRelocateInst *Relocate = dyn_cast<GCRelocateInst>(U))
+      // Collect all the relocate calls associated with a statepoint
+      AllRelocateCalls.push_back(Relocate);
+
+  // We need at least one base pointer relocation + one derived pointer
+  // relocation to mangle
+  if (AllRelocateCalls.size() < 2)
+    return false;
+
+  // RelocateInstMap is a mapping from the base relocate instruction to the
+  // corresponding derived relocate instructions
+  DenseMap<GCRelocateInst *, SmallVector<GCRelocateInst *, 2>> RelocateInstMap;
+  computeBaseDerivedRelocateMap(AllRelocateCalls, RelocateInstMap);
+  if (RelocateInstMap.empty())
+    return false;
+
+  for (auto &Item : RelocateInstMap)
+    // Item.first is the RelocatedBase to offset against
+    // Item.second is the vector of Targets to replace
+    MadeChange = simplifyRelocatesOffABase(Item.first, Item.second);
+  return MadeChange;
+}
+
+/// Sink the specified cast instruction into its user blocks.
 static bool SinkCast(CastInst *CI) {
   BasicBlock *DefBB = CI->getParent();
 
@@ -544,6 +1220,17 @@ static bool SinkCast(CastInst *CI) {
     // Preincrement use iterator so we don't invalidate it.
     ++UI;
 
+    // The first insertion point of a block containing an EH pad is after the
+    // pad.  If the pad is the user, we cannot sink the cast past the pad.
+    if (User->isEHPad())
+      continue;
+
+    // If the block selected to receive the cast is an EH pad that does not
+    // allow non-PHI instructions before the terminator, we can't sink the
+    // cast.
+    if (UserBB->getTerminator()->isEHPad())
+      continue;
+
     // If this user is in the same block as the cast, don't change the cast.
     if (UserBB == DefBB) continue;
 
@@ -552,19 +1239,21 @@ static bool SinkCast(CastInst *CI) {
 
     if (!InsertedCast) {
       BasicBlock::iterator InsertPt = UserBB->getFirstInsertionPt();
-      InsertedCast =
-        CastInst::Create(CI->getOpcode(), CI->getOperand(0), CI->getType(), "",
-                         InsertPt);
-      MadeChange = true;
+      assert(InsertPt != UserBB->end());
+      InsertedCast = CastInst::Create(CI->getOpcode(), CI->getOperand(0),
+                                      CI->getType(), "", &*InsertPt);
+      InsertedCast->setDebugLoc(CI->getDebugLoc());
     }
 
     // Replace a use of the cast with a use of the new cast.
     TheUse = InsertedCast;
+    MadeChange = true;
     ++NumCastUses;
   }
 
   // If we removed all uses, nuke the cast.
   if (CI->use_empty()) {
+    salvageDebugInfo(*CI);
     CI->eraseFromParent();
     MadeChange = true;
   }
@@ -572,17 +1261,24 @@ static bool SinkCast(CastInst *CI) {
   return MadeChange;
 }
 
-/// OptimizeNoopCopyExpression - If the specified cast instruction is a noop
-/// copy (e.g. it's casting from one pointer type to another, i32->i8 on PPC),
-/// sink it into user blocks to reduce the number of virtual
-/// registers that must be created and coalesced.
+/// If the specified cast instruction is a noop copy (e.g. it's casting from
+/// one pointer type to another, i32->i8 on PPC), sink it into user blocks to
+/// reduce the number of virtual registers that must be created and coalesced.
 ///
 /// Return true if any changes are made.
-///
-static bool OptimizeNoopCopyExpression(CastInst *CI, const TargetLowering &TLI){
+static bool OptimizeNoopCopyExpression(CastInst *CI, const TargetLowering &TLI,
+                                       const DataLayout &DL) {
+  // Sink only "cheap" (or nop) address-space casts.  This is a weaker condition
+  // than sinking only nop casts, but is helpful on some platforms.
+  if (auto *ASC = dyn_cast<AddrSpaceCastInst>(CI)) {
+    if (!TLI.isFreeAddrSpaceCast(ASC->getSrcAddressSpace(),
+                                 ASC->getDestAddressSpace()))
+      return false;
+  }
+
   // If this is a noop copy,
-  EVT SrcVT = TLI.getValueType(CI->getOperand(0)->getType());
-  EVT DstVT = TLI.getValueType(CI->getType());
+  EVT SrcVT = TLI.getValueType(DL, CI->getOperand(0)->getType());
+  EVT DstVT = TLI.getValueType(DL, CI->getType());
 
   // This is an fp<->int conversion?
   if (SrcVT.isInteger() != DstVT.isInteger())
@@ -609,20 +1305,284 @@ static bool OptimizeNoopCopyExpression(CastInst *CI, const TargetLowering &TLI){
   return SinkCast(CI);
 }
 
-/// OptimizeCmpExpression - sink the given CmpInst into user blocks to reduce
-/// the number of virtual registers that must be created and coalesced.  This is
-/// a clear win except on targets with multiple condition code registers
-///  (PowerPC), where it might lose; some adjustment may be wanted there.
+// Match a simple increment by constant operation.  Note that if a sub is
+// matched, the step is negated (as if the step had been canonicalized to
+// an add, even though we leave the instruction alone.)
+bool matchIncrement(const Instruction* IVInc, Instruction *&LHS,
+                    Constant *&Step) {
+  if (match(IVInc, m_Add(m_Instruction(LHS), m_Constant(Step))) ||
+      match(IVInc, m_ExtractValue<0>(m_Intrinsic<Intrinsic::uadd_with_overflow>(
+                       m_Instruction(LHS), m_Constant(Step)))))
+    return true;
+  if (match(IVInc, m_Sub(m_Instruction(LHS), m_Constant(Step))) ||
+      match(IVInc, m_ExtractValue<0>(m_Intrinsic<Intrinsic::usub_with_overflow>(
+                       m_Instruction(LHS), m_Constant(Step))))) {
+    Step = ConstantExpr::getNeg(Step);
+    return true;
+  }
+  return false;
+}
+
+/// If given \p PN is an inductive variable with value IVInc coming from the
+/// backedge, and on each iteration it gets increased by Step, return pair
+/// <IVInc, Step>. Otherwise, return None.
+static Optional<std::pair<Instruction *, Constant *> >
+getIVIncrement(const PHINode *PN, const LoopInfo *LI) {
+  const Loop *L = LI->getLoopFor(PN->getParent());
+  if (!L || L->getHeader() != PN->getParent() || !L->getLoopLatch())
+    return None;
+  auto *IVInc =
+      dyn_cast<Instruction>(PN->getIncomingValueForBlock(L->getLoopLatch()));
+  if (!IVInc || LI->getLoopFor(IVInc->getParent()) != L)
+    return None;
+  Instruction *LHS = nullptr;
+  Constant *Step = nullptr;
+  if (matchIncrement(IVInc, LHS, Step) && LHS == PN)
+    return std::make_pair(IVInc, Step);
+  return None;
+}
+
+static bool isIVIncrement(const Value *V, const LoopInfo *LI) {
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I)
+    return false;
+  Instruction *LHS = nullptr;
+  Constant *Step = nullptr;
+  if (!matchIncrement(I, LHS, Step))
+    return false;
+  if (auto *PN = dyn_cast<PHINode>(LHS))
+    if (auto IVInc = getIVIncrement(PN, LI))
+      return IVInc->first == I;
+  return false;
+}
+
+bool CodeGenPrepare::replaceMathCmpWithIntrinsic(BinaryOperator *BO,
+                                                 Value *Arg0, Value *Arg1,
+                                                 CmpInst *Cmp,
+                                                 Intrinsic::ID IID) {
+  auto IsReplacableIVIncrement = [this, &Cmp](BinaryOperator *BO) {
+    if (!isIVIncrement(BO, LI))
+      return false;
+    const Loop *L = LI->getLoopFor(BO->getParent());
+    assert(L && "L should not be null after isIVIncrement()");
+    // Do not risk on moving increment into a child loop.
+    if (LI->getLoopFor(Cmp->getParent()) != L)
+      return false;
+
+    // Finally, we need to ensure that the insert point will dominate all
+    // existing uses of the increment.
+
+    auto &DT = getDT(*BO->getParent()->getParent());
+    if (DT.dominates(Cmp->getParent(), BO->getParent()))
+      // If we're moving up the dom tree, all uses are trivially dominated.
+      // (This is the common case for code produced by LSR.)
+      return true;
+
+    // Otherwise, special case the single use in the phi recurrence.
+    return BO->hasOneUse() && DT.dominates(Cmp->getParent(), L->getLoopLatch());
+  };
+  if (BO->getParent() != Cmp->getParent() && !IsReplacableIVIncrement(BO)) {
+    // We used to use a dominator tree here to allow multi-block optimization.
+    // But that was problematic because:
+    // 1. It could cause a perf regression by hoisting the math op into the
+    //    critical path.
+    // 2. It could cause a perf regression by creating a value that was live
+    //    across multiple blocks and increasing register pressure.
+    // 3. Use of a dominator tree could cause large compile-time regression.
+    //    This is because we recompute the DT on every change in the main CGP
+    //    run-loop. The recomputing is probably unnecessary in many cases, so if
+    //    that was fixed, using a DT here would be ok.
+    //
+    // There is one important particular case we still want to handle: if BO is
+    // the IV increment. Important properties that make it profitable:
+    // - We can speculate IV increment anywhere in the loop (as long as the
+    //   indvar Phi is its only user);
+    // - Upon computing Cmp, we effectively compute something equivalent to the
+    //   IV increment (despite it loops differently in the IR). So moving it up
+    //   to the cmp point does not really increase register pressure.
+    return false;
+  }
+
+  // We allow matching the canonical IR (add X, C) back to (usubo X, -C).
+  if (BO->getOpcode() == Instruction::Add &&
+      IID == Intrinsic::usub_with_overflow) {
+    assert(isa<Constant>(Arg1) && "Unexpected input for usubo");
+    Arg1 = ConstantExpr::getNeg(cast<Constant>(Arg1));
+  }
+
+  // Insert at the first instruction of the pair.
+  Instruction *InsertPt = nullptr;
+  for (Instruction &Iter : *Cmp->getParent()) {
+    // If BO is an XOR, it is not guaranteed that it comes after both inputs to
+    // the overflow intrinsic are defined.
+    if ((BO->getOpcode() != Instruction::Xor && &Iter == BO) || &Iter == Cmp) {
+      InsertPt = &Iter;
+      break;
+    }
+  }
+  assert(InsertPt != nullptr && "Parent block did not contain cmp or binop");
+
+  IRBuilder<> Builder(InsertPt);
+  Value *MathOV = Builder.CreateBinaryIntrinsic(IID, Arg0, Arg1);
+  if (BO->getOpcode() != Instruction::Xor) {
+    Value *Math = Builder.CreateExtractValue(MathOV, 0, "math");
+    BO->replaceAllUsesWith(Math);
+  } else
+    assert(BO->hasOneUse() &&
+           "Patterns with XOr should use the BO only in the compare");
+  Value *OV = Builder.CreateExtractValue(MathOV, 1, "ov");
+  Cmp->replaceAllUsesWith(OV);
+  Cmp->eraseFromParent();
+  BO->eraseFromParent();
+  return true;
+}
+
+/// Match special-case patterns that check for unsigned add overflow.
+static bool matchUAddWithOverflowConstantEdgeCases(CmpInst *Cmp,
+                                                   BinaryOperator *&Add) {
+  // Add = add A, 1; Cmp = icmp eq A,-1 (overflow if A is max val)
+  // Add = add A,-1; Cmp = icmp ne A, 0 (overflow if A is non-zero)
+  Value *A = Cmp->getOperand(0), *B = Cmp->getOperand(1);
+
+  // We are not expecting non-canonical/degenerate code. Just bail out.
+  if (isa<Constant>(A))
+    return false;
+
+  ICmpInst::Predicate Pred = Cmp->getPredicate();
+  if (Pred == ICmpInst::ICMP_EQ && match(B, m_AllOnes()))
+    B = ConstantInt::get(B->getType(), 1);
+  else if (Pred == ICmpInst::ICMP_NE && match(B, m_ZeroInt()))
+    B = ConstantInt::get(B->getType(), -1);
+  else
+    return false;
+
+  // Check the users of the variable operand of the compare looking for an add
+  // with the adjusted constant.
+  for (User *U : A->users()) {
+    if (match(U, m_Add(m_Specific(A), m_Specific(B)))) {
+      Add = cast<BinaryOperator>(U);
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Try to combine the compare into a call to the llvm.uadd.with.overflow
+/// intrinsic. Return true if any changes were made.
+bool CodeGenPrepare::combineToUAddWithOverflow(CmpInst *Cmp,
+                                               bool &ModifiedDT) {
+  Value *A, *B;
+  BinaryOperator *Add;
+  if (!match(Cmp, m_UAddWithOverflow(m_Value(A), m_Value(B), m_BinOp(Add)))) {
+    if (!matchUAddWithOverflowConstantEdgeCases(Cmp, Add))
+      return false;
+    // Set A and B in case we match matchUAddWithOverflowConstantEdgeCases.
+    A = Add->getOperand(0);
+    B = Add->getOperand(1);
+  }
+
+  if (!TLI->shouldFormOverflowOp(ISD::UADDO,
+                                 TLI->getValueType(*DL, Add->getType()),
+                                 Add->hasNUsesOrMore(2)))
+    return false;
+
+  // We don't want to move around uses of condition values this late, so we
+  // check if it is legal to create the call to the intrinsic in the basic
+  // block containing the icmp.
+  if (Add->getParent() != Cmp->getParent() && !Add->hasOneUse())
+    return false;
+
+  if (!replaceMathCmpWithIntrinsic(Add, A, B, Cmp,
+                                   Intrinsic::uadd_with_overflow))
+    return false;
+
+  // Reset callers - do not crash by iterating over a dead instruction.
+  ModifiedDT = true;
+  return true;
+}
+
+bool CodeGenPrepare::combineToUSubWithOverflow(CmpInst *Cmp,
+                                               bool &ModifiedDT) {
+  // We are not expecting non-canonical/degenerate code. Just bail out.
+  Value *A = Cmp->getOperand(0), *B = Cmp->getOperand(1);
+  if (isa<Constant>(A) && isa<Constant>(B))
+    return false;
+
+  // Convert (A u> B) to (A u< B) to simplify pattern matching.
+  ICmpInst::Predicate Pred = Cmp->getPredicate();
+  if (Pred == ICmpInst::ICMP_UGT) {
+    std::swap(A, B);
+    Pred = ICmpInst::ICMP_ULT;
+  }
+  // Convert special-case: (A == 0) is the same as (A u< 1).
+  if (Pred == ICmpInst::ICMP_EQ && match(B, m_ZeroInt())) {
+    B = ConstantInt::get(B->getType(), 1);
+    Pred = ICmpInst::ICMP_ULT;
+  }
+  // Convert special-case: (A != 0) is the same as (0 u< A).
+  if (Pred == ICmpInst::ICMP_NE && match(B, m_ZeroInt())) {
+    std::swap(A, B);
+    Pred = ICmpInst::ICMP_ULT;
+  }
+  if (Pred != ICmpInst::ICMP_ULT)
+    return false;
+
+  // Walk the users of a variable operand of a compare looking for a subtract or
+  // add with that same operand. Also match the 2nd operand of the compare to
+  // the add/sub, but that may be a negated constant operand of an add.
+  Value *CmpVariableOperand = isa<Constant>(A) ? B : A;
+  BinaryOperator *Sub = nullptr;
+  for (User *U : CmpVariableOperand->users()) {
+    // A - B, A u< B --> usubo(A, B)
+    if (match(U, m_Sub(m_Specific(A), m_Specific(B)))) {
+      Sub = cast<BinaryOperator>(U);
+      break;
+    }
+
+    // A + (-C), A u< C (canonicalized form of (sub A, C))
+    const APInt *CmpC, *AddC;
+    if (match(U, m_Add(m_Specific(A), m_APInt(AddC))) &&
+        match(B, m_APInt(CmpC)) && *AddC == -(*CmpC)) {
+      Sub = cast<BinaryOperator>(U);
+      break;
+    }
+  }
+  if (!Sub)
+    return false;
+
+  if (!TLI->shouldFormOverflowOp(ISD::USUBO,
+                                 TLI->getValueType(*DL, Sub->getType()),
+                                 Sub->hasNUsesOrMore(2)))
+    return false;
+
+  if (!replaceMathCmpWithIntrinsic(Sub, Sub->getOperand(0), Sub->getOperand(1),
+                                   Cmp, Intrinsic::usub_with_overflow))
+    return false;
+
+  // Reset callers - do not crash by iterating over a dead instruction.
+  ModifiedDT = true;
+  return true;
+}
+
+/// Sink the given CmpInst into user blocks to reduce the number of virtual
+/// registers that must be created and coalesced. This is a clear win except on
+/// targets with multiple condition code registers (PowerPC), where it might
+/// lose; some adjustment may be wanted there.
 ///
 /// Return true if any changes are made.
-static bool OptimizeCmpExpression(CmpInst *CI) {
-  BasicBlock *DefBB = CI->getParent();
+static bool sinkCmpExpression(CmpInst *Cmp, const TargetLowering &TLI) {
+  if (TLI.hasMultipleConditionRegisters())
+    return false;
 
-  /// InsertedCmp - Only insert a cmp in each block once.
+  // Avoid sinking soft-FP comparisons, since this can move them into a loop.
+  if (TLI.useSoftFloat() && isa<FCmpInst>(Cmp))
+    return false;
+
+  // Only insert a cmp in each block once.
   DenseMap<BasicBlock*, CmpInst*> InsertedCmps;
 
   bool MadeChange = false;
-  for (Value::user_iterator UI = CI->user_begin(), E = CI->user_end();
+  for (Value::user_iterator UI = Cmp->user_begin(), E = Cmp->user_end();
        UI != E; ) {
     Use &TheUse = UI.getUse();
     Instruction *User = cast<Instruction>(*UI);
@@ -636,6 +1596,7 @@ static bool OptimizeCmpExpression(CmpInst *CI) {
 
     // Figure out which BB this cmp is used in.
     BasicBlock *UserBB = User->getParent();
+    BasicBlock *DefBB = Cmp->getParent();
 
     // If this user is in the same block as the cmp, don't change the cmp.
     if (UserBB == DefBB) continue;
@@ -645,27 +1606,212 @@ static bool OptimizeCmpExpression(CmpInst *CI) {
 
     if (!InsertedCmp) {
       BasicBlock::iterator InsertPt = UserBB->getFirstInsertionPt();
+      assert(InsertPt != UserBB->end());
       InsertedCmp =
-        CmpInst::Create(CI->getOpcode(),
-                        CI->getPredicate(),  CI->getOperand(0),
-                        CI->getOperand(1), "", InsertPt);
-      MadeChange = true;
+          CmpInst::Create(Cmp->getOpcode(), Cmp->getPredicate(),
+                          Cmp->getOperand(0), Cmp->getOperand(1), "",
+                          &*InsertPt);
+      // Propagate the debug info.
+      InsertedCmp->setDebugLoc(Cmp->getDebugLoc());
     }
 
     // Replace a use of the cmp with a use of the new cmp.
     TheUse = InsertedCmp;
+    MadeChange = true;
     ++NumCmpUses;
   }
 
   // If we removed all uses, nuke the cmp.
-  if (CI->use_empty())
-    CI->eraseFromParent();
+  if (Cmp->use_empty()) {
+    Cmp->eraseFromParent();
+    MadeChange = true;
+  }
 
   return MadeChange;
 }
 
-/// isExtractBitsCandidateUse - Check if the candidates could
-/// be combined with shift instruction, which includes:
+/// For pattern like:
+///
+///   DomCond = icmp sgt/slt CmpOp0, CmpOp1 (might not be in DomBB)
+///   ...
+/// DomBB:
+///   ...
+///   br DomCond, TrueBB, CmpBB
+/// CmpBB: (with DomBB being the single predecessor)
+///   ...
+///   Cmp = icmp eq CmpOp0, CmpOp1
+///   ...
+///
+/// It would use two comparison on targets that lowering of icmp sgt/slt is
+/// different from lowering of icmp eq (PowerPC). This function try to convert
+/// 'Cmp = icmp eq CmpOp0, CmpOp1' to ' Cmp = icmp slt/sgt CmpOp0, CmpOp1'.
+/// After that, DomCond and Cmp can use the same comparison so reduce one
+/// comparison.
+///
+/// Return true if any changes are made.
+static bool foldICmpWithDominatingICmp(CmpInst *Cmp,
+                                       const TargetLowering &TLI) {
+  if (!EnableICMP_EQToICMP_ST && TLI.isEqualityCmpFoldedWithSignedCmp())
+    return false;
+
+  ICmpInst::Predicate Pred = Cmp->getPredicate();
+  if (Pred != ICmpInst::ICMP_EQ)
+    return false;
+
+  // If icmp eq has users other than BranchInst and SelectInst, converting it to
+  // icmp slt/sgt would introduce more redundant LLVM IR.
+  for (User *U : Cmp->users()) {
+    if (isa<BranchInst>(U))
+      continue;
+    if (isa<SelectInst>(U) && cast<SelectInst>(U)->getCondition() == Cmp)
+      continue;
+    return false;
+  }
+
+  // This is a cheap/incomplete check for dominance - just match a single
+  // predecessor with a conditional branch.
+  BasicBlock *CmpBB = Cmp->getParent();
+  BasicBlock *DomBB = CmpBB->getSinglePredecessor();
+  if (!DomBB)
+    return false;
+
+  // We want to ensure that the only way control gets to the comparison of
+  // interest is that a less/greater than comparison on the same operands is
+  // false.
+  Value *DomCond;
+  BasicBlock *TrueBB, *FalseBB;
+  if (!match(DomBB->getTerminator(), m_Br(m_Value(DomCond), TrueBB, FalseBB)))
+    return false;
+  if (CmpBB != FalseBB)
+    return false;
+
+  Value *CmpOp0 = Cmp->getOperand(0), *CmpOp1 = Cmp->getOperand(1);
+  ICmpInst::Predicate DomPred;
+  if (!match(DomCond, m_ICmp(DomPred, m_Specific(CmpOp0), m_Specific(CmpOp1))))
+    return false;
+  if (DomPred != ICmpInst::ICMP_SGT && DomPred != ICmpInst::ICMP_SLT)
+    return false;
+
+  // Convert the equality comparison to the opposite of the dominating
+  // comparison and swap the direction for all branch/select users.
+  // We have conceptually converted:
+  // Res = (a < b) ? <LT_RES> : (a == b) ? <EQ_RES> : <GT_RES>;
+  // to
+  // Res = (a < b) ? <LT_RES> : (a > b)  ? <GT_RES> : <EQ_RES>;
+  // And similarly for branches.
+  for (User *U : Cmp->users()) {
+    if (auto *BI = dyn_cast<BranchInst>(U)) {
+      assert(BI->isConditional() && "Must be conditional");
+      BI->swapSuccessors();
+      continue;
+    }
+    if (auto *SI = dyn_cast<SelectInst>(U)) {
+      // Swap operands
+      SI->swapValues();
+      SI->swapProfMetadata();
+      continue;
+    }
+    llvm_unreachable("Must be a branch or a select");
+  }
+  Cmp->setPredicate(CmpInst::getSwappedPredicate(DomPred));
+  return true;
+}
+
+bool CodeGenPrepare::optimizeCmp(CmpInst *Cmp, bool &ModifiedDT) {
+  if (sinkCmpExpression(Cmp, *TLI))
+    return true;
+
+  if (combineToUAddWithOverflow(Cmp, ModifiedDT))
+    return true;
+
+  if (combineToUSubWithOverflow(Cmp, ModifiedDT))
+    return true;
+
+  if (foldICmpWithDominatingICmp(Cmp, *TLI))
+    return true;
+
+  return false;
+}
+
+/// Duplicate and sink the given 'and' instruction into user blocks where it is
+/// used in a compare to allow isel to generate better code for targets where
+/// this operation can be combined.
+///
+/// Return true if any changes are made.
+static bool sinkAndCmp0Expression(Instruction *AndI,
+                                  const TargetLowering &TLI,
+                                  SetOfInstrs &InsertedInsts) {
+  // Double-check that we're not trying to optimize an instruction that was
+  // already optimized by some other part of this pass.
+  assert(!InsertedInsts.count(AndI) &&
+         "Attempting to optimize already optimized and instruction");
+  (void) InsertedInsts;
+
+  // Nothing to do for single use in same basic block.
+  if (AndI->hasOneUse() &&
+      AndI->getParent() == cast<Instruction>(*AndI->user_begin())->getParent())
+    return false;
+
+  // Try to avoid cases where sinking/duplicating is likely to increase register
+  // pressure.
+  if (!isa<ConstantInt>(AndI->getOperand(0)) &&
+      !isa<ConstantInt>(AndI->getOperand(1)) &&
+      AndI->getOperand(0)->hasOneUse() && AndI->getOperand(1)->hasOneUse())
+    return false;
+
+  for (auto *U : AndI->users()) {
+    Instruction *User = cast<Instruction>(U);
+
+    // Only sink 'and' feeding icmp with 0.
+    if (!isa<ICmpInst>(User))
+      return false;
+
+    auto *CmpC = dyn_cast<ConstantInt>(User->getOperand(1));
+    if (!CmpC || !CmpC->isZero())
+      return false;
+  }
+
+  if (!TLI.isMaskAndCmp0FoldingBeneficial(*AndI))
+    return false;
+
+  LLVM_DEBUG(dbgs() << "found 'and' feeding only icmp 0;\n");
+  LLVM_DEBUG(AndI->getParent()->dump());
+
+  // Push the 'and' into the same block as the icmp 0.  There should only be
+  // one (icmp (and, 0)) in each block, since CSE/GVN should have removed any
+  // others, so we don't need to keep track of which BBs we insert into.
+  for (Value::user_iterator UI = AndI->user_begin(), E = AndI->user_end();
+       UI != E; ) {
+    Use &TheUse = UI.getUse();
+    Instruction *User = cast<Instruction>(*UI);
+
+    // Preincrement use iterator so we don't invalidate it.
+    ++UI;
+
+    LLVM_DEBUG(dbgs() << "sinking 'and' use: " << *User << "\n");
+
+    // Keep the 'and' in the same place if the use is already in the same block.
+    Instruction *InsertPt =
+        User->getParent() == AndI->getParent() ? AndI : User;
+    Instruction *InsertedAnd =
+        BinaryOperator::Create(Instruction::And, AndI->getOperand(0),
+                               AndI->getOperand(1), "", InsertPt);
+    // Propagate the debug info.
+    InsertedAnd->setDebugLoc(AndI->getDebugLoc());
+
+    // Replace a use of the 'and' with a use of the new 'and'.
+    TheUse = InsertedAnd;
+    ++NumAndUses;
+    LLVM_DEBUG(User->getParent()->dump());
+  }
+
+  // We removed all uses, nuke the and.
+  AndI->eraseFromParent();
+  return true;
+}
+
+/// Check if the candidates could be combined with a shift instruction, which
+/// includes:
 /// 1. Truncate instruction
 /// 2. And instruction and the imm is a mask of the low bits:
 /// imm & (imm+1) == 0
@@ -683,15 +1829,14 @@ static bool isExtractBitsCandidateUse(Instruction *User) {
   return true;
 }
 
-/// SinkShiftAndTruncate - sink both shift and truncate instruction
-/// to the use of truncate's BB.
+/// Sink both shift and truncate instruction to the use of truncate's BB.
 static bool
 SinkShiftAndTruncate(BinaryOperator *ShiftI, Instruction *User, ConstantInt *CI,
                      DenseMap<BasicBlock *, BinaryOperator *> &InsertedShifts,
-                     const TargetLowering &TLI) {
+                     const TargetLowering &TLI, const DataLayout &DL) {
   BasicBlock *UserBB = User->getParent();
   DenseMap<BasicBlock *, CastInst *> InsertedTruncs;
-  TruncInst *TruncI = dyn_cast<TruncInst>(User);
+  auto *TruncI = cast<TruncInst>(User);
   bool MadeChange = false;
 
   for (Value::user_iterator TruncUI = TruncI->user_begin(),
@@ -714,7 +1859,7 @@ SinkShiftAndTruncate(BinaryOperator *ShiftI, Instruction *User, ConstantInt *CI,
     // approximation; some nodes' legality is determined by the
     // operand or other means. There's no good way to find out though.
     if (TLI.isOperationLegalOrCustom(
-            ISDOpcode, TLI.getValueType(TruncUser->getType(), true)))
+            ISDOpcode, TLI.getValueType(DL, TruncUser->getType(), true)))
       continue;
 
     // Don't bother for PHI nodes.
@@ -731,20 +1876,24 @@ SinkShiftAndTruncate(BinaryOperator *ShiftI, Instruction *User, ConstantInt *CI,
 
     if (!InsertedShift && !InsertedTrunc) {
       BasicBlock::iterator InsertPt = TruncUserBB->getFirstInsertionPt();
+      assert(InsertPt != TruncUserBB->end());
       // Sink the shift
       if (ShiftI->getOpcode() == Instruction::AShr)
-        InsertedShift =
-            BinaryOperator::CreateAShr(ShiftI->getOperand(0), CI, "", InsertPt);
+        InsertedShift = BinaryOperator::CreateAShr(ShiftI->getOperand(0), CI,
+                                                   "", &*InsertPt);
       else
-        InsertedShift =
-            BinaryOperator::CreateLShr(ShiftI->getOperand(0), CI, "", InsertPt);
+        InsertedShift = BinaryOperator::CreateLShr(ShiftI->getOperand(0), CI,
+                                                   "", &*InsertPt);
+      InsertedShift->setDebugLoc(ShiftI->getDebugLoc());
 
       // Sink the trunc
       BasicBlock::iterator TruncInsertPt = TruncUserBB->getFirstInsertionPt();
       TruncInsertPt++;
+      assert(TruncInsertPt != TruncUserBB->end());
 
       InsertedTrunc = CastInst::Create(TruncI->getOpcode(), InsertedShift,
-                                       TruncI->getType(), "", TruncInsertPt);
+                                       TruncI->getType(), "", &*TruncInsertPt);
+      InsertedTrunc->setDebugLoc(TruncI->getDebugLoc());
 
       MadeChange = true;
 
@@ -754,10 +1903,10 @@ SinkShiftAndTruncate(BinaryOperator *ShiftI, Instruction *User, ConstantInt *CI,
   return MadeChange;
 }
 
-/// OptimizeExtractBits - sink the shift *right* instruction into user blocks if
-/// the uses could potentially be combined with this shift instruction and
-/// generate BitExtract instruction. It will only be applied if the architecture
-/// supports BitExtract instruction. Here is an example:
+/// Sink the shift *right* instruction into user blocks if the uses could
+/// potentially be combined with this shift instruction and generate BitExtract
+/// instruction. It will only be applied if the architecture supports BitExtract
+/// instruction. Here is an example:
 /// BB1:
 ///   %x.extract.shift = lshr i64 %arg1, 32
 /// BB2:
@@ -768,17 +1917,18 @@ SinkShiftAndTruncate(BinaryOperator *ShiftI, Instruction *User, ConstantInt *CI,
 ///   %x.extract.shift.1 = lshr i64 %arg1, 32
 ///   %x.extract.trunc = trunc i64 %x.extract.shift.1 to i16
 ///
-/// CodeGen will recoginze the pattern in BB2 and generate BitExtract
+/// CodeGen will recognize the pattern in BB2 and generate BitExtract
 /// instruction.
 /// Return true if any changes are made.
 static bool OptimizeExtractBits(BinaryOperator *ShiftI, ConstantInt *CI,
-                                const TargetLowering &TLI) {
+                                const TargetLowering &TLI,
+                                const DataLayout &DL) {
   BasicBlock *DefBB = ShiftI->getParent();
 
   /// Only insert instructions in each block once.
   DenseMap<BasicBlock *, BinaryOperator *> InsertedShifts;
 
-  bool shiftIsLegal = TLI.isTypeLegal(TLI.getValueType(ShiftI->getType()));
+  bool shiftIsLegal = TLI.isTypeLegal(TLI.getValueType(DL, ShiftI->getType()));
 
   bool MadeChange = false;
   for (Value::user_iterator UI = ShiftI->user_begin(), E = ShiftI->user_end();
@@ -813,11 +1963,12 @@ static bool OptimizeExtractBits(BinaryOperator *ShiftI, ConstantInt *CI,
       // cmp i16 trunc.result, opnd2
       //
       if (isa<TruncInst>(User) && shiftIsLegal
-          // If the type of the truncate is legal, no trucate will be
+          // If the type of the truncate is legal, no truncate will be
           // introduced in other basic blocks.
-          && (!TLI.isTypeLegal(TLI.getValueType(User->getType()))))
+          &&
+          (!TLI.isTypeLegal(TLI.getValueType(DL, User->getType()))))
         MadeChange =
-            SinkShiftAndTruncate(ShiftI, User, CI, InsertedShifts, TLI);
+            SinkShiftAndTruncate(ShiftI, User, CI, InsertedShifts, TLI, DL);
 
       continue;
     }
@@ -826,13 +1977,15 @@ static bool OptimizeExtractBits(BinaryOperator *ShiftI, ConstantInt *CI,
 
     if (!InsertedShift) {
       BasicBlock::iterator InsertPt = UserBB->getFirstInsertionPt();
+      assert(InsertPt != UserBB->end());
 
       if (ShiftI->getOpcode() == Instruction::AShr)
-        InsertedShift =
-            BinaryOperator::CreateAShr(ShiftI->getOperand(0), CI, "", InsertPt);
+        InsertedShift = BinaryOperator::CreateAShr(ShiftI->getOperand(0), CI,
+                                                   "", &*InsertPt);
       else
-        InsertedShift =
-            BinaryOperator::CreateLShr(ShiftI->getOperand(0), CI, "", InsertPt);
+        InsertedShift = BinaryOperator::CreateLShr(ShiftI->getOperand(0), CI,
+                                                   "", &*InsertPt);
+      InsertedShift->setDebugLoc(ShiftI->getDebugLoc());
 
       MadeChange = true;
     }
@@ -841,224 +1994,99 @@ static bool OptimizeExtractBits(BinaryOperator *ShiftI, ConstantInt *CI,
     TheUse = InsertedShift;
   }
 
-  // If we removed all uses, nuke the shift.
-  if (ShiftI->use_empty())
+  // If we removed all uses, or there are none, nuke the shift.
+  if (ShiftI->use_empty()) {
+    salvageDebugInfo(*ShiftI);
     ShiftI->eraseFromParent();
+    MadeChange = true;
+  }
 
   return MadeChange;
 }
 
-//  ScalarizeMaskedLoad() translates masked load intrinsic, like 
-// <16 x i32 > @llvm.masked.load( <16 x i32>* %addr, i32 align,
-//                               <16 x i1> %mask, <16 x i32> %passthru)
-// to a chain of basic blocks, whith loading element one-by-one if
-// the appropriate mask bit is set
-// 
-//  %1 = bitcast i8* %addr to i32*
-//  %2 = extractelement <16 x i1> %mask, i32 0
-//  %3 = icmp eq i1 %2, true
-//  br i1 %3, label %cond.load, label %else
-//
-//cond.load:                                        ; preds = %0
-//  %4 = getelementptr i32* %1, i32 0
-//  %5 = load i32* %4
-//  %6 = insertelement <16 x i32> undef, i32 %5, i32 0
-//  br label %else
-//
-//else:                                             ; preds = %0, %cond.load
-//  %res.phi.else = phi <16 x i32> [ %6, %cond.load ], [ undef, %0 ]
-//  %7 = extractelement <16 x i1> %mask, i32 1
-//  %8 = icmp eq i1 %7, true
-//  br i1 %8, label %cond.load1, label %else2
-//
-//cond.load1:                                       ; preds = %else
-//  %9 = getelementptr i32* %1, i32 1
-//  %10 = load i32* %9
-//  %11 = insertelement <16 x i32> %res.phi.else, i32 %10, i32 1
-//  br label %else2
-//
-//else2:                                            ; preds = %else, %cond.load1
-//  %res.phi.else3 = phi <16 x i32> [ %11, %cond.load1 ], [ %res.phi.else, %else ]
-//  %12 = extractelement <16 x i1> %mask, i32 2
-//  %13 = icmp eq i1 %12, true
-//  br i1 %13, label %cond.load4, label %else5
-//
-static void ScalarizeMaskedLoad(CallInst *CI) {
-  Value *Ptr  = CI->getArgOperand(0);
-  Value *Src0 = CI->getArgOperand(3);
-  Value *Mask = CI->getArgOperand(2);
-  VectorType *VecType = dyn_cast<VectorType>(CI->getType());
-  Type *EltTy = VecType->getElementType();
+/// If counting leading or trailing zeros is an expensive operation and a zero
+/// input is defined, add a check for zero to avoid calling the intrinsic.
+///
+/// We want to transform:
+///     %z = call i64 @llvm.cttz.i64(i64 %A, i1 false)
+///
+/// into:
+///   entry:
+///     %cmpz = icmp eq i64 %A, 0
+///     br i1 %cmpz, label %cond.end, label %cond.false
+///   cond.false:
+///     %z = call i64 @llvm.cttz.i64(i64 %A, i1 true)
+///     br label %cond.end
+///   cond.end:
+///     %ctz = phi i64 [ 64, %entry ], [ %z, %cond.false ]
+///
+/// If the transform is performed, return true and set ModifiedDT to true.
+static bool despeculateCountZeros(IntrinsicInst *CountZeros,
+                                  const TargetLowering *TLI,
+                                  const DataLayout *DL,
+                                  bool &ModifiedDT) {
+  // If a zero input is undefined, it doesn't make sense to despeculate that.
+  if (match(CountZeros->getOperand(1), m_One()))
+    return false;
 
-  assert(VecType && "Unexpected return type of masked load intrinsic");
+  // If it's cheap to speculate, there's nothing to do.
+  auto IntrinsicID = CountZeros->getIntrinsicID();
+  if ((IntrinsicID == Intrinsic::cttz && TLI->isCheapToSpeculateCttz()) ||
+      (IntrinsicID == Intrinsic::ctlz && TLI->isCheapToSpeculateCtlz()))
+    return false;
 
-  IRBuilder<> Builder(CI->getContext());
-  Instruction *InsertPt = CI;
-  BasicBlock *IfBlock = CI->getParent();
-  BasicBlock *CondBlock = nullptr;
-  BasicBlock *PrevIfBlock = CI->getParent();
-  Builder.SetInsertPoint(InsertPt);
+  // Only handle legal scalar cases. Anything else requires too much work.
+  Type *Ty = CountZeros->getType();
+  unsigned SizeInBits = Ty->getPrimitiveSizeInBits();
+  if (Ty->isVectorTy() || SizeInBits > DL->getLargestLegalIntTypeSizeInBits())
+    return false;
 
-  Builder.SetCurrentDebugLocation(CI->getDebugLoc());
+  // The intrinsic will be sunk behind a compare against zero and branch.
+  BasicBlock *StartBlock = CountZeros->getParent();
+  BasicBlock *CallBlock = StartBlock->splitBasicBlock(CountZeros, "cond.false");
 
-  // Bitcast %addr fron i8* to EltTy*
-  Type *NewPtrType =
-    EltTy->getPointerTo(cast<PointerType>(Ptr->getType())->getAddressSpace());
-  Value *FirstEltPtr = Builder.CreateBitCast(Ptr, NewPtrType);
-  Value *UndefVal = UndefValue::get(VecType);
+  // Create another block after the count zero intrinsic. A PHI will be added
+  // in this block to select the result of the intrinsic or the bit-width
+  // constant if the input to the intrinsic is zero.
+  BasicBlock::iterator SplitPt = ++(BasicBlock::iterator(CountZeros));
+  BasicBlock *EndBlock = CallBlock->splitBasicBlock(SplitPt, "cond.end");
 
-  // The result vector
-  Value *VResult = UndefVal;
+  // Set up a builder to create a compare, conditional branch, and PHI.
+  IRBuilder<> Builder(CountZeros->getContext());
+  Builder.SetInsertPoint(StartBlock->getTerminator());
+  Builder.SetCurrentDebugLocation(CountZeros->getDebugLoc());
 
-  PHINode *Phi = nullptr;
-  Value *PrevPhi = UndefVal;
+  // Replace the unconditional branch that was created by the first split with
+  // a compare against zero and a conditional branch.
+  Value *Zero = Constant::getNullValue(Ty);
+  Value *Cmp = Builder.CreateICmpEQ(CountZeros->getOperand(0), Zero, "cmpz");
+  Builder.CreateCondBr(Cmp, EndBlock, CallBlock);
+  StartBlock->getTerminator()->eraseFromParent();
 
-  unsigned VectorWidth = VecType->getNumElements();
-  for (unsigned Idx = 0; Idx < VectorWidth; ++Idx) {
+  // Create a PHI in the end block to select either the output of the intrinsic
+  // or the bit width of the operand.
+  Builder.SetInsertPoint(&EndBlock->front());
+  PHINode *PN = Builder.CreatePHI(Ty, 2, "ctz");
+  CountZeros->replaceAllUsesWith(PN);
+  Value *BitWidth = Builder.getInt(APInt(SizeInBits, SizeInBits));
+  PN->addIncoming(BitWidth, StartBlock);
+  PN->addIncoming(CountZeros, CallBlock);
 
-    // Fill the "else" block, created in the previous iteration
-    //
-    //  %res.phi.else3 = phi <16 x i32> [ %11, %cond.load1 ], [ %res.phi.else, %else ]
-    //  %mask_1 = extractelement <16 x i1> %mask, i32 Idx
-    //  %to_load = icmp eq i1 %mask_1, true
-    //  br i1 %to_load, label %cond.load, label %else
-    //
-    if (Idx > 0) {
-      Phi = Builder.CreatePHI(VecType, 2, "res.phi.else");
-      Phi->addIncoming(VResult, CondBlock);
-      Phi->addIncoming(PrevPhi, PrevIfBlock);
-      PrevPhi = Phi;
-      VResult = Phi;
-    }
-
-    Value *Predicate = Builder.CreateExtractElement(Mask, Builder.getInt32(Idx));
-    Value *Cmp = Builder.CreateICmp(ICmpInst::ICMP_EQ, Predicate,
-                                    ConstantInt::get(Predicate->getType(), 1));
-
-    // Create "cond" block
-    //
-    //  %EltAddr = getelementptr i32* %1, i32 0
-    //  %Elt = load i32* %EltAddr
-    //  VResult = insertelement <16 x i32> VResult, i32 %Elt, i32 Idx
-    //
-    CondBlock = IfBlock->splitBasicBlock(InsertPt, "cond.load");
-    Builder.SetInsertPoint(InsertPt);
-    
-    Value* Gep = Builder.CreateInBoundsGEP(FirstEltPtr, Builder.getInt32(Idx));
-    LoadInst* Load = Builder.CreateLoad(Gep, false);
-    VResult = Builder.CreateInsertElement(VResult, Load, Builder.getInt32(Idx));
-
-    // Create "else" block, fill it in the next iteration
-    BasicBlock *NewIfBlock = CondBlock->splitBasicBlock(InsertPt, "else");
-    Builder.SetInsertPoint(InsertPt);
-    Instruction *OldBr = IfBlock->getTerminator();
-    BranchInst::Create(CondBlock, NewIfBlock, Cmp, OldBr);
-    OldBr->eraseFromParent();
-    PrevIfBlock = IfBlock;
-    IfBlock = NewIfBlock;
-  }
-
-  Phi = Builder.CreatePHI(VecType, 2, "res.phi.select");
-  Phi->addIncoming(VResult, CondBlock);
-  Phi->addIncoming(PrevPhi, PrevIfBlock);
-  Value *NewI = Builder.CreateSelect(Mask, Phi, Src0);
-  CI->replaceAllUsesWith(NewI);
-  CI->eraseFromParent();
+  // We are explicitly handling the zero case, so we can set the intrinsic's
+  // undefined zero argument to 'true'. This will also prevent reprocessing the
+  // intrinsic; we only despeculate when a zero input is defined.
+  CountZeros->setArgOperand(1, Builder.getTrue());
+  ModifiedDT = true;
+  return true;
 }
 
-//  ScalarizeMaskedStore() translates masked store intrinsic, like
-// void @llvm.masked.store(<16 x i32> %src, <16 x i32>* %addr, i32 align,
-//                               <16 x i1> %mask)
-// to a chain of basic blocks, that stores element one-by-one if
-// the appropriate mask bit is set
-//
-//   %1 = bitcast i8* %addr to i32*
-//   %2 = extractelement <16 x i1> %mask, i32 0
-//   %3 = icmp eq i1 %2, true
-//   br i1 %3, label %cond.store, label %else
-//
-// cond.store:                                       ; preds = %0
-//   %4 = extractelement <16 x i32> %val, i32 0
-//   %5 = getelementptr i32* %1, i32 0
-//   store i32 %4, i32* %5
-//   br label %else
-// 
-// else:                                             ; preds = %0, %cond.store
-//   %6 = extractelement <16 x i1> %mask, i32 1
-//   %7 = icmp eq i1 %6, true
-//   br i1 %7, label %cond.store1, label %else2
-// 
-// cond.store1:                                      ; preds = %else
-//   %8 = extractelement <16 x i32> %val, i32 1
-//   %9 = getelementptr i32* %1, i32 1
-//   store i32 %8, i32* %9
-//   br label %else2
-//   . . .
-static void ScalarizeMaskedStore(CallInst *CI) {
-  Value *Ptr  = CI->getArgOperand(1);
-  Value *Src = CI->getArgOperand(0);
-  Value *Mask = CI->getArgOperand(3);
-
-  VectorType *VecType = dyn_cast<VectorType>(Src->getType());
-  Type *EltTy = VecType->getElementType();
-
-  assert(VecType && "Unexpected data type in masked store intrinsic");
-
-  IRBuilder<> Builder(CI->getContext());
-  Instruction *InsertPt = CI;
-  BasicBlock *IfBlock = CI->getParent();
-  Builder.SetInsertPoint(InsertPt);
-  Builder.SetCurrentDebugLocation(CI->getDebugLoc());
-
-  // Bitcast %addr fron i8* to EltTy*
-  Type *NewPtrType =
-    EltTy->getPointerTo(cast<PointerType>(Ptr->getType())->getAddressSpace());
-  Value *FirstEltPtr = Builder.CreateBitCast(Ptr, NewPtrType);
-
-  unsigned VectorWidth = VecType->getNumElements();
-  for (unsigned Idx = 0; Idx < VectorWidth; ++Idx) {
-
-    // Fill the "else" block, created in the previous iteration
-    //
-    //  %mask_1 = extractelement <16 x i1> %mask, i32 Idx
-    //  %to_store = icmp eq i1 %mask_1, true
-    //  br i1 %to_load, label %cond.store, label %else
-    //
-    Value *Predicate = Builder.CreateExtractElement(Mask, Builder.getInt32(Idx));
-    Value *Cmp = Builder.CreateICmp(ICmpInst::ICMP_EQ, Predicate,
-                                    ConstantInt::get(Predicate->getType(), 1));
-
-    // Create "cond" block
-    //
-    //  %OneElt = extractelement <16 x i32> %Src, i32 Idx
-    //  %EltAddr = getelementptr i32* %1, i32 0
-    //  %store i32 %OneElt, i32* %EltAddr
-    //
-    BasicBlock *CondBlock = IfBlock->splitBasicBlock(InsertPt, "cond.store");
-    Builder.SetInsertPoint(InsertPt);
-    
-    Value *OneElt = Builder.CreateExtractElement(Src, Builder.getInt32(Idx));
-    Value* Gep = Builder.CreateInBoundsGEP(FirstEltPtr, Builder.getInt32(Idx));
-    Builder.CreateStore(OneElt, Gep);
-
-    // Create "else" block, fill it in the next iteration
-    BasicBlock *NewIfBlock = CondBlock->splitBasicBlock(InsertPt, "else");
-    Builder.SetInsertPoint(InsertPt);
-    Instruction *OldBr = IfBlock->getTerminator();
-    BranchInst::Create(CondBlock, NewIfBlock, Cmp, OldBr);
-    OldBr->eraseFromParent();
-    IfBlock = NewIfBlock;
-  }
-  CI->eraseFromParent();
-}
-
-bool CodeGenPrepare::OptimizeCallInst(CallInst *CI, bool& ModifiedDT) {
+bool CodeGenPrepare::optimizeCallInst(CallInst *CI, bool &ModifiedDT) {
   BasicBlock *BB = CI->getParent();
 
   // Lower inline assembly if we can.
   // If we found an inline asm expession, and if the target knows how to
   // lower it to normal LLVM code, do so now.
-  if (TLI && isa<InlineAsm>(CI->getCalledValue())) {
+  if (CI->isInlineAsm()) {
     if (TLI->ExpandInlineAsm(CI)) {
       // Avoid invalidating the iterator.
       CurInstIterator = BB->begin();
@@ -1068,89 +2096,190 @@ bool CodeGenPrepare::OptimizeCallInst(CallInst *CI, bool& ModifiedDT) {
       return true;
     }
     // Sink address computing for memory operands into the block.
-    if (OptimizeInlineAsmInst(CI))
+    if (optimizeInlineAsmInst(CI))
       return true;
   }
+
+  // Align the pointer arguments to this call if the target thinks it's a good
+  // idea
+  unsigned MinSize, PrefAlign;
+  if (TLI->shouldAlignPointerArgs(CI, MinSize, PrefAlign)) {
+    for (auto &Arg : CI->arg_operands()) {
+      // We want to align both objects whose address is used directly and
+      // objects whose address is used in casts and GEPs, though it only makes
+      // sense for GEPs if the offset is a multiple of the desired alignment and
+      // if size - offset meets the size threshold.
+      if (!Arg->getType()->isPointerTy())
+        continue;
+      APInt Offset(DL->getIndexSizeInBits(
+                       cast<PointerType>(Arg->getType())->getAddressSpace()),
+                   0);
+      Value *Val = Arg->stripAndAccumulateInBoundsConstantOffsets(*DL, Offset);
+      uint64_t Offset2 = Offset.getLimitedValue();
+      if ((Offset2 & (PrefAlign-1)) != 0)
+        continue;
+      AllocaInst *AI;
+      if ((AI = dyn_cast<AllocaInst>(Val)) && AI->getAlignment() < PrefAlign &&
+          DL->getTypeAllocSize(AI->getAllocatedType()) >= MinSize + Offset2)
+        AI->setAlignment(Align(PrefAlign));
+      // Global variables can only be aligned if they are defined in this
+      // object (i.e. they are uniquely initialized in this object), and
+      // over-aligning global variables that have an explicit section is
+      // forbidden.
+      GlobalVariable *GV;
+      if ((GV = dyn_cast<GlobalVariable>(Val)) && GV->canIncreaseAlignment() &&
+          GV->getPointerAlignment(*DL) < PrefAlign &&
+          DL->getTypeAllocSize(GV->getValueType()) >=
+              MinSize + Offset2)
+        GV->setAlignment(MaybeAlign(PrefAlign));
+    }
+    // If this is a memcpy (or similar) then we may be able to improve the
+    // alignment
+    if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(CI)) {
+      Align DestAlign = getKnownAlignment(MI->getDest(), *DL);
+      MaybeAlign MIDestAlign = MI->getDestAlign();
+      if (!MIDestAlign || DestAlign > *MIDestAlign)
+        MI->setDestAlignment(DestAlign);
+      if (MemTransferInst *MTI = dyn_cast<MemTransferInst>(MI)) {
+        MaybeAlign MTISrcAlign = MTI->getSourceAlign();
+        Align SrcAlign = getKnownAlignment(MTI->getSource(), *DL);
+        if (!MTISrcAlign || SrcAlign > *MTISrcAlign)
+          MTI->setSourceAlignment(SrcAlign);
+      }
+    }
+  }
+
+  // If we have a cold call site, try to sink addressing computation into the
+  // cold block.  This interacts with our handling for loads and stores to
+  // ensure that we can fold all uses of a potential addressing computation
+  // into their uses.  TODO: generalize this to work over profiling data
+  if (CI->hasFnAttr(Attribute::Cold) &&
+      !OptSize && !llvm::shouldOptimizeForSize(BB, PSI, BFI.get()))
+    for (auto &Arg : CI->arg_operands()) {
+      if (!Arg->getType()->isPointerTy())
+        continue;
+      unsigned AS = Arg->getType()->getPointerAddressSpace();
+      return optimizeMemoryInst(CI, Arg, Arg->getType(), AS);
+    }
 
   IntrinsicInst *II = dyn_cast<IntrinsicInst>(CI);
   if (II) {
     switch (II->getIntrinsicID()) {
     default: break;
-    case Intrinsic::objectsize: {
-      // Lower all uses of llvm.objectsize.*
-      bool Min = (cast<ConstantInt>(II->getArgOperand(1))->getZExtValue() == 1);
-      Type *ReturnTy = CI->getType();
-      Constant *RetVal = ConstantInt::get(ReturnTy, Min ? 0 : -1ULL);
-
-      // Substituting this can cause recursive simplifications, which can
-      // invalidate our iterator.  Use a WeakVH to hold onto it in case this
-      // happens.
-      WeakVH IterHandle(CurInstIterator);
-
-      replaceAndRecursivelySimplify(CI, RetVal,
-                                    TLI ? TLI->getDataLayout() : nullptr,
-                                    TLInfo, ModifiedDT ? nullptr : DT);
-
-      // If the iterator instruction was recursively deleted, start over at the
-      // start of the block.
-      if (IterHandle != CurInstIterator) {
-        CurInstIterator = BB->begin();
-        SunkAddrs.clear();
+    case Intrinsic::assume:
+      llvm_unreachable("llvm.assume should have been removed already");
+    case Intrinsic::experimental_widenable_condition: {
+      // Give up on future widening oppurtunties so that we can fold away dead
+      // paths and merge blocks before going into block-local instruction
+      // selection.
+      if (II->use_empty()) {
+        II->eraseFromParent();
+        return true;
       }
+      Constant *RetVal = ConstantInt::getTrue(II->getContext());
+      resetIteratorIfInvalidatedWhileCalling(BB, [&]() {
+        replaceAndRecursivelySimplify(CI, RetVal, TLInfo, nullptr);
+      });
       return true;
     }
-    case Intrinsic::masked_load: {
-      // Scalarize unsupported vector masked load
-      if (!TTI->isLegalMaskedLoad(CI->getType(), 1)) {
-        ScalarizeMaskedLoad(CI);
-        ModifiedDT = true;
-        return true;
-      }
-      return false;
-    }
-    case Intrinsic::masked_store: {
-      if (!TTI->isLegalMaskedStore(CI->getArgOperand(0)->getType(), 1)) {
-        ScalarizeMaskedStore(CI);
-        ModifiedDT = true;
-        return true;
-      }
-      return false;
-    }
+    case Intrinsic::objectsize:
+      llvm_unreachable("llvm.objectsize.* should have been lowered already");
+    case Intrinsic::is_constant:
+      llvm_unreachable("llvm.is.constant.* should have been lowered already");
+    case Intrinsic::aarch64_stlxr:
+    case Intrinsic::aarch64_stxr: {
+      ZExtInst *ExtVal = dyn_cast<ZExtInst>(CI->getArgOperand(0));
+      if (!ExtVal || !ExtVal->hasOneUse() ||
+          ExtVal->getParent() == CI->getParent())
+        return false;
+      // Sink a zext feeding stlxr/stxr before it, so it can be folded into it.
+      ExtVal->moveBefore(CI);
+      // Mark this instruction as "inserted by CGP", so that other
+      // optimizations don't touch it.
+      InsertedInsts.insert(ExtVal);
+      return true;
     }
 
-    if (TLI) {
-      SmallVector<Value*, 2> PtrOps;
-      Type *AccessTy;
-      if (TLI->GetAddrModeArguments(II, PtrOps, AccessTy))
-        while (!PtrOps.empty())
-          if (OptimizeMemoryInst(II, PtrOps.pop_back_val(), AccessTy))
-            return true;
+    case Intrinsic::launder_invariant_group:
+    case Intrinsic::strip_invariant_group: {
+      Value *ArgVal = II->getArgOperand(0);
+      auto it = LargeOffsetGEPMap.find(II);
+      if (it != LargeOffsetGEPMap.end()) {
+          // Merge entries in LargeOffsetGEPMap to reflect the RAUW.
+          // Make sure not to have to deal with iterator invalidation
+          // after possibly adding ArgVal to LargeOffsetGEPMap.
+          auto GEPs = std::move(it->second);
+          LargeOffsetGEPMap[ArgVal].append(GEPs.begin(), GEPs.end());
+          LargeOffsetGEPMap.erase(II);
+      }
+
+      II->replaceAllUsesWith(ArgVal);
+      II->eraseFromParent();
+      return true;
     }
+    case Intrinsic::cttz:
+    case Intrinsic::ctlz:
+      // If counting zeros is expensive, try to avoid it.
+      return despeculateCountZeros(II, TLI, DL, ModifiedDT);
+    case Intrinsic::fshl:
+    case Intrinsic::fshr:
+      return optimizeFunnelShift(II);
+    case Intrinsic::dbg_value:
+      return fixupDbgValue(II);
+    case Intrinsic::vscale: {
+      // If datalayout has no special restrictions on vector data layout,
+      // replace `llvm.vscale` by an equivalent constant expression
+      // to benefit from cheap constant propagation.
+      Type *ScalableVectorTy =
+          VectorType::get(Type::getInt8Ty(II->getContext()), 1, true);
+      if (DL->getTypeAllocSize(ScalableVectorTy).getKnownMinSize() == 8) {
+        auto *Null = Constant::getNullValue(ScalableVectorTy->getPointerTo());
+        auto *One = ConstantInt::getSigned(II->getType(), 1);
+        auto *CGep =
+            ConstantExpr::getGetElementPtr(ScalableVectorTy, Null, One);
+        II->replaceAllUsesWith(ConstantExpr::getPtrToInt(CGep, II->getType()));
+        II->eraseFromParent();
+        return true;
+      }
+      break;
+    }
+    case Intrinsic::masked_gather:
+      return optimizeGatherScatterInst(II, II->getArgOperand(0));
+    case Intrinsic::masked_scatter:
+      return optimizeGatherScatterInst(II, II->getArgOperand(1));
+    }
+
+    SmallVector<Value *, 2> PtrOps;
+    Type *AccessTy;
+    if (TLI->getAddrModeArguments(II, PtrOps, AccessTy))
+      while (!PtrOps.empty()) {
+        Value *PtrVal = PtrOps.pop_back_val();
+        unsigned AS = PtrVal->getType()->getPointerAddressSpace();
+        if (optimizeMemoryInst(II, PtrVal, AccessTy, AS))
+          return true;
+      }
   }
 
   // From here on out we're working with named functions.
   if (!CI->getCalledFunction()) return false;
 
-  // We'll need DataLayout from here on out.
-  const DataLayout *TD = TLI ? TLI->getDataLayout() : nullptr;
-  if (!TD) return false;
-
   // Lower all default uses of _chk calls.  This is very similar
   // to what InstCombineCalls does, but here we are only lowering calls
   // to fortified library functions (e.g. __memcpy_chk) that have the default
   // "don't know" as the objectsize.  Anything else should be left alone.
-  FortifiedLibCallSimplifier Simplifier(TD, TLInfo, true);
-  if (Value *V = Simplifier.optimizeCall(CI)) {
+  FortifiedLibCallSimplifier Simplifier(TLInfo, true);
+  IRBuilder<> Builder(CI);
+  if (Value *V = Simplifier.optimizeCall(CI, Builder)) {
     CI->replaceAllUsesWith(V);
     CI->eraseFromParent();
     return true;
   }
+
   return false;
 }
 
-/// DupRetToEnableTailCallOpts - Look for opportunities to duplicate return
-/// instructions to the predecessor to enable tail call optimizations. The
-/// case it is currently looking for is:
+/// Look for opportunities to duplicate return instructions to the predecessor
+/// to enable tail call optimizations. The case it is currently looking for is:
 /// @code
 /// bb0:
 ///   %tmp0 = tail call i32 @f0()
@@ -1179,21 +2308,26 @@ bool CodeGenPrepare::OptimizeCallInst(CallInst *CI, bool& ModifiedDT) {
 ///   %tmp2 = tail call i32 @f2()
 ///   ret i32 %tmp2
 /// @endcode
-bool CodeGenPrepare::DupRetToEnableTailCallOpts(BasicBlock *BB) {
-  if (!TLI)
-    return false;
-
-  ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator());
-  if (!RI)
+bool CodeGenPrepare::dupRetToEnableTailCallOpts(BasicBlock *BB, bool &ModifiedDT) {
+  ReturnInst *RetI = dyn_cast<ReturnInst>(BB->getTerminator());
+  if (!RetI)
     return false;
 
   PHINode *PN = nullptr;
+  ExtractValueInst *EVI = nullptr;
   BitCastInst *BCI = nullptr;
-  Value *V = RI->getReturnValue();
+  Value *V = RetI->getReturnValue();
   if (V) {
     BCI = dyn_cast<BitCastInst>(V);
     if (BCI)
       V = BCI->getOperand(0);
+
+    EVI = dyn_cast<ExtractValueInst>(V);
+    if (EVI) {
+      V = EVI->getOperand(0);
+      if (!llvm::all_of(EVI->indices(), [](unsigned idx) { return idx == 0; }))
+        return false;
+    }
 
     PN = dyn_cast<PHINode>(V);
     if (!PN)
@@ -1203,90 +2337,77 @@ bool CodeGenPrepare::DupRetToEnableTailCallOpts(BasicBlock *BB) {
   if (PN && PN->getParent() != BB)
     return false;
 
-  // It's not safe to eliminate the sign / zero extension of the return value.
-  // See llvm::isInTailCallPosition().
-  const Function *F = BB->getParent();
-  AttributeSet CallerAttrs = F->getAttributes();
-  if (CallerAttrs.hasAttribute(AttributeSet::ReturnIndex, Attribute::ZExt) ||
-      CallerAttrs.hasAttribute(AttributeSet::ReturnIndex, Attribute::SExt))
-    return false;
+  auto isLifetimeEndOrBitCastFor = [](const Instruction *Inst) {
+    const BitCastInst *BC = dyn_cast<BitCastInst>(Inst);
+    if (BC && BC->hasOneUse())
+      Inst = BC->user_back();
 
-  // Make sure there are no instructions between the PHI and return, or that the
-  // return is the first instruction in the block.
-  if (PN) {
-    BasicBlock::iterator BI = BB->begin();
-    do { ++BI; } while (isa<DbgInfoIntrinsic>(BI));
-    if (&*BI == BCI)
-      // Also skip over the bitcast.
-      ++BI;
-    if (&*BI != RI)
-      return false;
-  } else {
-    BasicBlock::iterator BI = BB->begin();
-    while (isa<DbgInfoIntrinsic>(BI)) ++BI;
-    if (&*BI != RI)
-      return false;
-  }
+    if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst))
+      return II->getIntrinsicID() == Intrinsic::lifetime_end;
+    return false;
+  };
+
+  // Make sure there are no instructions between the first instruction
+  // and return.
+  const Instruction *BI = BB->getFirstNonPHI();
+  // Skip over debug and the bitcast.
+  while (isa<DbgInfoIntrinsic>(BI) || BI == BCI || BI == EVI ||
+         isa<PseudoProbeInst>(BI) || isLifetimeEndOrBitCastFor(BI))
+    BI = BI->getNextNode();
+  if (BI != RetI)
+    return false;
 
   /// Only dup the ReturnInst if the CallInst is likely to be emitted as a tail
   /// call.
-  SmallVector<CallInst*, 4> TailCalls;
+  const Function *F = BB->getParent();
+  SmallVector<BasicBlock*, 4> TailCallBBs;
   if (PN) {
     for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
-      CallInst *CI = dyn_cast<CallInst>(PN->getIncomingValue(I));
+      // Look through bitcasts.
+      Value *IncomingVal = PN->getIncomingValue(I)->stripPointerCasts();
+      CallInst *CI = dyn_cast<CallInst>(IncomingVal);
+      BasicBlock *PredBB = PN->getIncomingBlock(I);
       // Make sure the phi value is indeed produced by the tail call.
-      if (CI && CI->hasOneUse() && CI->getParent() == PN->getIncomingBlock(I) &&
-          TLI->mayBeEmittedAsTailCall(CI))
-        TailCalls.push_back(CI);
+      if (CI && CI->hasOneUse() && CI->getParent() == PredBB &&
+          TLI->mayBeEmittedAsTailCall(CI) &&
+          attributesPermitTailCall(F, CI, RetI, *TLI))
+        TailCallBBs.push_back(PredBB);
     }
   } else {
     SmallPtrSet<BasicBlock*, 4> VisitedBBs;
-    for (pred_iterator PI = pred_begin(BB), PE = pred_end(BB); PI != PE; ++PI) {
-      if (!VisitedBBs.insert(*PI).second)
+    for (BasicBlock *Pred : predecessors(BB)) {
+      if (!VisitedBBs.insert(Pred).second)
         continue;
-
-      BasicBlock::InstListType &InstList = (*PI)->getInstList();
-      BasicBlock::InstListType::reverse_iterator RI = InstList.rbegin();
-      BasicBlock::InstListType::reverse_iterator RE = InstList.rend();
-      do { ++RI; } while (RI != RE && isa<DbgInfoIntrinsic>(&*RI));
-      if (RI == RE)
-        continue;
-
-      CallInst *CI = dyn_cast<CallInst>(&*RI);
-      if (CI && CI->use_empty() && TLI->mayBeEmittedAsTailCall(CI))
-        TailCalls.push_back(CI);
+      if (Instruction *I = Pred->rbegin()->getPrevNonDebugInstruction(true)) {
+        CallInst *CI = dyn_cast<CallInst>(I);
+        if (CI && CI->use_empty() && TLI->mayBeEmittedAsTailCall(CI) &&
+            attributesPermitTailCall(F, CI, RetI, *TLI))
+          TailCallBBs.push_back(Pred);
+      }
     }
   }
 
   bool Changed = false;
-  for (unsigned i = 0, e = TailCalls.size(); i != e; ++i) {
-    CallInst *CI = TailCalls[i];
-    CallSite CS(CI);
-
-    // Conservatively require the attributes of the call to match those of the
-    // return. Ignore noalias because it doesn't affect the call sequence.
-    AttributeSet CalleeAttrs = CS.getAttributes();
-    if (AttrBuilder(CalleeAttrs, AttributeSet::ReturnIndex).
-          removeAttribute(Attribute::NoAlias) !=
-        AttrBuilder(CalleeAttrs, AttributeSet::ReturnIndex).
-          removeAttribute(Attribute::NoAlias))
-      continue;
-
+  for (auto const &TailCallBB : TailCallBBs) {
     // Make sure the call instruction is followed by an unconditional branch to
     // the return block.
-    BasicBlock *CallBB = CI->getParent();
-    BranchInst *BI = dyn_cast<BranchInst>(CallBB->getTerminator());
+    BranchInst *BI = dyn_cast<BranchInst>(TailCallBB->getTerminator());
     if (!BI || !BI->isUnconditional() || BI->getSuccessor(0) != BB)
       continue;
 
-    // Duplicate the return into CallBB.
-    (void)FoldReturnIntoUncondBranch(RI, BB, CallBB);
+    // Duplicate the return into TailCallBB.
+    (void)FoldReturnIntoUncondBranch(RetI, BB, TailCallBB);
+    assert(!VerifyBFIUpdates ||
+           BFI->getBlockFreq(BB) >= BFI->getBlockFreq(TailCallBB));
+    BFI->setBlockFreq(
+        BB,
+        (BFI->getBlockFreq(BB) - BFI->getBlockFreq(TailCallBB)).getFrequency());
     ModifiedDT = Changed = true;
     ++NumRetsDup;
   }
 
   // If we eliminated all predecessors of the block, delete the block now.
-  if (Changed && !BB->hasAddressTaken() && pred_begin(BB) == pred_end(BB))
+  if (Changed && !BB->hasAddressTaken() && pred_empty(BB))
     BB->eraseFromParent();
 
   return Changed;
@@ -1298,21 +2419,133 @@ bool CodeGenPrepare::DupRetToEnableTailCallOpts(BasicBlock *BB) {
 
 namespace {
 
-/// ExtAddrMode - This is an extended version of TargetLowering::AddrMode
+/// This is an extended version of TargetLowering::AddrMode
 /// which holds actual Value*'s for register values.
 struct ExtAddrMode : public TargetLowering::AddrMode {
-  Value *BaseReg;
-  Value *ScaledReg;
-  ExtAddrMode() : BaseReg(nullptr), ScaledReg(nullptr) {}
+  Value *BaseReg = nullptr;
+  Value *ScaledReg = nullptr;
+  Value *OriginalValue = nullptr;
+  bool InBounds = true;
+
+  enum FieldName {
+    NoField        = 0x00,
+    BaseRegField   = 0x01,
+    BaseGVField    = 0x02,
+    BaseOffsField  = 0x04,
+    ScaledRegField = 0x08,
+    ScaleField     = 0x10,
+    MultipleFields = 0xff
+  };
+
+
+  ExtAddrMode() = default;
+
   void print(raw_ostream &OS) const;
   void dump() const;
 
-  bool operator==(const ExtAddrMode& O) const {
-    return (BaseReg == O.BaseReg) && (ScaledReg == O.ScaledReg) &&
-           (BaseGV == O.BaseGV) && (BaseOffs == O.BaseOffs) &&
-           (HasBaseReg == O.HasBaseReg) && (Scale == O.Scale);
+  FieldName compare(const ExtAddrMode &other) {
+    // First check that the types are the same on each field, as differing types
+    // is something we can't cope with later on.
+    if (BaseReg && other.BaseReg &&
+        BaseReg->getType() != other.BaseReg->getType())
+      return MultipleFields;
+    if (BaseGV && other.BaseGV &&
+        BaseGV->getType() != other.BaseGV->getType())
+      return MultipleFields;
+    if (ScaledReg && other.ScaledReg &&
+        ScaledReg->getType() != other.ScaledReg->getType())
+      return MultipleFields;
+
+    // Conservatively reject 'inbounds' mismatches.
+    if (InBounds != other.InBounds)
+      return MultipleFields;
+
+    // Check each field to see if it differs.
+    unsigned Result = NoField;
+    if (BaseReg != other.BaseReg)
+      Result |= BaseRegField;
+    if (BaseGV != other.BaseGV)
+      Result |= BaseGVField;
+    if (BaseOffs != other.BaseOffs)
+      Result |= BaseOffsField;
+    if (ScaledReg != other.ScaledReg)
+      Result |= ScaledRegField;
+    // Don't count 0 as being a different scale, because that actually means
+    // unscaled (which will already be counted by having no ScaledReg).
+    if (Scale && other.Scale && Scale != other.Scale)
+      Result |= ScaleField;
+
+    if (countPopulation(Result) > 1)
+      return MultipleFields;
+    else
+      return static_cast<FieldName>(Result);
+  }
+
+  // An AddrMode is trivial if it involves no calculation i.e. it is just a base
+  // with no offset.
+  bool isTrivial() {
+    // An AddrMode is (BaseGV + BaseReg + BaseOffs + ScaleReg * Scale) so it is
+    // trivial if at most one of these terms is nonzero, except that BaseGV and
+    // BaseReg both being zero actually means a null pointer value, which we
+    // consider to be 'non-zero' here.
+    return !BaseOffs && !Scale && !(BaseGV && BaseReg);
+  }
+
+  Value *GetFieldAsValue(FieldName Field, Type *IntPtrTy) {
+    switch (Field) {
+    default:
+      return nullptr;
+    case BaseRegField:
+      return BaseReg;
+    case BaseGVField:
+      return BaseGV;
+    case ScaledRegField:
+      return ScaledReg;
+    case BaseOffsField:
+      return ConstantInt::get(IntPtrTy, BaseOffs);
+    }
+  }
+
+  void SetCombinedField(FieldName Field, Value *V,
+                        const SmallVectorImpl<ExtAddrMode> &AddrModes) {
+    switch (Field) {
+    default:
+      llvm_unreachable("Unhandled fields are expected to be rejected earlier");
+      break;
+    case ExtAddrMode::BaseRegField:
+      BaseReg = V;
+      break;
+    case ExtAddrMode::BaseGVField:
+      // A combined BaseGV is an Instruction, not a GlobalValue, so it goes
+      // in the BaseReg field.
+      assert(BaseReg == nullptr);
+      BaseReg = V;
+      BaseGV = nullptr;
+      break;
+    case ExtAddrMode::ScaledRegField:
+      ScaledReg = V;
+      // If we have a mix of scaled and unscaled addrmodes then we want scale
+      // to be the scale and not zero.
+      if (!Scale)
+        for (const ExtAddrMode &AM : AddrModes)
+          if (AM.Scale) {
+            Scale = AM.Scale;
+            break;
+          }
+      break;
+    case ExtAddrMode::BaseOffsField:
+      // The offset is no longer a constant, so it goes in ScaledReg with a
+      // scale of 1.
+      assert(ScaledReg == nullptr);
+      ScaledReg = V;
+      Scale = 1;
+      BaseOffs = 0;
+      break;
+    }
   }
 };
+
+} // end anonymous namespace
 
 #ifndef NDEBUG
 static inline raw_ostream &operator<<(raw_ostream &OS, const ExtAddrMode &AM) {
@@ -1321,9 +2554,12 @@ static inline raw_ostream &operator<<(raw_ostream &OS, const ExtAddrMode &AM) {
 }
 #endif
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void ExtAddrMode::print(raw_ostream &OS) const {
   bool NeedPlus = false;
   OS << "[";
+  if (InBounds)
+    OS << "inbounds ";
   if (BaseGV) {
     OS << (NeedPlus ? " + " : "")
        << "GV:";
@@ -1352,19 +2588,22 @@ void ExtAddrMode::print(raw_ostream &OS) const {
   OS << ']';
 }
 
-#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-void ExtAddrMode::dump() const {
+LLVM_DUMP_METHOD void ExtAddrMode::dump() const {
   print(dbgs());
   dbgs() << '\n';
 }
 #endif
 
-/// \brief This class provides transaction based operation on the IR.
+namespace {
+
+/// This class provides transaction based operation on the IR.
 /// Every change made through this class is recorded in the internal state and
 /// can be undone (rollback) until commit is called.
+/// CGP does not check if instructions could be speculatively executed when
+/// moved. Preserving the original location would pessimize the debugging
+/// experience, as well as negatively impact the quality of sample PGO.
 class TypePromotionTransaction {
-
-  /// \brief This represents the common interface of the individual transaction.
+  /// This represents the common interface of the individual transaction.
   /// Each class implements the logic for doing one specific modification on
   /// the IR via the TypePromotionTransaction.
   class TypePromotionAction {
@@ -1373,20 +2612,20 @@ class TypePromotionTransaction {
     Instruction *Inst;
 
   public:
-    /// \brief Constructor of the action.
+    /// Constructor of the action.
     /// The constructor performs the related action on the IR.
     TypePromotionAction(Instruction *Inst) : Inst(Inst) {}
 
-    virtual ~TypePromotionAction() {}
+    virtual ~TypePromotionAction() = default;
 
-    /// \brief Undo the modification done by this action.
+    /// Undo the modification done by this action.
     /// When this method is called, the IR must be in the same state as it was
     /// before this action was applied.
     /// \pre Undoing the action works if and only if the IR is in the exact same
     /// state as it was directly after this action was applied.
     virtual void undo() = 0;
 
-    /// \brief Advocate every change made by this action.
+    /// Advocate every change made by this action.
     /// When the results on the IR of the action are to be kept, it is important
     /// to call this function, otherwise hidden information may be kept forever.
     virtual void commit() {
@@ -1394,38 +2633,39 @@ class TypePromotionTransaction {
     }
   };
 
-  /// \brief Utility to remember the position of an instruction.
+  /// Utility to remember the position of an instruction.
   class InsertionHandler {
     /// Position of an instruction.
     /// Either an instruction:
     /// - Is the first in a basic block: BB is used.
-    /// - Has a previous instructon: PrevInst is used.
+    /// - Has a previous instruction: PrevInst is used.
     union {
       Instruction *PrevInst;
       BasicBlock *BB;
     } Point;
+
     /// Remember whether or not the instruction had a previous instruction.
     bool HasPrevInstruction;
 
   public:
-    /// \brief Record the position of \p Inst.
+    /// Record the position of \p Inst.
     InsertionHandler(Instruction *Inst) {
-      BasicBlock::iterator It = Inst;
+      BasicBlock::iterator It = Inst->getIterator();
       HasPrevInstruction = (It != (Inst->getParent()->begin()));
       if (HasPrevInstruction)
-        Point.PrevInst = --It;
+        Point.PrevInst = &*--It;
       else
         Point.BB = Inst->getParent();
     }
 
-    /// \brief Insert \p Inst at the recorded position.
+    /// Insert \p Inst at the recorded position.
     void insert(Instruction *Inst) {
       if (HasPrevInstruction) {
         if (Inst->getParent())
           Inst->removeFromParent();
         Inst->insertAfter(Point.PrevInst);
       } else {
-        Instruction *Position = Point.BB->getFirstInsertionPt();
+        Instruction *Position = &*Point.BB->getFirstInsertionPt();
         if (Inst->getParent())
           Inst->moveBefore(Position);
         else
@@ -1434,63 +2674,65 @@ class TypePromotionTransaction {
     }
   };
 
-  /// \brief Move an instruction before another.
+  /// Move an instruction before another.
   class InstructionMoveBefore : public TypePromotionAction {
     /// Original position of the instruction.
     InsertionHandler Position;
 
   public:
-    /// \brief Move \p Inst before \p Before.
+    /// Move \p Inst before \p Before.
     InstructionMoveBefore(Instruction *Inst, Instruction *Before)
         : TypePromotionAction(Inst), Position(Inst) {
-      DEBUG(dbgs() << "Do: move: " << *Inst << "\nbefore: " << *Before << "\n");
+      LLVM_DEBUG(dbgs() << "Do: move: " << *Inst << "\nbefore: " << *Before
+                        << "\n");
       Inst->moveBefore(Before);
     }
 
-    /// \brief Move the instruction back to its original position.
+    /// Move the instruction back to its original position.
     void undo() override {
-      DEBUG(dbgs() << "Undo: moveBefore: " << *Inst << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: moveBefore: " << *Inst << "\n");
       Position.insert(Inst);
     }
   };
 
-  /// \brief Set the operand of an instruction with a new value.
+  /// Set the operand of an instruction with a new value.
   class OperandSetter : public TypePromotionAction {
     /// Original operand of the instruction.
     Value *Origin;
+
     /// Index of the modified instruction.
     unsigned Idx;
 
   public:
-    /// \brief Set \p Idx operand of \p Inst with \p NewVal.
+    /// Set \p Idx operand of \p Inst with \p NewVal.
     OperandSetter(Instruction *Inst, unsigned Idx, Value *NewVal)
         : TypePromotionAction(Inst), Idx(Idx) {
-      DEBUG(dbgs() << "Do: setOperand: " << Idx << "\n"
-                   << "for:" << *Inst << "\n"
-                   << "with:" << *NewVal << "\n");
+      LLVM_DEBUG(dbgs() << "Do: setOperand: " << Idx << "\n"
+                        << "for:" << *Inst << "\n"
+                        << "with:" << *NewVal << "\n");
       Origin = Inst->getOperand(Idx);
       Inst->setOperand(Idx, NewVal);
     }
 
-    /// \brief Restore the original value of the instruction.
+    /// Restore the original value of the instruction.
     void undo() override {
-      DEBUG(dbgs() << "Undo: setOperand:" << Idx << "\n"
-                   << "for: " << *Inst << "\n"
-                   << "with: " << *Origin << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: setOperand:" << Idx << "\n"
+                        << "for: " << *Inst << "\n"
+                        << "with: " << *Origin << "\n");
       Inst->setOperand(Idx, Origin);
     }
   };
 
-  /// \brief Hide the operands of an instruction.
+  /// Hide the operands of an instruction.
   /// Do as if this instruction was not using any of its operands.
   class OperandsHider : public TypePromotionAction {
     /// The list of original operands.
     SmallVector<Value *, 4> OriginalValues;
 
   public:
-    /// \brief Remove \p Inst from the uses of the operands of \p Inst.
+    /// Remove \p Inst from the uses of the operands of \p Inst.
     OperandsHider(Instruction *Inst) : TypePromotionAction(Inst) {
-      DEBUG(dbgs() << "Do: OperandsHider: " << *Inst << "\n");
+      LLVM_DEBUG(dbgs() << "Do: OperandsHider: " << *Inst << "\n");
       unsigned NumOpnds = Inst->getNumOperands();
       OriginalValues.reserve(NumOpnds);
       for (unsigned It = 0; It < NumOpnds; ++It) {
@@ -1498,193 +2740,224 @@ class TypePromotionTransaction {
         Value *Val = Inst->getOperand(It);
         OriginalValues.push_back(Val);
         // Set a dummy one.
-        // We could use OperandSetter here, but that would implied an overhead
+        // We could use OperandSetter here, but that would imply an overhead
         // that we are not willing to pay.
         Inst->setOperand(It, UndefValue::get(Val->getType()));
       }
     }
 
-    /// \brief Restore the original list of uses.
+    /// Restore the original list of uses.
     void undo() override {
-      DEBUG(dbgs() << "Undo: OperandsHider: " << *Inst << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: OperandsHider: " << *Inst << "\n");
       for (unsigned It = 0, EndIt = OriginalValues.size(); It != EndIt; ++It)
         Inst->setOperand(It, OriginalValues[It]);
     }
   };
 
-  /// \brief Build a truncate instruction.
+  /// Build a truncate instruction.
   class TruncBuilder : public TypePromotionAction {
     Value *Val;
+
   public:
-    /// \brief Build a truncate instruction of \p Opnd producing a \p Ty
+    /// Build a truncate instruction of \p Opnd producing a \p Ty
     /// result.
     /// trunc Opnd to Ty.
     TruncBuilder(Instruction *Opnd, Type *Ty) : TypePromotionAction(Opnd) {
       IRBuilder<> Builder(Opnd);
+      Builder.SetCurrentDebugLocation(DebugLoc());
       Val = Builder.CreateTrunc(Opnd, Ty, "promoted");
-      DEBUG(dbgs() << "Do: TruncBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Do: TruncBuilder: " << *Val << "\n");
     }
 
-    /// \brief Get the built value.
+    /// Get the built value.
     Value *getBuiltValue() { return Val; }
 
-    /// \brief Remove the built instruction.
+    /// Remove the built instruction.
     void undo() override {
-      DEBUG(dbgs() << "Undo: TruncBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: TruncBuilder: " << *Val << "\n");
       if (Instruction *IVal = dyn_cast<Instruction>(Val))
         IVal->eraseFromParent();
     }
   };
 
-  /// \brief Build a sign extension instruction.
+  /// Build a sign extension instruction.
   class SExtBuilder : public TypePromotionAction {
     Value *Val;
+
   public:
-    /// \brief Build a sign extension instruction of \p Opnd producing a \p Ty
+    /// Build a sign extension instruction of \p Opnd producing a \p Ty
     /// result.
     /// sext Opnd to Ty.
     SExtBuilder(Instruction *InsertPt, Value *Opnd, Type *Ty)
         : TypePromotionAction(InsertPt) {
       IRBuilder<> Builder(InsertPt);
       Val = Builder.CreateSExt(Opnd, Ty, "promoted");
-      DEBUG(dbgs() << "Do: SExtBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Do: SExtBuilder: " << *Val << "\n");
     }
 
-    /// \brief Get the built value.
+    /// Get the built value.
     Value *getBuiltValue() { return Val; }
 
-    /// \brief Remove the built instruction.
+    /// Remove the built instruction.
     void undo() override {
-      DEBUG(dbgs() << "Undo: SExtBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: SExtBuilder: " << *Val << "\n");
       if (Instruction *IVal = dyn_cast<Instruction>(Val))
         IVal->eraseFromParent();
     }
   };
 
-  /// \brief Build a zero extension instruction.
+  /// Build a zero extension instruction.
   class ZExtBuilder : public TypePromotionAction {
     Value *Val;
+
   public:
-    /// \brief Build a zero extension instruction of \p Opnd producing a \p Ty
+    /// Build a zero extension instruction of \p Opnd producing a \p Ty
     /// result.
     /// zext Opnd to Ty.
     ZExtBuilder(Instruction *InsertPt, Value *Opnd, Type *Ty)
         : TypePromotionAction(InsertPt) {
       IRBuilder<> Builder(InsertPt);
+      Builder.SetCurrentDebugLocation(DebugLoc());
       Val = Builder.CreateZExt(Opnd, Ty, "promoted");
-      DEBUG(dbgs() << "Do: ZExtBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Do: ZExtBuilder: " << *Val << "\n");
     }
 
-    /// \brief Get the built value.
+    /// Get the built value.
     Value *getBuiltValue() { return Val; }
 
-    /// \brief Remove the built instruction.
+    /// Remove the built instruction.
     void undo() override {
-      DEBUG(dbgs() << "Undo: ZExtBuilder: " << *Val << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: ZExtBuilder: " << *Val << "\n");
       if (Instruction *IVal = dyn_cast<Instruction>(Val))
         IVal->eraseFromParent();
     }
   };
 
-  /// \brief Mutate an instruction to another type.
+  /// Mutate an instruction to another type.
   class TypeMutator : public TypePromotionAction {
     /// Record the original type.
     Type *OrigTy;
 
   public:
-    /// \brief Mutate the type of \p Inst into \p NewTy.
+    /// Mutate the type of \p Inst into \p NewTy.
     TypeMutator(Instruction *Inst, Type *NewTy)
         : TypePromotionAction(Inst), OrigTy(Inst->getType()) {
-      DEBUG(dbgs() << "Do: MutateType: " << *Inst << " with " << *NewTy
-                   << "\n");
+      LLVM_DEBUG(dbgs() << "Do: MutateType: " << *Inst << " with " << *NewTy
+                        << "\n");
       Inst->mutateType(NewTy);
     }
 
-    /// \brief Mutate the instruction back to its original type.
+    /// Mutate the instruction back to its original type.
     void undo() override {
-      DEBUG(dbgs() << "Undo: MutateType: " << *Inst << " with " << *OrigTy
-                   << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: MutateType: " << *Inst << " with " << *OrigTy
+                        << "\n");
       Inst->mutateType(OrigTy);
     }
   };
 
-  /// \brief Replace the uses of an instruction by another instruction.
+  /// Replace the uses of an instruction by another instruction.
   class UsesReplacer : public TypePromotionAction {
     /// Helper structure to keep track of the replaced uses.
     struct InstructionAndIdx {
       /// The instruction using the instruction.
       Instruction *Inst;
+
       /// The index where this instruction is used for Inst.
       unsigned Idx;
+
       InstructionAndIdx(Instruction *Inst, unsigned Idx)
           : Inst(Inst), Idx(Idx) {}
     };
 
     /// Keep track of the original uses (pair Instruction, Index).
     SmallVector<InstructionAndIdx, 4> OriginalUses;
-    typedef SmallVectorImpl<InstructionAndIdx>::iterator use_iterator;
+    /// Keep track of the debug users.
+    SmallVector<DbgValueInst *, 1> DbgValues;
+
+    /// Keep track of the new value so that we can undo it by replacing
+    /// instances of the new value with the original value.
+    Value *New;
+
+    using use_iterator = SmallVectorImpl<InstructionAndIdx>::iterator;
 
   public:
-    /// \brief Replace all the use of \p Inst by \p New.
-    UsesReplacer(Instruction *Inst, Value *New) : TypePromotionAction(Inst) {
-      DEBUG(dbgs() << "Do: UsersReplacer: " << *Inst << " with " << *New
-                   << "\n");
+    /// Replace all the use of \p Inst by \p New.
+    UsesReplacer(Instruction *Inst, Value *New)
+        : TypePromotionAction(Inst), New(New) {
+      LLVM_DEBUG(dbgs() << "Do: UsersReplacer: " << *Inst << " with " << *New
+                        << "\n");
       // Record the original uses.
       for (Use &U : Inst->uses()) {
         Instruction *UserI = cast<Instruction>(U.getUser());
         OriginalUses.push_back(InstructionAndIdx(UserI, U.getOperandNo()));
       }
+      // Record the debug uses separately. They are not in the instruction's
+      // use list, but they are replaced by RAUW.
+      findDbgValues(DbgValues, Inst);
+
       // Now, we can replace the uses.
       Inst->replaceAllUsesWith(New);
     }
 
-    /// \brief Reassign the original uses of Inst to Inst.
+    /// Reassign the original uses of Inst to Inst.
     void undo() override {
-      DEBUG(dbgs() << "Undo: UsersReplacer: " << *Inst << "\n");
-      for (use_iterator UseIt = OriginalUses.begin(),
-                        EndIt = OriginalUses.end();
-           UseIt != EndIt; ++UseIt) {
-        UseIt->Inst->setOperand(UseIt->Idx, Inst);
-      }
+      LLVM_DEBUG(dbgs() << "Undo: UsersReplacer: " << *Inst << "\n");
+      for (InstructionAndIdx &Use : OriginalUses)
+        Use.Inst->setOperand(Use.Idx, Inst);
+      // RAUW has replaced all original uses with references to the new value,
+      // including the debug uses. Since we are undoing the replacements,
+      // the original debug uses must also be reinstated to maintain the
+      // correctness and utility of debug value instructions.
+      for (auto *DVI : DbgValues)
+        DVI->replaceVariableLocationOp(New, Inst);
     }
   };
 
-  /// \brief Remove an instruction from the IR.
+  /// Remove an instruction from the IR.
   class InstructionRemover : public TypePromotionAction {
     /// Original position of the instruction.
     InsertionHandler Inserter;
+
     /// Helper structure to hide all the link to the instruction. In other
     /// words, this helps to do as if the instruction was removed.
     OperandsHider Hider;
+
     /// Keep track of the uses replaced, if any.
-    UsesReplacer *Replacer;
+    UsesReplacer *Replacer = nullptr;
+
+    /// Keep track of instructions removed.
+    SetOfInstrs &RemovedInsts;
 
   public:
-    /// \brief Remove all reference of \p Inst and optinally replace all its
+    /// Remove all reference of \p Inst and optionally replace all its
     /// uses with New.
+    /// \p RemovedInsts Keep track of the instructions removed by this Action.
     /// \pre If !Inst->use_empty(), then New != nullptr
-    InstructionRemover(Instruction *Inst, Value *New = nullptr)
+    InstructionRemover(Instruction *Inst, SetOfInstrs &RemovedInsts,
+                       Value *New = nullptr)
         : TypePromotionAction(Inst), Inserter(Inst), Hider(Inst),
-          Replacer(nullptr) {
+          RemovedInsts(RemovedInsts) {
       if (New)
         Replacer = new UsesReplacer(Inst, New);
-      DEBUG(dbgs() << "Do: InstructionRemover: " << *Inst << "\n");
+      LLVM_DEBUG(dbgs() << "Do: InstructionRemover: " << *Inst << "\n");
+      RemovedInsts.insert(Inst);
+      /// The instructions removed here will be freed after completing
+      /// optimizeBlock() for all blocks as we need to keep track of the
+      /// removed instructions during promotion.
       Inst->removeFromParent();
     }
 
-    ~InstructionRemover() { delete Replacer; }
+    ~InstructionRemover() override { delete Replacer; }
 
-    /// \brief Really remove the instruction.
-    void commit() override { delete Inst; }
-
-    /// \brief Resurrect the instruction and reassign it to the proper uses if
+    /// Resurrect the instruction and reassign it to the proper uses if
     /// new value was provided when build this action.
     void undo() override {
-      DEBUG(dbgs() << "Undo: InstructionRemover: " << *Inst << "\n");
+      LLVM_DEBUG(dbgs() << "Undo: InstructionRemover: " << *Inst << "\n");
       Inserter.insert(Inst);
       if (Replacer)
         Replacer->undo();
       Hider.undo();
+      RemovedInsts.erase(Inst);
     }
   };
 
@@ -1692,11 +2965,18 @@ public:
   /// Restoration point.
   /// The restoration point is a pointer to an action instead of an iterator
   /// because the iterator may be invalidated but not the pointer.
-  typedef const TypePromotionAction *ConstRestorationPt;
-  /// Advocate every changes made in that transaction.
-  void commit();
+  using ConstRestorationPt = const TypePromotionAction *;
+
+  TypePromotionTransaction(SetOfInstrs &RemovedInsts)
+      : RemovedInsts(RemovedInsts) {}
+
+  /// Advocate every changes made in that transaction. Return true if any change
+  /// happen.
+  bool commit();
+
   /// Undo all the changes made after the given point.
   void rollback(ConstRestorationPt Point);
+
   /// Get the current restoration point.
   ConstRestorationPt getRestorationPoint() const;
 
@@ -1704,18 +2984,25 @@ public:
   /// @{
   /// Same as Instruction::setOperand.
   void setOperand(Instruction *Inst, unsigned Idx, Value *NewVal);
+
   /// Same as Instruction::eraseFromParent.
   void eraseInstruction(Instruction *Inst, Value *NewVal = nullptr);
+
   /// Same as Value::replaceAllUsesWith.
   void replaceAllUsesWith(Instruction *Inst, Value *New);
+
   /// Same as Value::mutateType.
   void mutateType(Instruction *Inst, Type *NewTy);
+
   /// Same as IRBuilder::createTrunc.
   Value *createTrunc(Instruction *Opnd, Type *Ty);
+
   /// Same as IRBuilder::createSExt.
   Value *createSExt(Instruction *Inst, Value *Opnd, Type *Ty);
+
   /// Same as IRBuilder::createZExt.
   Value *createZExt(Instruction *Inst, Value *Opnd, Type *Ty);
+
   /// Same as Instruction::moveBefore.
   void moveBefore(Instruction *Inst, Instruction *Before);
   /// @}
@@ -1723,28 +3010,36 @@ public:
 private:
   /// The ordered list of actions made so far.
   SmallVector<std::unique_ptr<TypePromotionAction>, 16> Actions;
-  typedef SmallVectorImpl<std::unique_ptr<TypePromotionAction>>::iterator CommitPt;
+
+  using CommitPt = SmallVectorImpl<std::unique_ptr<TypePromotionAction>>::iterator;
+
+  SetOfInstrs &RemovedInsts;
 };
+
+} // end anonymous namespace
 
 void TypePromotionTransaction::setOperand(Instruction *Inst, unsigned Idx,
                                           Value *NewVal) {
-  Actions.push_back(
-      make_unique<TypePromotionTransaction::OperandSetter>(Inst, Idx, NewVal));
+  Actions.push_back(std::make_unique<TypePromotionTransaction::OperandSetter>(
+      Inst, Idx, NewVal));
 }
 
 void TypePromotionTransaction::eraseInstruction(Instruction *Inst,
                                                 Value *NewVal) {
   Actions.push_back(
-      make_unique<TypePromotionTransaction::InstructionRemover>(Inst, NewVal));
+      std::make_unique<TypePromotionTransaction::InstructionRemover>(
+          Inst, RemovedInsts, NewVal));
 }
 
 void TypePromotionTransaction::replaceAllUsesWith(Instruction *Inst,
                                                   Value *New) {
-  Actions.push_back(make_unique<TypePromotionTransaction::UsesReplacer>(Inst, New));
+  Actions.push_back(
+      std::make_unique<TypePromotionTransaction::UsesReplacer>(Inst, New));
 }
 
 void TypePromotionTransaction::mutateType(Instruction *Inst, Type *NewTy) {
-  Actions.push_back(make_unique<TypePromotionTransaction::TypeMutator>(Inst, NewTy));
+  Actions.push_back(
+      std::make_unique<TypePromotionTransaction::TypeMutator>(Inst, NewTy));
 }
 
 Value *TypePromotionTransaction::createTrunc(Instruction *Opnd,
@@ -1774,7 +3069,8 @@ Value *TypePromotionTransaction::createZExt(Instruction *Inst,
 void TypePromotionTransaction::moveBefore(Instruction *Inst,
                                           Instruction *Before) {
   Actions.push_back(
-      make_unique<TypePromotionTransaction::InstructionMoveBefore>(Inst, Before));
+      std::make_unique<TypePromotionTransaction::InstructionMoveBefore>(
+          Inst, Before));
 }
 
 TypePromotionTransaction::ConstRestorationPt
@@ -1782,11 +3078,12 @@ TypePromotionTransaction::getRestorationPoint() const {
   return !Actions.empty() ? Actions.back().get() : nullptr;
 }
 
-void TypePromotionTransaction::commit() {
-  for (CommitPt It = Actions.begin(), EndIt = Actions.end(); It != EndIt;
-       ++It)
-    (*It)->commit();
+bool TypePromotionTransaction::commit() {
+  for (std::unique_ptr<TypePromotionAction> &Action : Actions)
+    Action->commit();
+  bool Modified = !Actions.empty();
   Actions.clear();
+  return Modified;
 }
 
 void TypePromotionTransaction::rollback(
@@ -1797,91 +3094,760 @@ void TypePromotionTransaction::rollback(
   }
 }
 
-/// \brief A helper class for matching addressing modes.
+namespace {
+
+/// A helper class for matching addressing modes.
 ///
 /// This encapsulates the logic for matching the target-legal addressing modes.
 class AddressingModeMatcher {
   SmallVectorImpl<Instruction*> &AddrModeInsts;
   const TargetLowering &TLI;
+  const TargetRegisterInfo &TRI;
+  const DataLayout &DL;
+  const LoopInfo &LI;
+  const std::function<const DominatorTree &()> getDTFn;
 
   /// AccessTy/MemoryInst - This is the type for the access (e.g. double) and
   /// the memory instruction that we're computing this address for.
   Type *AccessTy;
+  unsigned AddrSpace;
   Instruction *MemoryInst;
 
-  /// AddrMode - This is the addressing mode that we're building up.  This is
+  /// This is the addressing mode that we're building up. This is
   /// part of the return value of this addressing mode matching stuff.
   ExtAddrMode &AddrMode;
 
-  /// The truncate instruction inserted by other CodeGenPrepare optimizations.
-  const SetOfInstrs &InsertedTruncs;
+  /// The instructions inserted by other CodeGenPrepare optimizations.
+  const SetOfInstrs &InsertedInsts;
+
   /// A map from the instructions to their type before promotion.
   InstrToOrigTy &PromotedInsts;
+
   /// The ongoing transaction where every action should be registered.
   TypePromotionTransaction &TPT;
 
-  /// IgnoreProfitability - This is set to true when we should not do
-  /// profitability checks.  When true, IsProfitableToFoldIntoAddressingMode
-  /// always returns true.
+  // A GEP which has too large offset to be folded into the addressing mode.
+  std::pair<AssertingVH<GetElementPtrInst>, int64_t> &LargeOffsetGEP;
+
+  /// This is set to true when we should not do profitability checks.
+  /// When true, IsProfitableToFoldIntoAddressingMode always returns true.
   bool IgnoreProfitability;
 
-  AddressingModeMatcher(SmallVectorImpl<Instruction*> &AMI,
-                        const TargetLowering &T, Type *AT,
-                        Instruction *MI, ExtAddrMode &AM,
-                        const SetOfInstrs &InsertedTruncs,
-                        InstrToOrigTy &PromotedInsts,
-                        TypePromotionTransaction &TPT)
-      : AddrModeInsts(AMI), TLI(T), AccessTy(AT), MemoryInst(MI), AddrMode(AM),
-        InsertedTruncs(InsertedTruncs), PromotedInsts(PromotedInsts), TPT(TPT) {
+  /// True if we are optimizing for size.
+  bool OptSize;
+
+  ProfileSummaryInfo *PSI;
+  BlockFrequencyInfo *BFI;
+
+  AddressingModeMatcher(
+      SmallVectorImpl<Instruction *> &AMI, const TargetLowering &TLI,
+      const TargetRegisterInfo &TRI, const LoopInfo &LI,
+      const std::function<const DominatorTree &()> getDTFn,
+      Type *AT, unsigned AS, Instruction *MI, ExtAddrMode &AM,
+      const SetOfInstrs &InsertedInsts, InstrToOrigTy &PromotedInsts,
+      TypePromotionTransaction &TPT,
+      std::pair<AssertingVH<GetElementPtrInst>, int64_t> &LargeOffsetGEP,
+      bool OptSize, ProfileSummaryInfo *PSI, BlockFrequencyInfo *BFI)
+      : AddrModeInsts(AMI), TLI(TLI), TRI(TRI),
+        DL(MI->getModule()->getDataLayout()), LI(LI), getDTFn(getDTFn),
+        AccessTy(AT), AddrSpace(AS), MemoryInst(MI), AddrMode(AM),
+        InsertedInsts(InsertedInsts), PromotedInsts(PromotedInsts), TPT(TPT),
+        LargeOffsetGEP(LargeOffsetGEP), OptSize(OptSize), PSI(PSI), BFI(BFI) {
     IgnoreProfitability = false;
   }
-public:
 
-  /// Match - Find the maximal addressing mode that a load/store of V can fold,
+public:
+  /// Find the maximal addressing mode that a load/store of V can fold,
   /// give an access type of AccessTy.  This returns a list of involved
   /// instructions in AddrModeInsts.
-  /// \p InsertedTruncs The truncate instruction inserted by other
-  /// CodeGenPrepare
+  /// \p InsertedInsts The instructions inserted by other CodeGenPrepare
   /// optimizations.
   /// \p PromotedInsts maps the instructions to their type before promotion.
   /// \p The ongoing transaction where every action should be registered.
-  static ExtAddrMode Match(Value *V, Type *AccessTy,
-                           Instruction *MemoryInst,
-                           SmallVectorImpl<Instruction*> &AddrModeInsts,
-                           const TargetLowering &TLI,
-                           const SetOfInstrs &InsertedTruncs,
-                           InstrToOrigTy &PromotedInsts,
-                           TypePromotionTransaction &TPT) {
+  static ExtAddrMode
+  Match(Value *V, Type *AccessTy, unsigned AS, Instruction *MemoryInst,
+        SmallVectorImpl<Instruction *> &AddrModeInsts,
+        const TargetLowering &TLI, const LoopInfo &LI,
+        const std::function<const DominatorTree &()> getDTFn,
+        const TargetRegisterInfo &TRI, const SetOfInstrs &InsertedInsts,
+        InstrToOrigTy &PromotedInsts, TypePromotionTransaction &TPT,
+        std::pair<AssertingVH<GetElementPtrInst>, int64_t> &LargeOffsetGEP,
+        bool OptSize, ProfileSummaryInfo *PSI, BlockFrequencyInfo *BFI) {
     ExtAddrMode Result;
 
-    bool Success = AddressingModeMatcher(AddrModeInsts, TLI, AccessTy,
-                                         MemoryInst, Result, InsertedTruncs,
-                                         PromotedInsts, TPT).MatchAddr(V, 0);
+    bool Success = AddressingModeMatcher(
+        AddrModeInsts, TLI, TRI, LI, getDTFn, AccessTy, AS, MemoryInst, Result,
+        InsertedInsts, PromotedInsts, TPT, LargeOffsetGEP, OptSize, PSI,
+        BFI).matchAddr(V, 0);
     (void)Success; assert(Success && "Couldn't select *anything*?");
     return Result;
   }
+
 private:
-  bool MatchScaledValue(Value *ScaleReg, int64_t Scale, unsigned Depth);
-  bool MatchAddr(Value *V, unsigned Depth);
-  bool MatchOperationAddr(User *Operation, unsigned Opcode, unsigned Depth,
+  bool matchScaledValue(Value *ScaleReg, int64_t Scale, unsigned Depth);
+  bool matchAddr(Value *Addr, unsigned Depth);
+  bool matchOperationAddr(User *AddrInst, unsigned Opcode, unsigned Depth,
                           bool *MovedAway = nullptr);
-  bool IsProfitableToFoldIntoAddressingMode(Instruction *I,
+  bool isProfitableToFoldIntoAddressingMode(Instruction *I,
                                             ExtAddrMode &AMBefore,
                                             ExtAddrMode &AMAfter);
-  bool ValueAlreadyLiveAtInst(Value *Val, Value *KnownLive1, Value *KnownLive2);
-  bool IsPromotionProfitable(unsigned MatchedSize, unsigned SizeWithPromotion,
+  bool valueAlreadyLiveAtInst(Value *Val, Value *KnownLive1, Value *KnownLive2);
+  bool isPromotionProfitable(unsigned NewCost, unsigned OldCost,
                              Value *PromotedOperand) const;
 };
 
-/// MatchScaledValue - Try adding ScaleReg*Scale to the current addressing mode.
+class PhiNodeSet;
+
+/// An iterator for PhiNodeSet.
+class PhiNodeSetIterator {
+  PhiNodeSet * const Set;
+  size_t CurrentIndex = 0;
+
+public:
+  /// The constructor. Start should point to either a valid element, or be equal
+  /// to the size of the underlying SmallVector of the PhiNodeSet.
+  PhiNodeSetIterator(PhiNodeSet * const Set, size_t Start);
+  PHINode * operator*() const;
+  PhiNodeSetIterator& operator++();
+  bool operator==(const PhiNodeSetIterator &RHS) const;
+  bool operator!=(const PhiNodeSetIterator &RHS) const;
+};
+
+/// Keeps a set of PHINodes.
+///
+/// This is a minimal set implementation for a specific use case:
+/// It is very fast when there are very few elements, but also provides good
+/// performance when there are many. It is similar to SmallPtrSet, but also
+/// provides iteration by insertion order, which is deterministic and stable
+/// across runs. It is also similar to SmallSetVector, but provides removing
+/// elements in O(1) time. This is achieved by not actually removing the element
+/// from the underlying vector, so comes at the cost of using more memory, but
+/// that is fine, since PhiNodeSets are used as short lived objects.
+class PhiNodeSet {
+  friend class PhiNodeSetIterator;
+
+  using MapType = SmallDenseMap<PHINode *, size_t, 32>;
+  using iterator =  PhiNodeSetIterator;
+
+  /// Keeps the elements in the order of their insertion in the underlying
+  /// vector. To achieve constant time removal, it never deletes any element.
+  SmallVector<PHINode *, 32> NodeList;
+
+  /// Keeps the elements in the underlying set implementation. This (and not the
+  /// NodeList defined above) is the source of truth on whether an element
+  /// is actually in the collection.
+  MapType NodeMap;
+
+  /// Points to the first valid (not deleted) element when the set is not empty
+  /// and the value is not zero. Equals to the size of the underlying vector
+  /// when the set is empty. When the value is 0, as in the beginning, the
+  /// first element may or may not be valid.
+  size_t FirstValidElement = 0;
+
+public:
+  /// Inserts a new element to the collection.
+  /// \returns true if the element is actually added, i.e. was not in the
+  /// collection before the operation.
+  bool insert(PHINode *Ptr) {
+    if (NodeMap.insert(std::make_pair(Ptr, NodeList.size())).second) {
+      NodeList.push_back(Ptr);
+      return true;
+    }
+    return false;
+  }
+
+  /// Removes the element from the collection.
+  /// \returns whether the element is actually removed, i.e. was in the
+  /// collection before the operation.
+  bool erase(PHINode *Ptr) {
+    if (NodeMap.erase(Ptr)) {
+      SkipRemovedElements(FirstValidElement);
+      return true;
+    }
+    return false;
+  }
+
+  /// Removes all elements and clears the collection.
+  void clear() {
+    NodeMap.clear();
+    NodeList.clear();
+    FirstValidElement = 0;
+  }
+
+  /// \returns an iterator that will iterate the elements in the order of
+  /// insertion.
+  iterator begin() {
+    if (FirstValidElement == 0)
+      SkipRemovedElements(FirstValidElement);
+    return PhiNodeSetIterator(this, FirstValidElement);
+  }
+
+  /// \returns an iterator that points to the end of the collection.
+  iterator end() { return PhiNodeSetIterator(this, NodeList.size()); }
+
+  /// Returns the number of elements in the collection.
+  size_t size() const {
+    return NodeMap.size();
+  }
+
+  /// \returns 1 if the given element is in the collection, and 0 if otherwise.
+  size_t count(PHINode *Ptr) const {
+    return NodeMap.count(Ptr);
+  }
+
+private:
+  /// Updates the CurrentIndex so that it will point to a valid element.
+  ///
+  /// If the element of NodeList at CurrentIndex is valid, it does not
+  /// change it. If there are no more valid elements, it updates CurrentIndex
+  /// to point to the end of the NodeList.
+  void SkipRemovedElements(size_t &CurrentIndex) {
+    while (CurrentIndex < NodeList.size()) {
+      auto it = NodeMap.find(NodeList[CurrentIndex]);
+      // If the element has been deleted and added again later, NodeMap will
+      // point to a different index, so CurrentIndex will still be invalid.
+      if (it != NodeMap.end() && it->second == CurrentIndex)
+        break;
+      ++CurrentIndex;
+    }
+  }
+};
+
+PhiNodeSetIterator::PhiNodeSetIterator(PhiNodeSet *const Set, size_t Start)
+    : Set(Set), CurrentIndex(Start) {}
+
+PHINode * PhiNodeSetIterator::operator*() const {
+  assert(CurrentIndex < Set->NodeList.size() &&
+         "PhiNodeSet access out of range");
+  return Set->NodeList[CurrentIndex];
+}
+
+PhiNodeSetIterator& PhiNodeSetIterator::operator++() {
+  assert(CurrentIndex < Set->NodeList.size() &&
+         "PhiNodeSet access out of range");
+  ++CurrentIndex;
+  Set->SkipRemovedElements(CurrentIndex);
+  return *this;
+}
+
+bool PhiNodeSetIterator::operator==(const PhiNodeSetIterator &RHS) const {
+  return CurrentIndex == RHS.CurrentIndex;
+}
+
+bool PhiNodeSetIterator::operator!=(const PhiNodeSetIterator &RHS) const {
+  return !((*this) == RHS);
+}
+
+/// Keep track of simplification of Phi nodes.
+/// Accept the set of all phi nodes and erase phi node from this set
+/// if it is simplified.
+class SimplificationTracker {
+  DenseMap<Value *, Value *> Storage;
+  const SimplifyQuery &SQ;
+  // Tracks newly created Phi nodes. The elements are iterated by insertion
+  // order.
+  PhiNodeSet AllPhiNodes;
+  // Tracks newly created Select nodes.
+  SmallPtrSet<SelectInst *, 32> AllSelectNodes;
+
+public:
+  SimplificationTracker(const SimplifyQuery &sq)
+      : SQ(sq) {}
+
+  Value *Get(Value *V) {
+    do {
+      auto SV = Storage.find(V);
+      if (SV == Storage.end())
+        return V;
+      V = SV->second;
+    } while (true);
+  }
+
+  Value *Simplify(Value *Val) {
+    SmallVector<Value *, 32> WorkList;
+    SmallPtrSet<Value *, 32> Visited;
+    WorkList.push_back(Val);
+    while (!WorkList.empty()) {
+      auto *P = WorkList.pop_back_val();
+      if (!Visited.insert(P).second)
+        continue;
+      if (auto *PI = dyn_cast<Instruction>(P))
+        if (Value *V = SimplifyInstruction(cast<Instruction>(PI), SQ)) {
+          for (auto *U : PI->users())
+            WorkList.push_back(cast<Value>(U));
+          Put(PI, V);
+          PI->replaceAllUsesWith(V);
+          if (auto *PHI = dyn_cast<PHINode>(PI))
+            AllPhiNodes.erase(PHI);
+          if (auto *Select = dyn_cast<SelectInst>(PI))
+            AllSelectNodes.erase(Select);
+          PI->eraseFromParent();
+        }
+    }
+    return Get(Val);
+  }
+
+  void Put(Value *From, Value *To) {
+    Storage.insert({ From, To });
+  }
+
+  void ReplacePhi(PHINode *From, PHINode *To) {
+    Value* OldReplacement = Get(From);
+    while (OldReplacement != From) {
+      From = To;
+      To = dyn_cast<PHINode>(OldReplacement);
+      OldReplacement = Get(From);
+    }
+    assert(To && Get(To) == To && "Replacement PHI node is already replaced.");
+    Put(From, To);
+    From->replaceAllUsesWith(To);
+    AllPhiNodes.erase(From);
+    From->eraseFromParent();
+  }
+
+  PhiNodeSet& newPhiNodes() { return AllPhiNodes; }
+
+  void insertNewPhi(PHINode *PN) { AllPhiNodes.insert(PN); }
+
+  void insertNewSelect(SelectInst *SI) { AllSelectNodes.insert(SI); }
+
+  unsigned countNewPhiNodes() const { return AllPhiNodes.size(); }
+
+  unsigned countNewSelectNodes() const { return AllSelectNodes.size(); }
+
+  void destroyNewNodes(Type *CommonType) {
+    // For safe erasing, replace the uses with dummy value first.
+    auto *Dummy = UndefValue::get(CommonType);
+    for (auto *I : AllPhiNodes) {
+      I->replaceAllUsesWith(Dummy);
+      I->eraseFromParent();
+    }
+    AllPhiNodes.clear();
+    for (auto *I : AllSelectNodes) {
+      I->replaceAllUsesWith(Dummy);
+      I->eraseFromParent();
+    }
+    AllSelectNodes.clear();
+  }
+};
+
+/// A helper class for combining addressing modes.
+class AddressingModeCombiner {
+  typedef DenseMap<Value *, Value *> FoldAddrToValueMapping;
+  typedef std::pair<PHINode *, PHINode *> PHIPair;
+
+private:
+  /// The addressing modes we've collected.
+  SmallVector<ExtAddrMode, 16> AddrModes;
+
+  /// The field in which the AddrModes differ, when we have more than one.
+  ExtAddrMode::FieldName DifferentField = ExtAddrMode::NoField;
+
+  /// Are the AddrModes that we have all just equal to their original values?
+  bool AllAddrModesTrivial = true;
+
+  /// Common Type for all different fields in addressing modes.
+  Type *CommonType;
+
+  /// SimplifyQuery for simplifyInstruction utility.
+  const SimplifyQuery &SQ;
+
+  /// Original Address.
+  Value *Original;
+
+public:
+  AddressingModeCombiner(const SimplifyQuery &_SQ, Value *OriginalValue)
+      : CommonType(nullptr), SQ(_SQ), Original(OriginalValue) {}
+
+  /// Get the combined AddrMode
+  const ExtAddrMode &getAddrMode() const {
+    return AddrModes[0];
+  }
+
+  /// Add a new AddrMode if it's compatible with the AddrModes we already
+  /// have.
+  /// \return True iff we succeeded in doing so.
+  bool addNewAddrMode(ExtAddrMode &NewAddrMode) {
+    // Take note of if we have any non-trivial AddrModes, as we need to detect
+    // when all AddrModes are trivial as then we would introduce a phi or select
+    // which just duplicates what's already there.
+    AllAddrModesTrivial = AllAddrModesTrivial && NewAddrMode.isTrivial();
+
+    // If this is the first addrmode then everything is fine.
+    if (AddrModes.empty()) {
+      AddrModes.emplace_back(NewAddrMode);
+      return true;
+    }
+
+    // Figure out how different this is from the other address modes, which we
+    // can do just by comparing against the first one given that we only care
+    // about the cumulative difference.
+    ExtAddrMode::FieldName ThisDifferentField =
+      AddrModes[0].compare(NewAddrMode);
+    if (DifferentField == ExtAddrMode::NoField)
+      DifferentField = ThisDifferentField;
+    else if (DifferentField != ThisDifferentField)
+      DifferentField = ExtAddrMode::MultipleFields;
+
+    // If NewAddrMode differs in more than one dimension we cannot handle it.
+    bool CanHandle = DifferentField != ExtAddrMode::MultipleFields;
+
+    // If Scale Field is different then we reject.
+    CanHandle = CanHandle && DifferentField != ExtAddrMode::ScaleField;
+
+    // We also must reject the case when base offset is different and
+    // scale reg is not null, we cannot handle this case due to merge of
+    // different offsets will be used as ScaleReg.
+    CanHandle = CanHandle && (DifferentField != ExtAddrMode::BaseOffsField ||
+                              !NewAddrMode.ScaledReg);
+
+    // We also must reject the case when GV is different and BaseReg installed
+    // due to we want to use base reg as a merge of GV values.
+    CanHandle = CanHandle && (DifferentField != ExtAddrMode::BaseGVField ||
+                              !NewAddrMode.HasBaseReg);
+
+    // Even if NewAddMode is the same we still need to collect it due to
+    // original value is different. And later we will need all original values
+    // as anchors during finding the common Phi node.
+    if (CanHandle)
+      AddrModes.emplace_back(NewAddrMode);
+    else
+      AddrModes.clear();
+
+    return CanHandle;
+  }
+
+  /// Combine the addressing modes we've collected into a single
+  /// addressing mode.
+  /// \return True iff we successfully combined them or we only had one so
+  /// didn't need to combine them anyway.
+  bool combineAddrModes() {
+    // If we have no AddrModes then they can't be combined.
+    if (AddrModes.size() == 0)
+      return false;
+
+    // A single AddrMode can trivially be combined.
+    if (AddrModes.size() == 1 || DifferentField == ExtAddrMode::NoField)
+      return true;
+
+    // If the AddrModes we collected are all just equal to the value they are
+    // derived from then combining them wouldn't do anything useful.
+    if (AllAddrModesTrivial)
+      return false;
+
+    if (!addrModeCombiningAllowed())
+      return false;
+
+    // Build a map between <original value, basic block where we saw it> to
+    // value of base register.
+    // Bail out if there is no common type.
+    FoldAddrToValueMapping Map;
+    if (!initializeMap(Map))
+      return false;
+
+    Value *CommonValue = findCommon(Map);
+    if (CommonValue)
+      AddrModes[0].SetCombinedField(DifferentField, CommonValue, AddrModes);
+    return CommonValue != nullptr;
+  }
+
+private:
+  /// Initialize Map with anchor values. For address seen
+  /// we set the value of different field saw in this address.
+  /// At the same time we find a common type for different field we will
+  /// use to create new Phi/Select nodes. Keep it in CommonType field.
+  /// Return false if there is no common type found.
+  bool initializeMap(FoldAddrToValueMapping &Map) {
+    // Keep track of keys where the value is null. We will need to replace it
+    // with constant null when we know the common type.
+    SmallVector<Value *, 2> NullValue;
+    Type *IntPtrTy = SQ.DL.getIntPtrType(AddrModes[0].OriginalValue->getType());
+    for (auto &AM : AddrModes) {
+      Value *DV = AM.GetFieldAsValue(DifferentField, IntPtrTy);
+      if (DV) {
+        auto *Type = DV->getType();
+        if (CommonType && CommonType != Type)
+          return false;
+        CommonType = Type;
+        Map[AM.OriginalValue] = DV;
+      } else {
+        NullValue.push_back(AM.OriginalValue);
+      }
+    }
+    assert(CommonType && "At least one non-null value must be!");
+    for (auto *V : NullValue)
+      Map[V] = Constant::getNullValue(CommonType);
+    return true;
+  }
+
+  /// We have mapping between value A and other value B where B was a field in
+  /// addressing mode represented by A. Also we have an original value C
+  /// representing an address we start with. Traversing from C through phi and
+  /// selects we ended up with A's in a map. This utility function tries to find
+  /// a value V which is a field in addressing mode C and traversing through phi
+  /// nodes and selects we will end up in corresponded values B in a map.
+  /// The utility will create a new Phi/Selects if needed.
+  // The simple example looks as follows:
+  // BB1:
+  //   p1 = b1 + 40
+  //   br cond BB2, BB3
+  // BB2:
+  //   p2 = b2 + 40
+  //   br BB3
+  // BB3:
+  //   p = phi [p1, BB1], [p2, BB2]
+  //   v = load p
+  // Map is
+  //   p1 -> b1
+  //   p2 -> b2
+  // Request is
+  //   p -> ?
+  // The function tries to find or build phi [b1, BB1], [b2, BB2] in BB3.
+  Value *findCommon(FoldAddrToValueMapping &Map) {
+    // Tracks the simplification of newly created phi nodes. The reason we use
+    // this mapping is because we will add new created Phi nodes in AddrToBase.
+    // Simplification of Phi nodes is recursive, so some Phi node may
+    // be simplified after we added it to AddrToBase. In reality this
+    // simplification is possible only if original phi/selects were not
+    // simplified yet.
+    // Using this mapping we can find the current value in AddrToBase.
+    SimplificationTracker ST(SQ);
+
+    // First step, DFS to create PHI nodes for all intermediate blocks.
+    // Also fill traverse order for the second step.
+    SmallVector<Value *, 32> TraverseOrder;
+    InsertPlaceholders(Map, TraverseOrder, ST);
+
+    // Second Step, fill new nodes by merged values and simplify if possible.
+    FillPlaceholders(Map, TraverseOrder, ST);
+
+    if (!AddrSinkNewSelects && ST.countNewSelectNodes() > 0) {
+      ST.destroyNewNodes(CommonType);
+      return nullptr;
+    }
+
+    // Now we'd like to match New Phi nodes to existed ones.
+    unsigned PhiNotMatchedCount = 0;
+    if (!MatchPhiSet(ST, AddrSinkNewPhis, PhiNotMatchedCount)) {
+      ST.destroyNewNodes(CommonType);
+      return nullptr;
+    }
+
+    auto *Result = ST.Get(Map.find(Original)->second);
+    if (Result) {
+      NumMemoryInstsPhiCreated += ST.countNewPhiNodes() + PhiNotMatchedCount;
+      NumMemoryInstsSelectCreated += ST.countNewSelectNodes();
+    }
+    return Result;
+  }
+
+  /// Try to match PHI node to Candidate.
+  /// Matcher tracks the matched Phi nodes.
+  bool MatchPhiNode(PHINode *PHI, PHINode *Candidate,
+                    SmallSetVector<PHIPair, 8> &Matcher,
+                    PhiNodeSet &PhiNodesToMatch) {
+    SmallVector<PHIPair, 8> WorkList;
+    Matcher.insert({ PHI, Candidate });
+    SmallSet<PHINode *, 8> MatchedPHIs;
+    MatchedPHIs.insert(PHI);
+    WorkList.push_back({ PHI, Candidate });
+    SmallSet<PHIPair, 8> Visited;
+    while (!WorkList.empty()) {
+      auto Item = WorkList.pop_back_val();
+      if (!Visited.insert(Item).second)
+        continue;
+      // We iterate over all incoming values to Phi to compare them.
+      // If values are different and both of them Phi and the first one is a
+      // Phi we added (subject to match) and both of them is in the same basic
+      // block then we can match our pair if values match. So we state that
+      // these values match and add it to work list to verify that.
+      for (auto B : Item.first->blocks()) {
+        Value *FirstValue = Item.first->getIncomingValueForBlock(B);
+        Value *SecondValue = Item.second->getIncomingValueForBlock(B);
+        if (FirstValue == SecondValue)
+          continue;
+
+        PHINode *FirstPhi = dyn_cast<PHINode>(FirstValue);
+        PHINode *SecondPhi = dyn_cast<PHINode>(SecondValue);
+
+        // One of them is not Phi or
+        // The first one is not Phi node from the set we'd like to match or
+        // Phi nodes from different basic blocks then
+        // we will not be able to match.
+        if (!FirstPhi || !SecondPhi || !PhiNodesToMatch.count(FirstPhi) ||
+            FirstPhi->getParent() != SecondPhi->getParent())
+          return false;
+
+        // If we already matched them then continue.
+        if (Matcher.count({ FirstPhi, SecondPhi }))
+          continue;
+        // So the values are different and does not match. So we need them to
+        // match. (But we register no more than one match per PHI node, so that
+        // we won't later try to replace them twice.)
+        if (MatchedPHIs.insert(FirstPhi).second)
+          Matcher.insert({ FirstPhi, SecondPhi });
+        // But me must check it.
+        WorkList.push_back({ FirstPhi, SecondPhi });
+      }
+    }
+    return true;
+  }
+
+  /// For the given set of PHI nodes (in the SimplificationTracker) try
+  /// to find their equivalents.
+  /// Returns false if this matching fails and creation of new Phi is disabled.
+  bool MatchPhiSet(SimplificationTracker &ST, bool AllowNewPhiNodes,
+                   unsigned &PhiNotMatchedCount) {
+    // Matched and PhiNodesToMatch iterate their elements in a deterministic
+    // order, so the replacements (ReplacePhi) are also done in a deterministic
+    // order.
+    SmallSetVector<PHIPair, 8> Matched;
+    SmallPtrSet<PHINode *, 8> WillNotMatch;
+    PhiNodeSet &PhiNodesToMatch = ST.newPhiNodes();
+    while (PhiNodesToMatch.size()) {
+      PHINode *PHI = *PhiNodesToMatch.begin();
+
+      // Add us, if no Phi nodes in the basic block we do not match.
+      WillNotMatch.clear();
+      WillNotMatch.insert(PHI);
+
+      // Traverse all Phis until we found equivalent or fail to do that.
+      bool IsMatched = false;
+      for (auto &P : PHI->getParent()->phis()) {
+        if (&P == PHI)
+          continue;
+        if ((IsMatched = MatchPhiNode(PHI, &P, Matched, PhiNodesToMatch)))
+          break;
+        // If it does not match, collect all Phi nodes from matcher.
+        // if we end up with no match, them all these Phi nodes will not match
+        // later.
+        for (auto M : Matched)
+          WillNotMatch.insert(M.first);
+        Matched.clear();
+      }
+      if (IsMatched) {
+        // Replace all matched values and erase them.
+        for (auto MV : Matched)
+          ST.ReplacePhi(MV.first, MV.second);
+        Matched.clear();
+        continue;
+      }
+      // If we are not allowed to create new nodes then bail out.
+      if (!AllowNewPhiNodes)
+        return false;
+      // Just remove all seen values in matcher. They will not match anything.
+      PhiNotMatchedCount += WillNotMatch.size();
+      for (auto *P : WillNotMatch)
+        PhiNodesToMatch.erase(P);
+    }
+    return true;
+  }
+  /// Fill the placeholders with values from predecessors and simplify them.
+  void FillPlaceholders(FoldAddrToValueMapping &Map,
+                        SmallVectorImpl<Value *> &TraverseOrder,
+                        SimplificationTracker &ST) {
+    while (!TraverseOrder.empty()) {
+      Value *Current = TraverseOrder.pop_back_val();
+      assert(Map.find(Current) != Map.end() && "No node to fill!!!");
+      Value *V = Map[Current];
+
+      if (SelectInst *Select = dyn_cast<SelectInst>(V)) {
+        // CurrentValue also must be Select.
+        auto *CurrentSelect = cast<SelectInst>(Current);
+        auto *TrueValue = CurrentSelect->getTrueValue();
+        assert(Map.find(TrueValue) != Map.end() && "No True Value!");
+        Select->setTrueValue(ST.Get(Map[TrueValue]));
+        auto *FalseValue = CurrentSelect->getFalseValue();
+        assert(Map.find(FalseValue) != Map.end() && "No False Value!");
+        Select->setFalseValue(ST.Get(Map[FalseValue]));
+      } else {
+        // Must be a Phi node then.
+        auto *PHI = cast<PHINode>(V);
+        // Fill the Phi node with values from predecessors.
+        for (auto *B : predecessors(PHI->getParent())) {
+          Value *PV = cast<PHINode>(Current)->getIncomingValueForBlock(B);
+          assert(Map.find(PV) != Map.end() && "No predecessor Value!");
+          PHI->addIncoming(ST.Get(Map[PV]), B);
+        }
+      }
+      Map[Current] = ST.Simplify(V);
+    }
+  }
+
+  /// Starting from original value recursively iterates over def-use chain up to
+  /// known ending values represented in a map. For each traversed phi/select
+  /// inserts a placeholder Phi or Select.
+  /// Reports all new created Phi/Select nodes by adding them to set.
+  /// Also reports and order in what values have been traversed.
+  void InsertPlaceholders(FoldAddrToValueMapping &Map,
+                          SmallVectorImpl<Value *> &TraverseOrder,
+                          SimplificationTracker &ST) {
+    SmallVector<Value *, 32> Worklist;
+    assert((isa<PHINode>(Original) || isa<SelectInst>(Original)) &&
+           "Address must be a Phi or Select node");
+    auto *Dummy = UndefValue::get(CommonType);
+    Worklist.push_back(Original);
+    while (!Worklist.empty()) {
+      Value *Current = Worklist.pop_back_val();
+      // if it is already visited or it is an ending value then skip it.
+      if (Map.find(Current) != Map.end())
+        continue;
+      TraverseOrder.push_back(Current);
+
+      // CurrentValue must be a Phi node or select. All others must be covered
+      // by anchors.
+      if (SelectInst *CurrentSelect = dyn_cast<SelectInst>(Current)) {
+        // Is it OK to get metadata from OrigSelect?!
+        // Create a Select placeholder with dummy value.
+        SelectInst *Select = SelectInst::Create(
+            CurrentSelect->getCondition(), Dummy, Dummy,
+            CurrentSelect->getName(), CurrentSelect, CurrentSelect);
+        Map[Current] = Select;
+        ST.insertNewSelect(Select);
+        // We are interested in True and False values.
+        Worklist.push_back(CurrentSelect->getTrueValue());
+        Worklist.push_back(CurrentSelect->getFalseValue());
+      } else {
+        // It must be a Phi node then.
+        PHINode *CurrentPhi = cast<PHINode>(Current);
+        unsigned PredCount = CurrentPhi->getNumIncomingValues();
+        PHINode *PHI =
+            PHINode::Create(CommonType, PredCount, "sunk_phi", CurrentPhi);
+        Map[Current] = PHI;
+        ST.insertNewPhi(PHI);
+        append_range(Worklist, CurrentPhi->incoming_values());
+      }
+    }
+  }
+
+  bool addrModeCombiningAllowed() {
+    if (DisableComplexAddrModes)
+      return false;
+    switch (DifferentField) {
+    default:
+      return false;
+    case ExtAddrMode::BaseRegField:
+      return AddrSinkCombineBaseReg;
+    case ExtAddrMode::BaseGVField:
+      return AddrSinkCombineBaseGV;
+    case ExtAddrMode::BaseOffsField:
+      return AddrSinkCombineBaseOffs;
+    case ExtAddrMode::ScaledRegField:
+      return AddrSinkCombineScaledReg;
+    }
+  }
+};
+} // end anonymous namespace
+
+/// Try adding ScaleReg*Scale to the current addressing mode.
 /// Return true and update AddrMode if this addr mode is legal for the target,
 /// false if not.
-bool AddressingModeMatcher::MatchScaledValue(Value *ScaleReg, int64_t Scale,
+bool AddressingModeMatcher::matchScaledValue(Value *ScaleReg, int64_t Scale,
                                              unsigned Depth) {
   // If Scale is 1, then this is the same as adding ScaleReg to the addressing
   // mode.  Just process that directly.
   if (Scale == 1)
-    return MatchAddr(ScaleReg, Depth);
+    return matchAddr(ScaleReg, Depth);
 
   // If the scale is 0, it takes nothing to add this.
   if (Scale == 0)
@@ -1900,7 +3866,7 @@ bool AddressingModeMatcher::MatchScaledValue(Value *ScaleReg, int64_t Scale,
   TestAddrMode.ScaledReg = ScaleReg;
 
   // If the new address isn't legal, bail out.
-  if (!TLI.isLegalAddressingMode(TestAddrMode, AccessTy))
+  if (!TLI.isLegalAddressingMode(DL, TestAddrMode, AccessTy, AddrSpace))
     return false;
 
   // It was legal, so commit it.
@@ -1908,29 +3874,98 @@ bool AddressingModeMatcher::MatchScaledValue(Value *ScaleReg, int64_t Scale,
 
   // Okay, we decided that we can add ScaleReg+Scale to AddrMode.  Check now
   // to see if ScaleReg is actually X+C.  If so, we can turn this into adding
-  // X*Scale + C*Scale to addr mode.
+  // X*Scale + C*Scale to addr mode. If we found available IV increment, do not
+  // go any further: we can reuse it and cannot eliminate it.
   ConstantInt *CI = nullptr; Value *AddLHS = nullptr;
-  if (isa<Instruction>(ScaleReg) &&  // not a constant expr.
-      match(ScaleReg, m_Add(m_Value(AddLHS), m_ConstantInt(CI)))) {
+  if (isa<Instruction>(ScaleReg) && // not a constant expr.
+      match(ScaleReg, m_Add(m_Value(AddLHS), m_ConstantInt(CI))) &&
+      !isIVIncrement(ScaleReg, &LI) && CI->getValue().isSignedIntN(64)) {
+    TestAddrMode.InBounds = false;
     TestAddrMode.ScaledReg = AddLHS;
-    TestAddrMode.BaseOffs += CI->getSExtValue()*TestAddrMode.Scale;
+    TestAddrMode.BaseOffs += CI->getSExtValue() * TestAddrMode.Scale;
 
     // If this addressing mode is legal, commit it and remember that we folded
     // this instruction.
-    if (TLI.isLegalAddressingMode(TestAddrMode, AccessTy)) {
+    if (TLI.isLegalAddressingMode(DL, TestAddrMode, AccessTy, AddrSpace)) {
       AddrModeInsts.push_back(cast<Instruction>(ScaleReg));
       AddrMode = TestAddrMode;
       return true;
     }
+    // Restore status quo.
+    TestAddrMode = AddrMode;
   }
 
-  // Otherwise, not (x+c)*scale, just return what we have.
+  // If this is an add recurrence with a constant step, return the increment
+  // instruction and the canonicalized step.
+  auto GetConstantStep = [this](const Value * V)
+      ->Optional<std::pair<Instruction *, APInt> > {
+    auto *PN = dyn_cast<PHINode>(V);
+    if (!PN)
+      return None;
+    auto IVInc = getIVIncrement(PN, &LI);
+    if (!IVInc)
+      return None;
+    // TODO: The result of the intrinsics above is two-compliment. However when
+    // IV inc is expressed as add or sub, iv.next is potentially a poison value.
+    // If it has nuw or nsw flags, we need to make sure that these flags are
+    // inferrable at the point of memory instruction. Otherwise we are replacing
+    // well-defined two-compliment computation with poison. Currently, to avoid
+    // potentially complex analysis needed to prove this, we reject such cases.
+    if (auto *OIVInc = dyn_cast<OverflowingBinaryOperator>(IVInc->first))
+      if (OIVInc->hasNoSignedWrap() || OIVInc->hasNoUnsignedWrap())
+        return None;
+    if (auto *ConstantStep = dyn_cast<ConstantInt>(IVInc->second))
+      return std::make_pair(IVInc->first, ConstantStep->getValue());
+    return None;
+  };
+
+  // Try to account for the following special case:
+  // 1. ScaleReg is an inductive variable;
+  // 2. We use it with non-zero offset;
+  // 3. IV's increment is available at the point of memory instruction.
+  //
+  // In this case, we may reuse the IV increment instead of the IV Phi to
+  // achieve the following advantages:
+  // 1. If IV step matches the offset, we will have no need in the offset;
+  // 2. Even if they don't match, we will reduce the overlap of living IV
+  //    and IV increment, that will potentially lead to better register
+  //    assignment.
+  if (AddrMode.BaseOffs) {
+    if (auto IVStep = GetConstantStep(ScaleReg)) {
+      Instruction *IVInc = IVStep->first;
+      // The following assert is important to ensure a lack of infinite loops.
+      // This transforms is (intentionally) the inverse of the one just above.
+      // If they don't agree on the definition of an increment, we'd alternate
+      // back and forth indefinitely.
+      assert(isIVIncrement(IVInc, &LI) && "implied by GetConstantStep");
+      APInt Step = IVStep->second;
+      APInt Offset = Step * AddrMode.Scale;
+      if (Offset.isSignedIntN(64)) {
+        TestAddrMode.InBounds = false;
+        TestAddrMode.ScaledReg = IVInc;
+        TestAddrMode.BaseOffs -= Offset.getLimitedValue();
+        // If this addressing mode is legal, commit it..
+        // (Note that we defer the (expensive) domtree base legality check
+        // to the very last possible point.)
+        if (TLI.isLegalAddressingMode(DL, TestAddrMode, AccessTy, AddrSpace) &&
+            getDTFn().dominates(IVInc, MemoryInst)) {
+          AddrModeInsts.push_back(cast<Instruction>(IVInc));
+          AddrMode = TestAddrMode;
+          return true;
+        }
+        // Restore status quo.
+        TestAddrMode = AddrMode;
+      }
+    }
+  }
+
+  // Otherwise, just return what we have.
   return true;
 }
 
-/// MightBeFoldableInst - This is a little filter, which returns true if an
-/// addressing computation involving I might be folded into a load/store
-/// accessing it.  This doesn't need to be perfect, but needs to accept at least
+/// This is a little filter, which returns true if an addressing computation
+/// involving I might be folded into a load/store accessing it.
+/// This doesn't need to be perfect, but needs to accept at least
 /// the set of instructions that MatchOperationAddr can.
 static bool MightBeFoldableInst(Instruction *I) {
   switch (I->getOpcode()) {
@@ -1939,7 +3974,7 @@ static bool MightBeFoldableInst(Instruction *I) {
     // Don't touch identity bitcasts.
     if (I->getType() == I->getOperand(0)->getType())
       return false;
-    return I->getType()->isPointerTy() || I->getType()->isIntegerTy();
+    return I->getType()->isIntOrPtrTy();
   case Instruction::PtrToInt:
     // PtrToInt is always a noop, as we know that the int type is pointer sized.
     return true;
@@ -1959,11 +3994,12 @@ static bool MightBeFoldableInst(Instruction *I) {
   }
 }
 
-/// \brief Check whether or not \p Val is a legal instruction for \p TLI.
+/// Check whether or not \p Val is a legal instruction for \p TLI.
 /// \note \p Val is assumed to be the product of some type promotion.
 /// Therefore if \p Val has an undefined state in \p TLI, this is assumed
 /// to be legal, as the non-promoted value would have had the same state.
-static bool isPromotedInstructionLegal(const TargetLowering &TLI, Value *Val) {
+static bool isPromotedInstructionLegal(const TargetLowering &TLI,
+                                       const DataLayout &DL, Value *Val) {
   Instruction *PromotedInst = dyn_cast<Instruction>(Val);
   if (!PromotedInst)
     return false;
@@ -1973,12 +4009,49 @@ static bool isPromotedInstructionLegal(const TargetLowering &TLI, Value *Val) {
     return true;
   // Otherwise, check if the promoted instruction is legal or not.
   return TLI.isOperationLegalOrCustom(
-      ISDOpcode, TLI.getValueType(PromotedInst->getType()));
+      ISDOpcode, TLI.getValueType(DL, PromotedInst->getType()));
 }
 
-/// \brief Hepler class to perform type promotion.
+namespace {
+
+/// Hepler class to perform type promotion.
 class TypePromotionHelper {
-  /// \brief Utility function to check whether or not a sign or zero extension
+  /// Utility function to add a promoted instruction \p ExtOpnd to
+  /// \p PromotedInsts and record the type of extension we have seen.
+  static void addPromotedInst(InstrToOrigTy &PromotedInsts,
+                              Instruction *ExtOpnd,
+                              bool IsSExt) {
+    ExtType ExtTy = IsSExt ? SignExtension : ZeroExtension;
+    InstrToOrigTy::iterator It = PromotedInsts.find(ExtOpnd);
+    if (It != PromotedInsts.end()) {
+      // If the new extension is same as original, the information in
+      // PromotedInsts[ExtOpnd] is still correct.
+      if (It->second.getInt() == ExtTy)
+        return;
+
+      // Now the new extension is different from old extension, we make
+      // the type information invalid by setting extension type to
+      // BothExtension.
+      ExtTy = BothExtension;
+    }
+    PromotedInsts[ExtOpnd] = TypeIsSExt(ExtOpnd->getType(), ExtTy);
+  }
+
+  /// Utility function to query the original type of instruction \p Opnd
+  /// with a matched extension type. If the extension doesn't match, we
+  /// cannot use the information we had on the original type.
+  /// BothExtension doesn't match any extension type.
+  static const Type *getOrigType(const InstrToOrigTy &PromotedInsts,
+                                 Instruction *Opnd,
+                                 bool IsSExt) {
+    ExtType ExtTy = IsSExt ? SignExtension : ZeroExtension;
+    InstrToOrigTy::const_iterator It = PromotedInsts.find(Opnd);
+    if (It != PromotedInsts.end() && It->second.getInt() == ExtTy)
+      return It->second.getPointer();
+    return nullptr;
+  }
+
+  /// Utility function to check whether or not a sign or zero extension
   /// of \p Inst with \p ConsideredExtType can be moved through \p Inst by
   /// either using the operands of \p Inst or promoting \p Inst.
   /// The type of the extension is defined by \p IsSExt.
@@ -1992,18 +4065,16 @@ class TypePromotionHelper {
   static bool canGetThrough(const Instruction *Inst, Type *ConsideredExtType,
                             const InstrToOrigTy &PromotedInsts, bool IsSExt);
 
-  /// \brief Utility function to determine if \p OpIdx should be promoted when
+  /// Utility function to determine if \p OpIdx should be promoted when
   /// promoting \p Inst.
   static bool shouldExtOperand(const Instruction *Inst, int OpIdx) {
-    if (isa<SelectInst>(Inst) && OpIdx == 0)
-      return false;
-    return true;
+    return !(isa<SelectInst>(Inst) && OpIdx == 0);
   }
 
-  /// \brief Utility function to promote the operand of \p Ext when this
+  /// Utility function to promote the operand of \p Ext when this
   /// operand is a promotable trunc or sext or zext.
   /// \p PromotedInsts maps the instructions to their type before promotion.
-  /// \p CreatedInsts[out] contains how many non-free instructions have been
+  /// \p CreatedInstsCost[out] contains the cost of all instructions
   /// created to promote the operand of Ext.
   /// Newly added extensions are inserted in \p Exts.
   /// Newly added truncates are inserted in \p Truncs.
@@ -2011,66 +4082,71 @@ class TypePromotionHelper {
   /// \return The promoted value which is used instead of Ext.
   static Value *promoteOperandForTruncAndAnyExt(
       Instruction *Ext, TypePromotionTransaction &TPT,
-      InstrToOrigTy &PromotedInsts, unsigned &CreatedInsts,
+      InstrToOrigTy &PromotedInsts, unsigned &CreatedInstsCost,
       SmallVectorImpl<Instruction *> *Exts,
-      SmallVectorImpl<Instruction *> *Truncs);
+      SmallVectorImpl<Instruction *> *Truncs, const TargetLowering &TLI);
 
-  /// \brief Utility function to promote the operand of \p Ext when this
+  /// Utility function to promote the operand of \p Ext when this
   /// operand is promotable and is not a supported trunc or sext.
   /// \p PromotedInsts maps the instructions to their type before promotion.
-  /// \p CreatedInsts[out] contains how many non-free instructions have been
+  /// \p CreatedInstsCost[out] contains the cost of all the instructions
   /// created to promote the operand of Ext.
   /// Newly added extensions are inserted in \p Exts.
   /// Newly added truncates are inserted in \p Truncs.
   /// Should never be called directly.
   /// \return The promoted value which is used instead of Ext.
-  static Value *
-  promoteOperandForOther(Instruction *Ext, TypePromotionTransaction &TPT,
-                         InstrToOrigTy &PromotedInsts, unsigned &CreatedInsts,
-                         SmallVectorImpl<Instruction *> *Exts,
-                         SmallVectorImpl<Instruction *> *Truncs, bool IsSExt);
+  static Value *promoteOperandForOther(Instruction *Ext,
+                                       TypePromotionTransaction &TPT,
+                                       InstrToOrigTy &PromotedInsts,
+                                       unsigned &CreatedInstsCost,
+                                       SmallVectorImpl<Instruction *> *Exts,
+                                       SmallVectorImpl<Instruction *> *Truncs,
+                                       const TargetLowering &TLI, bool IsSExt);
 
   /// \see promoteOperandForOther.
-  static Value *
-  signExtendOperandForOther(Instruction *Ext, TypePromotionTransaction &TPT,
-                            InstrToOrigTy &PromotedInsts,
-                            unsigned &CreatedInsts,
-                            SmallVectorImpl<Instruction *> *Exts,
-                            SmallVectorImpl<Instruction *> *Truncs) {
-    return promoteOperandForOther(Ext, TPT, PromotedInsts, CreatedInsts, Exts,
-                                  Truncs, true);
+  static Value *signExtendOperandForOther(
+      Instruction *Ext, TypePromotionTransaction &TPT,
+      InstrToOrigTy &PromotedInsts, unsigned &CreatedInstsCost,
+      SmallVectorImpl<Instruction *> *Exts,
+      SmallVectorImpl<Instruction *> *Truncs, const TargetLowering &TLI) {
+    return promoteOperandForOther(Ext, TPT, PromotedInsts, CreatedInstsCost,
+                                  Exts, Truncs, TLI, true);
   }
 
   /// \see promoteOperandForOther.
-  static Value *
-  zeroExtendOperandForOther(Instruction *Ext, TypePromotionTransaction &TPT,
-                            InstrToOrigTy &PromotedInsts,
-                            unsigned &CreatedInsts,
-                            SmallVectorImpl<Instruction *> *Exts,
-                            SmallVectorImpl<Instruction *> *Truncs) {
-    return promoteOperandForOther(Ext, TPT, PromotedInsts, CreatedInsts, Exts,
-                                  Truncs, false);
+  static Value *zeroExtendOperandForOther(
+      Instruction *Ext, TypePromotionTransaction &TPT,
+      InstrToOrigTy &PromotedInsts, unsigned &CreatedInstsCost,
+      SmallVectorImpl<Instruction *> *Exts,
+      SmallVectorImpl<Instruction *> *Truncs, const TargetLowering &TLI) {
+    return promoteOperandForOther(Ext, TPT, PromotedInsts, CreatedInstsCost,
+                                  Exts, Truncs, TLI, false);
   }
 
 public:
   /// Type for the utility function that promotes the operand of Ext.
-  typedef Value *(*Action)(Instruction *Ext, TypePromotionTransaction &TPT,
-                           InstrToOrigTy &PromotedInsts, unsigned &CreatedInsts,
-                           SmallVectorImpl<Instruction *> *Exts,
-                           SmallVectorImpl<Instruction *> *Truncs);
-  /// \brief Given a sign/zero extend instruction \p Ext, return the approriate
+  using Action = Value *(*)(Instruction *Ext, TypePromotionTransaction &TPT,
+                            InstrToOrigTy &PromotedInsts,
+                            unsigned &CreatedInstsCost,
+                            SmallVectorImpl<Instruction *> *Exts,
+                            SmallVectorImpl<Instruction *> *Truncs,
+                            const TargetLowering &TLI);
+
+  /// Given a sign/zero extend instruction \p Ext, return the appropriate
   /// action to promote the operand of \p Ext instead of using Ext.
   /// \return NULL if no promotable action is possible with the current
   /// sign extension.
-  /// \p InsertedTruncs keeps track of all the truncate instructions inserted by
-  /// the others CodeGenPrepare optimizations. This information is important
+  /// \p InsertedInsts keeps track of all the instructions inserted by the
+  /// other CodeGenPrepare optimizations. This information is important
   /// because we do not want to promote these instructions as CodeGenPrepare
   /// will reinsert them later. Thus creating an infinite loop: create/remove.
   /// \p PromotedInsts maps the instructions to their type before promotion.
-  static Action getAction(Instruction *Ext, const SetOfInstrs &InsertedTruncs,
+  static Action getAction(Instruction *Ext, const SetOfInstrs &InsertedInsts,
                           const TargetLowering &TLI,
                           const InstrToOrigTy &PromotedInsts);
 };
+
+} // end anonymous namespace
 
 bool TypePromotionHelper::canGetThrough(const Instruction *Inst,
                                         Type *ConsideredExtType,
@@ -2093,10 +4169,49 @@ bool TypePromotionHelper::canGetThrough(const Instruction *Inst,
   // We can get through binary operator, if it is legal. In other words, the
   // binary operator must have a nuw or nsw flag.
   const BinaryOperator *BinOp = dyn_cast<BinaryOperator>(Inst);
-  if (BinOp && isa<OverflowingBinaryOperator>(BinOp) &&
+  if (isa_and_nonnull<OverflowingBinaryOperator>(BinOp) &&
       ((!IsSExt && BinOp->hasNoUnsignedWrap()) ||
        (IsSExt && BinOp->hasNoSignedWrap())))
     return true;
+
+  // ext(and(opnd, cst)) --> and(ext(opnd), ext(cst))
+  if ((Inst->getOpcode() == Instruction::And ||
+       Inst->getOpcode() == Instruction::Or))
+    return true;
+
+  // ext(xor(opnd, cst)) --> xor(ext(opnd), ext(cst))
+  if (Inst->getOpcode() == Instruction::Xor) {
+    const ConstantInt *Cst = dyn_cast<ConstantInt>(Inst->getOperand(1));
+    // Make sure it is not a NOT.
+    if (Cst && !Cst->getValue().isAllOnesValue())
+      return true;
+  }
+
+  // zext(shrl(opnd, cst)) --> shrl(zext(opnd), zext(cst))
+  // It may change a poisoned value into a regular value, like
+  //     zext i32 (shrl i8 %val, 12)  -->  shrl i32 (zext i8 %val), 12
+  //          poisoned value                    regular value
+  // It should be OK since undef covers valid value.
+  if (Inst->getOpcode() == Instruction::LShr && !IsSExt)
+    return true;
+
+  // and(ext(shl(opnd, cst)), cst) --> and(shl(ext(opnd), ext(cst)), cst)
+  // It may change a poisoned value into a regular value, like
+  //     zext i32 (shl i8 %val, 12)  -->  shl i32 (zext i8 %val), 12
+  //          poisoned value                    regular value
+  // It should be OK since undef covers valid value.
+  if (Inst->getOpcode() == Instruction::Shl && Inst->hasOneUse()) {
+    const auto *ExtInst = cast<const Instruction>(*Inst->user_begin());
+    if (ExtInst->hasOneUse()) {
+      const auto *AndInst = dyn_cast<const Instruction>(*ExtInst->user_begin());
+      if (AndInst && AndInst->getOpcode() == Instruction::And) {
+        const auto *Cst = dyn_cast<ConstantInt>(AndInst->getOperand(1));
+        if (Cst &&
+            Cst->getValue().isIntN(Inst->getType()->getIntegerBitWidth()))
+          return true;
+      }
+    }
+  }
 
   // Check if we can do the following simplification.
   // ext(trunc(opnd)) --> ext(opnd)
@@ -2105,8 +4220,7 @@ bool TypePromotionHelper::canGetThrough(const Instruction *Inst,
 
   Value *OpndVal = Inst->getOperand(0);
   // Check if we can use this operand in the extension.
-  // If the type is larger than the result type of the extension,
-  // we cannot.
+  // If the type is larger than the result type of the extension, we cannot.
   if (!OpndVal->getType()->isIntegerTy() ||
       OpndVal->getType()->getIntegerBitWidth() >
           ConsideredExtType->getIntegerBitWidth())
@@ -2123,24 +4237,21 @@ bool TypePromotionHelper::canGetThrough(const Instruction *Inst,
   // I.e., check that trunc just drops extended bits of the same kind of
   // the extension.
   // #1 get the type of the operand and check the kind of the extended bits.
-  const Type *OpndType;
-  InstrToOrigTy::const_iterator It = PromotedInsts.find(Opnd);
-  if (It != PromotedInsts.end() && It->second.IsSExt == IsSExt)
-    OpndType = It->second.Ty;
+  const Type *OpndType = getOrigType(PromotedInsts, Opnd, IsSExt);
+  if (OpndType)
+    ;
   else if ((IsSExt && isa<SExtInst>(Opnd)) || (!IsSExt && isa<ZExtInst>(Opnd)))
     OpndType = Opnd->getOperand(0)->getType();
   else
     return false;
 
-  // #2 check that the truncate just drop extended bits.
-  if (Inst->getType()->getIntegerBitWidth() >= OpndType->getIntegerBitWidth())
-    return true;
-
-  return false;
+  // #2 check that the truncate just drops extended bits.
+  return Inst->getType()->getIntegerBitWidth() >=
+         OpndType->getIntegerBitWidth();
 }
 
 TypePromotionHelper::Action TypePromotionHelper::getAction(
-    Instruction *Ext, const SetOfInstrs &InsertedTruncs,
+    Instruction *Ext, const SetOfInstrs &InsertedInsts,
     const TargetLowering &TLI, const InstrToOrigTy &PromotedInsts) {
   assert((isa<SExtInst>(Ext) || isa<ZExtInst>(Ext)) &&
          "Unexpected instruction type");
@@ -2156,7 +4267,7 @@ TypePromotionHelper::Action TypePromotionHelper::getAction(
   // Do not promote if the operand has been added by codegenprepare.
   // Otherwise, it means we are undoing an optimization that is likely to be
   // redone, thus causing potential infinite loop.
-  if (isa<TruncInst>(ExtOpnd) && InsertedTruncs.count(ExtOpnd))
+  if (isa<TruncInst>(ExtOpnd) && InsertedInsts.count(ExtOpnd))
     return nullptr;
 
   // SExt or Trunc instructions.
@@ -2173,17 +4284,19 @@ TypePromotionHelper::Action TypePromotionHelper::getAction(
 }
 
 Value *TypePromotionHelper::promoteOperandForTruncAndAnyExt(
-    llvm::Instruction *SExt, TypePromotionTransaction &TPT,
-    InstrToOrigTy &PromotedInsts, unsigned &CreatedInsts,
+    Instruction *SExt, TypePromotionTransaction &TPT,
+    InstrToOrigTy &PromotedInsts, unsigned &CreatedInstsCost,
     SmallVectorImpl<Instruction *> *Exts,
-    SmallVectorImpl<Instruction *> *Truncs) {
+    SmallVectorImpl<Instruction *> *Truncs, const TargetLowering &TLI) {
   // By construction, the operand of SExt is an instruction. Otherwise we cannot
   // get through it and this method should not be called.
   Instruction *SExtOpnd = cast<Instruction>(SExt->getOperand(0));
   Value *ExtVal = SExt;
+  bool HasMergedNonFreeExt = false;
   if (isa<ZExtInst>(SExtOpnd)) {
     // Replace s|zext(zext(opnd))
     // => zext(opnd).
+    HasMergedNonFreeExt = !TLI.isExtFree(SExtOpnd);
     Value *ZExt =
         TPT.createZExt(SExt, SExtOpnd->getOperand(0), SExt->getType());
     TPT.replaceAllUsesWith(SExt, ZExt);
@@ -2194,7 +4307,7 @@ Value *TypePromotionHelper::promoteOperandForTruncAndAnyExt(
     // => z|sext(opnd).
     TPT.setOperand(SExt, 0, SExtOpnd->getOperand(0));
   }
-  CreatedInsts = 0;
+  CreatedInstsCost = 0;
 
   // Remove dead code.
   if (SExtOpnd->use_empty())
@@ -2203,8 +4316,11 @@ Value *TypePromotionHelper::promoteOperandForTruncAndAnyExt(
   // Check if the extension is still needed.
   Instruction *ExtInst = dyn_cast<Instruction>(ExtVal);
   if (!ExtInst || ExtInst->getType() != ExtInst->getOperand(0)->getType()) {
-    if (ExtInst && Exts)
-      Exts->push_back(ExtInst);
+    if (ExtInst) {
+      if (Exts)
+        Exts->push_back(ExtInst);
+      CreatedInstsCost = !TLI.isExtFree(ExtInst) && !HasMergedNonFreeExt;
+    }
     return ExtVal;
   }
 
@@ -2217,13 +4333,14 @@ Value *TypePromotionHelper::promoteOperandForTruncAndAnyExt(
 
 Value *TypePromotionHelper::promoteOperandForOther(
     Instruction *Ext, TypePromotionTransaction &TPT,
-    InstrToOrigTy &PromotedInsts, unsigned &CreatedInsts,
+    InstrToOrigTy &PromotedInsts, unsigned &CreatedInstsCost,
     SmallVectorImpl<Instruction *> *Exts,
-    SmallVectorImpl<Instruction *> *Truncs, bool IsSExt) {
+    SmallVectorImpl<Instruction *> *Truncs, const TargetLowering &TLI,
+    bool IsSExt) {
   // By construction, the operand of Ext is an instruction. Otherwise we cannot
   // get through it and this method should not be called.
   Instruction *ExtOpnd = cast<Instruction>(Ext->getOperand(0));
-  CreatedInsts = 0;
+  CreatedInstsCost = 0;
   if (!ExtOpnd->hasOneUse()) {
     // ExtOpnd will be promoted.
     // All its uses, but Ext, will need to use a truncated value of the
@@ -2231,15 +4348,14 @@ Value *TypePromotionHelper::promoteOperandForOther(
     // Create the truncate now.
     Value *Trunc = TPT.createTrunc(Ext, ExtOpnd->getType());
     if (Instruction *ITrunc = dyn_cast<Instruction>(Trunc)) {
-      ITrunc->removeFromParent();
       // Insert it just after the definition.
-      ITrunc->insertAfter(ExtOpnd);
+      ITrunc->moveAfter(ExtOpnd);
       if (Truncs)
         Truncs->push_back(ITrunc);
     }
 
     TPT.replaceAllUsesWith(ExtOpnd, Trunc);
-    // Restore the operand of Ext (which has been replace by the previous call
+    // Restore the operand of Ext (which has been replaced by the previous call
     // to replaceAllUsesWith) to avoid creating a cycle trunc <-> sext.
     TPT.setOperand(Ext, 0, ExtOpnd);
   }
@@ -2251,8 +4367,7 @@ Value *TypePromotionHelper::promoteOperandForOther(
 
   // Remember the original type of the instruction before promotion.
   // This is useful to know that the high bits are sign extended bits.
-  PromotedInsts.insert(std::pair<Instruction *, TypeIsSExt>(
-      ExtOpnd, TypeIsSExt(ExtOpnd->getType(), IsSExt)));
+  addPromotedInst(PromotedInsts, ExtOpnd, IsSExt);
   // Step #1.
   TPT.mutateType(ExtOpnd, Ext->getType());
   // Step #2.
@@ -2260,19 +4375,19 @@ Value *TypePromotionHelper::promoteOperandForOther(
   // Step #3.
   Instruction *ExtForOpnd = Ext;
 
-  DEBUG(dbgs() << "Propagate Ext to operands\n");
+  LLVM_DEBUG(dbgs() << "Propagate Ext to operands\n");
   for (int OpIdx = 0, EndOpIdx = ExtOpnd->getNumOperands(); OpIdx != EndOpIdx;
        ++OpIdx) {
-    DEBUG(dbgs() << "Operand:\n" << *(ExtOpnd->getOperand(OpIdx)) << '\n');
+    LLVM_DEBUG(dbgs() << "Operand:\n" << *(ExtOpnd->getOperand(OpIdx)) << '\n');
     if (ExtOpnd->getOperand(OpIdx)->getType() == Ext->getType() ||
         !shouldExtOperand(ExtOpnd, OpIdx)) {
-      DEBUG(dbgs() << "No need to propagate\n");
+      LLVM_DEBUG(dbgs() << "No need to propagate\n");
       continue;
     }
     // Check if we can statically extend the operand.
     Value *Opnd = ExtOpnd->getOperand(OpIdx);
     if (const ConstantInt *Cst = dyn_cast<ConstantInt>(Opnd)) {
-      DEBUG(dbgs() << "Statically extend\n");
+      LLVM_DEBUG(dbgs() << "Statically extend\n");
       unsigned BitWidth = Ext->getType()->getIntegerBitWidth();
       APInt CstVal = IsSExt ? Cst->getValue().sext(BitWidth)
                             : Cst->getValue().zext(BitWidth);
@@ -2281,16 +4396,16 @@ Value *TypePromotionHelper::promoteOperandForOther(
     }
     // UndefValue are typed, so we have to statically sign extend them.
     if (isa<UndefValue>(Opnd)) {
-      DEBUG(dbgs() << "Statically extend\n");
+      LLVM_DEBUG(dbgs() << "Statically extend\n");
       TPT.setOperand(ExtOpnd, OpIdx, UndefValue::get(Ext->getType()));
       continue;
     }
 
-    // Otherwise we have to explicity sign extend the operand.
+    // Otherwise we have to explicitly sign extend the operand.
     // Check if Ext was reused to extend an operand.
     if (!ExtForOpnd) {
       // If yes, create a new one.
-      DEBUG(dbgs() << "More operands to ext\n");
+      LLVM_DEBUG(dbgs() << "More operands to ext\n");
       Value *ValForExtOpnd = IsSExt ? TPT.createSExt(Ext, Opnd, Ext->getType())
         : TPT.createZExt(Ext, Opnd, Ext->getType());
       if (!isa<Instruction>(ValForExtOpnd)) {
@@ -2298,7 +4413,6 @@ Value *TypePromotionHelper::promoteOperandForOther(
         continue;
       }
       ExtForOpnd = cast<Instruction>(ValForExtOpnd);
-      ++CreatedInsts;
     }
     if (Exts)
       Exts->push_back(ExtForOpnd);
@@ -2307,44 +4421,45 @@ Value *TypePromotionHelper::promoteOperandForOther(
     // Move the sign extension before the insertion point.
     TPT.moveBefore(ExtForOpnd, ExtOpnd);
     TPT.setOperand(ExtOpnd, OpIdx, ExtForOpnd);
+    CreatedInstsCost += !TLI.isExtFree(ExtForOpnd);
     // If more sext are required, new instructions will have to be created.
     ExtForOpnd = nullptr;
   }
   if (ExtForOpnd == Ext) {
-    DEBUG(dbgs() << "Extension is useless now\n");
+    LLVM_DEBUG(dbgs() << "Extension is useless now\n");
     TPT.eraseInstruction(Ext);
   }
   return ExtOpnd;
 }
 
-/// IsPromotionProfitable - Check whether or not promoting an instruction
-/// to a wider type was profitable.
-/// \p MatchedSize gives the number of instructions that have been matched
-/// in the addressing mode after the promotion was applied.
-/// \p SizeWithPromotion gives the number of created instructions for
-/// the promotion plus the number of instructions that have been
-/// matched in the addressing mode before the promotion.
+/// Check whether or not promoting an instruction to a wider type is profitable.
+/// \p NewCost gives the cost of extension instructions created by the
+/// promotion.
+/// \p OldCost gives the cost of extension instructions before the promotion
+/// plus the number of instructions that have been
+/// matched in the addressing mode the promotion.
 /// \p PromotedOperand is the value that has been promoted.
 /// \return True if the promotion is profitable, false otherwise.
-bool
-AddressingModeMatcher::IsPromotionProfitable(unsigned MatchedSize,
-                                             unsigned SizeWithPromotion,
-                                             Value *PromotedOperand) const {
-  // We folded less instructions than what we created to promote the operand.
+bool AddressingModeMatcher::isPromotionProfitable(
+    unsigned NewCost, unsigned OldCost, Value *PromotedOperand) const {
+  LLVM_DEBUG(dbgs() << "OldCost: " << OldCost << "\tNewCost: " << NewCost
+                    << '\n');
+  // The cost of the new extensions is greater than the cost of the
+  // old extension plus what we folded.
   // This is not profitable.
-  if (MatchedSize < SizeWithPromotion)
+  if (NewCost > OldCost)
     return false;
-  if (MatchedSize > SizeWithPromotion)
+  if (NewCost < OldCost)
     return true;
   // The promotion is neutral but it may help folding the sign extension in
   // loads for instance.
   // Check that we did not create an illegal instruction.
-  return isPromotedInstructionLegal(TLI, PromotedOperand);
+  return isPromotedInstructionLegal(TLI, DL, PromotedOperand);
 }
 
-/// MatchOperationAddr - Given an instruction or constant expr, see if we can
-/// fold the operation into the addressing mode.  If so, update the addressing
-/// mode and return true, otherwise return false without modifying AddrMode.
+/// Given an instruction or constant expr, see if we can fold the operation
+/// into the addressing mode. If so, update the addressing mode and return
+/// true, otherwise return false without modifying AddrMode.
 /// If \p MovedAway is not NULL, it contains the information of whether or
 /// not AddrInst has to be folded into the addressing mode on success.
 /// If \p MovedAway == true, \p AddrInst will not be part of the addressing
@@ -2353,7 +4468,7 @@ AddressingModeMatcher::IsPromotionProfitable(unsigned MatchedSize,
 /// This state can happen when AddrInst is a sext, since it may be moved away.
 /// Therefore, AddrInst may not be valid when MovedAway is true and it must
 /// not be referenced anymore.
-bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
+bool AddressingModeMatcher::matchOperationAddr(User *AddrInst, unsigned Opcode,
                                                unsigned Depth,
                                                bool *MovedAway) {
   // Avoid exponential behavior on extremely deep expression trees.
@@ -2366,25 +4481,33 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
   switch (Opcode) {
   case Instruction::PtrToInt:
     // PtrToInt is always a noop, as we know that the int type is pointer sized.
-    return MatchAddr(AddrInst->getOperand(0), Depth);
-  case Instruction::IntToPtr:
+    return matchAddr(AddrInst->getOperand(0), Depth);
+  case Instruction::IntToPtr: {
+    auto AS = AddrInst->getType()->getPointerAddressSpace();
+    auto PtrTy = MVT::getIntegerVT(DL.getPointerSizeInBits(AS));
     // This inttoptr is a no-op if the integer type is pointer sized.
-    if (TLI.getValueType(AddrInst->getOperand(0)->getType()) ==
-        TLI.getPointerTy(AddrInst->getType()->getPointerAddressSpace()))
-      return MatchAddr(AddrInst->getOperand(0), Depth);
+    if (TLI.getValueType(DL, AddrInst->getOperand(0)->getType()) == PtrTy)
+      return matchAddr(AddrInst->getOperand(0), Depth);
     return false;
+  }
   case Instruction::BitCast:
-  case Instruction::AddrSpaceCast:
     // BitCast is always a noop, and we can handle it as long as it is
     // int->int or pointer->pointer (we don't want int<->fp or something).
-    if ((AddrInst->getOperand(0)->getType()->isPointerTy() ||
-         AddrInst->getOperand(0)->getType()->isIntegerTy()) &&
+    if (AddrInst->getOperand(0)->getType()->isIntOrPtrTy() &&
         // Don't touch identity bitcasts.  These were probably put here by LSR,
         // and we don't want to mess around with them.  Assume it knows what it
         // is doing.
         AddrInst->getOperand(0)->getType() != AddrInst->getType())
-      return MatchAddr(AddrInst->getOperand(0), Depth);
+      return matchAddr(AddrInst->getOperand(0), Depth);
     return false;
+  case Instruction::AddrSpaceCast: {
+    unsigned SrcAS
+      = AddrInst->getOperand(0)->getType()->getPointerAddressSpace();
+    unsigned DestAS = AddrInst->getType()->getPointerAddressSpace();
+    if (TLI.getTargetMachine().isNoopAddrSpaceCast(SrcAS, DestAS))
+      return matchAddr(AddrInst->getOperand(0), Depth);
+    return false;
+  }
   case Instruction::Add: {
     // Check to see if we can merge in the RHS then the LHS.  If so, we win.
     ExtAddrMode BackupAddrMode = AddrMode;
@@ -2396,8 +4519,9 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     TypePromotionTransaction::ConstRestorationPt LastKnownGood =
         TPT.getRestorationPoint();
 
-    if (MatchAddr(AddrInst->getOperand(1), Depth+1) &&
-        MatchAddr(AddrInst->getOperand(0), Depth+1))
+    AddrMode.InBounds = false;
+    if (matchAddr(AddrInst->getOperand(1), Depth+1) &&
+        matchAddr(AddrInst->getOperand(0), Depth+1))
       return true;
 
     // Restore the old addr mode info.
@@ -2406,8 +4530,8 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     TPT.rollback(LastKnownGood);
 
     // Otherwise this was over-aggressive.  Try merging in the LHS then the RHS.
-    if (MatchAddr(AddrInst->getOperand(0), Depth+1) &&
-        MatchAddr(AddrInst->getOperand(1), Depth+1))
+    if (matchAddr(AddrInst->getOperand(0), Depth+1) &&
+        matchAddr(AddrInst->getOperand(1), Depth+1))
       return true;
 
     // Otherwise we definitely can't merge the ADD in.
@@ -2422,14 +4546,15 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
   case Instruction::Mul:
   case Instruction::Shl: {
     // Can only handle X*C and X << C.
+    AddrMode.InBounds = false;
     ConstantInt *RHS = dyn_cast<ConstantInt>(AddrInst->getOperand(1));
-    if (!RHS)
+    if (!RHS || RHS->getBitWidth() > 64)
       return false;
     int64_t Scale = RHS->getSExtValue();
     if (Opcode == Instruction::Shl)
       Scale = 1LL << Scale;
 
-    return MatchScaledValue(AddrInst->getOperand(0), Scale, Depth);
+    return matchScaledValue(AddrInst->getOperand(0), Scale, Depth);
   }
   case Instruction::GetElementPtr: {
     // Scan the GEP.  We check it if it contains constant offsets and at most
@@ -2438,19 +4563,28 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     unsigned VariableScale = 0;
 
     int64_t ConstantOffset = 0;
-    const DataLayout *TD = TLI.getDataLayout();
     gep_type_iterator GTI = gep_type_begin(AddrInst);
     for (unsigned i = 1, e = AddrInst->getNumOperands(); i != e; ++i, ++GTI) {
-      if (StructType *STy = dyn_cast<StructType>(*GTI)) {
-        const StructLayout *SL = TD->getStructLayout(STy);
+      if (StructType *STy = GTI.getStructTypeOrNull()) {
+        const StructLayout *SL = DL.getStructLayout(STy);
         unsigned Idx =
           cast<ConstantInt>(AddrInst->getOperand(i))->getZExtValue();
         ConstantOffset += SL->getElementOffset(Idx);
       } else {
-        uint64_t TypeSize = TD->getTypeAllocSize(GTI.getIndexedType());
-        if (ConstantInt *CI = dyn_cast<ConstantInt>(AddrInst->getOperand(i))) {
-          ConstantOffset += CI->getSExtValue()*TypeSize;
-        } else if (TypeSize) {  // Scales of zero don't do anything.
+        TypeSize TS = DL.getTypeAllocSize(GTI.getIndexedType());
+        if (TS.isNonZero()) {
+          // The optimisations below currently only work for fixed offsets.
+          if (TS.isScalable())
+            return false;
+          int64_t TypeSize = TS.getFixedSize();
+          if (ConstantInt *CI =
+                  dyn_cast<ConstantInt>(AddrInst->getOperand(i))) {
+            const APInt &CVal = CI->getValue();
+            if (CVal.getMinSignedBits() <= 64) {
+              ConstantOffset += CVal.getSExtValue() * TypeSize;
+              continue;
+            }
+          }
           // We only allow one variable index at the moment.
           if (VariableOperand != -1)
             return false;
@@ -2466,10 +4600,34 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     // just add it to the disp field and check validity.
     if (VariableOperand == -1) {
       AddrMode.BaseOffs += ConstantOffset;
-      if (ConstantOffset == 0 || TLI.isLegalAddressingMode(AddrMode, AccessTy)){
+      if (ConstantOffset == 0 ||
+          TLI.isLegalAddressingMode(DL, AddrMode, AccessTy, AddrSpace)) {
         // Check to see if we can fold the base pointer in too.
-        if (MatchAddr(AddrInst->getOperand(0), Depth+1))
+        if (matchAddr(AddrInst->getOperand(0), Depth+1)) {
+          if (!cast<GEPOperator>(AddrInst)->isInBounds())
+            AddrMode.InBounds = false;
           return true;
+        }
+      } else if (EnableGEPOffsetSplit && isa<GetElementPtrInst>(AddrInst) &&
+                 TLI.shouldConsiderGEPOffsetSplit() && Depth == 0 &&
+                 ConstantOffset > 0) {
+        // Record GEPs with non-zero offsets as candidates for splitting in the
+        // event that the offset cannot fit into the r+i addressing mode.
+        // Simple and common case that only one GEP is used in calculating the
+        // address for the memory access.
+        Value *Base = AddrInst->getOperand(0);
+        auto *BaseI = dyn_cast<Instruction>(Base);
+        auto *GEP = cast<GetElementPtrInst>(AddrInst);
+        if (isa<Argument>(Base) || isa<GlobalValue>(Base) ||
+            (BaseI && !isa<CastInst>(BaseI) &&
+             !isa<GetElementPtrInst>(BaseI))) {
+          // Make sure the parent block allows inserting non-PHI instructions
+          // before the terminator.
+          BasicBlock *Parent =
+              BaseI ? BaseI->getParent() : &GEP->getFunction()->getEntryBlock();
+          if (!Parent->getTerminator()->isEHPad())
+            LargeOffsetGEP = std::make_pair(GEP, ConstantOffset);
+        }
       }
       AddrMode.BaseOffs -= ConstantOffset;
       return false;
@@ -2481,9 +4639,11 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
 
     // See if the scale and offset amount is valid for this target.
     AddrMode.BaseOffs += ConstantOffset;
+    if (!cast<GEPOperator>(AddrInst)->isInBounds())
+      AddrMode.InBounds = false;
 
     // Match the base operand of the GEP.
-    if (!MatchAddr(AddrInst->getOperand(0), Depth+1)) {
+    if (!matchAddr(AddrInst->getOperand(0), Depth+1)) {
       // If it couldn't be matched, just stuff the value in a register.
       if (AddrMode.HasBaseReg) {
         AddrMode = BackupAddrMode;
@@ -2495,7 +4655,7 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     }
 
     // Match the remaining variable portion of the GEP.
-    if (!MatchScaledValue(AddrInst->getOperand(VariableOperand), VariableScale,
+    if (!matchScaledValue(AddrInst->getOperand(VariableOperand), VariableScale,
                           Depth)) {
       // If it couldn't be matched, try stuffing the base into a register
       // instead of matching it, and retrying the match of the scale.
@@ -2506,7 +4666,7 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
       AddrMode.HasBaseReg = true;
       AddrMode.BaseReg = AddrInst->getOperand(0);
       AddrMode.BaseOffs += ConstantOffset;
-      if (!MatchScaledValue(AddrInst->getOperand(VariableOperand),
+      if (!matchScaledValue(AddrInst->getOperand(VariableOperand),
                             VariableScale, Depth)) {
         // If even that didn't work, bail.
         AddrMode = BackupAddrMode;
@@ -2526,15 +4686,16 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     // Try to move this ext out of the way of the addressing mode.
     // Ask for a method for doing so.
     TypePromotionHelper::Action TPH =
-        TypePromotionHelper::getAction(Ext, InsertedTruncs, TLI, PromotedInsts);
+        TypePromotionHelper::getAction(Ext, InsertedInsts, TLI, PromotedInsts);
     if (!TPH)
       return false;
 
     TypePromotionTransaction::ConstRestorationPt LastKnownGood =
         TPT.getRestorationPoint();
-    unsigned CreatedInsts = 0;
+    unsigned CreatedInstsCost = 0;
+    unsigned ExtCost = !TLI.isExtFree(Ext);
     Value *PromotedOperand =
-        TPH(Ext, TPT, PromotedInsts, CreatedInsts, nullptr, nullptr);
+        TPH(Ext, TPT, PromotedInsts, CreatedInstsCost, nullptr, nullptr, TLI);
     // SExt has been moved away.
     // Thus either it will be rematched later in the recursive calls or it is
     // gone. Anyway, we must not fold it into the addressing mode at this point.
@@ -2555,12 +4716,17 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
     ExtAddrMode BackupAddrMode = AddrMode;
     unsigned OldSize = AddrModeInsts.size();
 
-    if (!MatchAddr(PromotedOperand, Depth) ||
-        !IsPromotionProfitable(AddrModeInsts.size(), OldSize + CreatedInsts,
+    if (!matchAddr(PromotedOperand, Depth) ||
+        // The total of the new cost is equal to the cost of the created
+        // instructions.
+        // The total of the old cost is equal to the cost of the extension plus
+        // what we have saved in the addressing mode.
+        !isPromotionProfitable(CreatedInstsCost,
+                               ExtCost + (AddrModeInsts.size() - OldSize),
                                PromotedOperand)) {
       AddrMode = BackupAddrMode;
       AddrModeInsts.resize(OldSize);
-      DEBUG(dbgs() << "Sign extension does not pay off: rollback\n");
+      LLVM_DEBUG(dbgs() << "Sign extension does not pay off: rollback\n");
       TPT.rollback(LastKnownGood);
       return false;
     }
@@ -2570,27 +4736,29 @@ bool AddressingModeMatcher::MatchOperationAddr(User *AddrInst, unsigned Opcode,
   return false;
 }
 
-/// MatchAddr - If we can, try to add the value of 'Addr' into the current
-/// addressing mode.  If Addr can't be added to AddrMode this returns false and
-/// leaves AddrMode unmodified.  This assumes that Addr is either a pointer type
-/// or intptr_t for the target.
+/// If we can, try to add the value of 'Addr' into the current addressing mode.
+/// If Addr can't be added to AddrMode this returns false and leaves AddrMode
+/// unmodified. This assumes that Addr is either a pointer type or intptr_t
+/// for the target.
 ///
-bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
+bool AddressingModeMatcher::matchAddr(Value *Addr, unsigned Depth) {
   // Start a transaction at this point that we will rollback if the matching
   // fails.
   TypePromotionTransaction::ConstRestorationPt LastKnownGood =
       TPT.getRestorationPoint();
   if (ConstantInt *CI = dyn_cast<ConstantInt>(Addr)) {
-    // Fold in immediates if legal for the target.
-    AddrMode.BaseOffs += CI->getSExtValue();
-    if (TLI.isLegalAddressingMode(AddrMode, AccessTy))
-      return true;
-    AddrMode.BaseOffs -= CI->getSExtValue();
+    if (CI->getValue().isSignedIntN(64)) {
+      // Fold in immediates if legal for the target.
+      AddrMode.BaseOffs += CI->getSExtValue();
+      if (TLI.isLegalAddressingMode(DL, AddrMode, AccessTy, AddrSpace))
+        return true;
+      AddrMode.BaseOffs -= CI->getSExtValue();
+    }
   } else if (GlobalValue *GV = dyn_cast<GlobalValue>(Addr)) {
     // If this is a global variable, try to fold it into the addressing mode.
     if (!AddrMode.BaseGV) {
       AddrMode.BaseGV = GV;
-      if (TLI.isLegalAddressingMode(AddrMode, AccessTy))
+      if (TLI.isLegalAddressingMode(DL, AddrMode, AccessTy, AddrSpace))
         return true;
       AddrMode.BaseGV = nullptr;
     }
@@ -2600,8 +4768,8 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
 
     // Check to see if it is possible to fold this operation.
     bool MovedAway = false;
-    if (MatchOperationAddr(I, I->getOpcode(), Depth, &MovedAway)) {
-      // This instruction may have been move away. If so, there is nothing
+    if (matchOperationAddr(I, I->getOpcode(), Depth, &MovedAway)) {
+      // This instruction may have been moved away. If so, there is nothing
       // to check here.
       if (MovedAway)
         return true;
@@ -2609,7 +4777,7 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
       // *profitable* to do so.  We use a simple cost model to avoid increasing
       // register pressure too much.
       if (I->hasOneUse() ||
-          IsProfitableToFoldIntoAddressingMode(I, BackupAddrMode, AddrMode)) {
+          isProfitableToFoldIntoAddressingMode(I, BackupAddrMode, AddrMode)) {
         AddrModeInsts.push_back(I);
         return true;
       }
@@ -2621,7 +4789,7 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
       TPT.rollback(LastKnownGood);
     }
   } else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Addr)) {
-    if (MatchOperationAddr(CE, CE->getOpcode(), Depth))
+    if (matchOperationAddr(CE, CE->getOpcode(), Depth))
       return true;
     TPT.rollback(LastKnownGood);
   } else if (isa<ConstantPointerNull>(Addr)) {
@@ -2634,7 +4802,7 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
     AddrMode.HasBaseReg = true;
     AddrMode.BaseReg = Addr;
     // Still check for legality in case the target supports [imm] but not [i+r].
-    if (TLI.isLegalAddressingMode(AddrMode, AccessTy))
+    if (TLI.isLegalAddressingMode(DL, AddrMode, AccessTy, AddrSpace))
       return true;
     AddrMode.HasBaseReg = false;
     AddrMode.BaseReg = nullptr;
@@ -2644,7 +4812,7 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
   if (AddrMode.Scale == 0) {
     AddrMode.Scale = 1;
     AddrMode.ScaledReg = Addr;
-    if (TLI.isLegalAddressingMode(AddrMode, AccessTy))
+    if (TLI.isLegalAddressingMode(DL, AddrMode, AccessTy, AddrSpace))
       return true;
     AddrMode.Scale = 0;
     AddrMode.ScaledReg = nullptr;
@@ -2654,12 +4822,15 @@ bool AddressingModeMatcher::MatchAddr(Value *Addr, unsigned Depth) {
   return false;
 }
 
-/// IsOperandAMemoryOperand - Check to see if all uses of OpVal by the specified
-/// inline asm call are due to memory operands.  If so, return true, otherwise
-/// return false.
+/// Check to see if all uses of OpVal by the specified inline asm call are due
+/// to memory operands. If so, return true, otherwise return false.
 static bool IsOperandAMemoryOperand(CallInst *CI, InlineAsm *IA, Value *OpVal,
-                                    const TargetLowering &TLI) {
-  TargetLowering::AsmOperandInfoVector TargetConstraints = TLI.ParseConstraints(ImmutableCallSite(CI));
+                                    const TargetLowering &TLI,
+                                    const TargetRegisterInfo &TRI) {
+  const Function *F = CI->getFunction();
+  TargetLowering::AsmOperandInfoVector TargetConstraints =
+      TLI.ParseConstraints(F->getParent()->getDataLayout(), &TRI, *CI);
+
   for (unsigned i = 0, e = TargetConstraints.size(); i != e; ++i) {
     TargetLowering::AsmOperandInfo &OpInfo = TargetConstraints[i];
 
@@ -2677,13 +4848,19 @@ static bool IsOperandAMemoryOperand(CallInst *CI, InlineAsm *IA, Value *OpVal,
   return true;
 }
 
-/// FindAllMemoryUses - Recursively walk all the uses of I until we find a
-/// memory use.  If we find an obviously non-foldable instruction, return true.
+// Max number of memory uses to look at before aborting the search to conserve
+// compile time.
+static constexpr int MaxMemoryUsesToScan = 20;
+
+/// Recursively walk all the uses of I until we find a memory use.
+/// If we find an obviously non-foldable instruction, return true.
 /// Add the ultimately found memory instructions to MemoryUses.
-static bool FindAllMemoryUses(Instruction *I,
-                SmallVectorImpl<std::pair<Instruction*,unsigned> > &MemoryUses,
-                              SmallPtrSetImpl<Instruction*> &ConsideredInsts,
-                              const TargetLowering &TLI) {
+static bool FindAllMemoryUses(
+    Instruction *I,
+    SmallVectorImpl<std::pair<Instruction *, unsigned>> &MemoryUses,
+    SmallPtrSetImpl<Instruction *> &ConsideredInsts, const TargetLowering &TLI,
+    const TargetRegisterInfo &TRI, bool OptSize, ProfileSummaryInfo *PSI,
+    BlockFrequencyInfo *BFI, int SeenInsts = 0) {
   // If we already considered this instruction, we're done.
   if (!ConsideredInsts.insert(I).second)
     return false;
@@ -2694,8 +4871,12 @@ static bool FindAllMemoryUses(Instruction *I,
 
   // Loop over all the uses, recursively processing them.
   for (Use &U : I->uses()) {
-    Instruction *UserI = cast<Instruction>(U.getUser());
+    // Conservatively return true if we're seeing a large number or a deep chain
+    // of users. This avoids excessive compilation times in pathological cases.
+    if (SeenInsts++ >= MaxMemoryUsesToScan)
+      return true;
 
+    Instruction *UserI = cast<Instruction>(U.getUser());
     if (LoadInst *LI = dyn_cast<LoadInst>(UserI)) {
       MemoryUses.push_back(std::make_pair(LI, U.getOperandNo()));
       continue;
@@ -2703,33 +4884,60 @@ static bool FindAllMemoryUses(Instruction *I,
 
     if (StoreInst *SI = dyn_cast<StoreInst>(UserI)) {
       unsigned opNo = U.getOperandNo();
-      if (opNo == 0) return true; // Storing addr, not into addr.
+      if (opNo != StoreInst::getPointerOperandIndex())
+        return true; // Storing addr, not into addr.
       MemoryUses.push_back(std::make_pair(SI, opNo));
       continue;
     }
 
+    if (AtomicRMWInst *RMW = dyn_cast<AtomicRMWInst>(UserI)) {
+      unsigned opNo = U.getOperandNo();
+      if (opNo != AtomicRMWInst::getPointerOperandIndex())
+        return true; // Storing addr, not into addr.
+      MemoryUses.push_back(std::make_pair(RMW, opNo));
+      continue;
+    }
+
+    if (AtomicCmpXchgInst *CmpX = dyn_cast<AtomicCmpXchgInst>(UserI)) {
+      unsigned opNo = U.getOperandNo();
+      if (opNo != AtomicCmpXchgInst::getPointerOperandIndex())
+        return true; // Storing addr, not into addr.
+      MemoryUses.push_back(std::make_pair(CmpX, opNo));
+      continue;
+    }
+
     if (CallInst *CI = dyn_cast<CallInst>(UserI)) {
-      InlineAsm *IA = dyn_cast<InlineAsm>(CI->getCalledValue());
+      if (CI->hasFnAttr(Attribute::Cold)) {
+        // If this is a cold call, we can sink the addressing calculation into
+        // the cold path.  See optimizeCallInst
+        bool OptForSize = OptSize ||
+          llvm::shouldOptimizeForSize(CI->getParent(), PSI, BFI);
+        if (!OptForSize)
+          continue;
+      }
+
+      InlineAsm *IA = dyn_cast<InlineAsm>(CI->getCalledOperand());
       if (!IA) return true;
 
       // If this is a memory operand, we're cool, otherwise bail out.
-      if (!IsOperandAMemoryOperand(CI, IA, I, TLI))
+      if (!IsOperandAMemoryOperand(CI, IA, I, TLI, TRI))
         return true;
       continue;
     }
 
-    if (FindAllMemoryUses(UserI, MemoryUses, ConsideredInsts, TLI))
+    if (FindAllMemoryUses(UserI, MemoryUses, ConsideredInsts, TLI, TRI, OptSize,
+                          PSI, BFI, SeenInsts))
       return true;
   }
 
   return false;
 }
 
-/// ValueAlreadyLiveAtInst - Retrn true if Val is already known to be live at
-/// the use site that we're folding it into.  If so, there is no cost to
-/// include it in the addressing mode.  KnownLive1 and KnownLive2 are two values
-/// that we know are live at the instruction already.
-bool AddressingModeMatcher::ValueAlreadyLiveAtInst(Value *Val,Value *KnownLive1,
+/// Return true if Val is already known to be live at the use site that we're
+/// folding it into. If so, there is no cost to include it in the addressing
+/// mode. KnownLive1 and KnownLive2 are two values that we know are live at the
+/// instruction already.
+bool AddressingModeMatcher::valueAlreadyLiveAtInst(Value *Val,Value *KnownLive1,
                                                    Value *KnownLive2) {
   // If Val is either of the known-live values, we know it is live!
   if (Val == nullptr || Val == KnownLive1 || Val == KnownLive2)
@@ -2751,11 +4959,11 @@ bool AddressingModeMatcher::ValueAlreadyLiveAtInst(Value *Val,Value *KnownLive1,
   return Val->isUsedInBasicBlock(MemoryInst->getParent());
 }
 
-/// IsProfitableToFoldIntoAddressingMode - It is possible for the addressing
-/// mode of the machine to fold the specified instruction into a load or store
-/// that ultimately uses it.  However, the specified instruction has multiple
-/// uses.  Given this, it may actually increase register pressure to fold it
-/// into the load.  For example, consider this code:
+/// It is possible for the addressing mode of the machine to fold the specified
+/// instruction into a load or store that ultimately uses it.
+/// However, the specified instruction has multiple uses.
+/// Given this, it may actually increase register pressure to fold it
+/// into the load. For example, consider this code:
 ///
 ///     X = ...
 ///     Y = X+1
@@ -2773,7 +4981,7 @@ bool AddressingModeMatcher::ValueAlreadyLiveAtInst(Value *Val,Value *KnownLive1,
 /// X was live across 'load Z' for other reasons, we actually *would* want to
 /// fold the addressing mode in the Z case.  This would make Y die earlier.
 bool AddressingModeMatcher::
-IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
+isProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
                                      ExtAddrMode &AMAfter) {
   if (IgnoreProfitability) return true;
 
@@ -2790,9 +4998,9 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
 
   // If the BaseReg or ScaledReg was referenced by the previous addrmode, their
   // lifetime wasn't extended by adding this instruction.
-  if (ValueAlreadyLiveAtInst(BaseReg, AMBefore.BaseReg, AMBefore.ScaledReg))
+  if (valueAlreadyLiveAtInst(BaseReg, AMBefore.BaseReg, AMBefore.ScaledReg))
     BaseReg = nullptr;
-  if (ValueAlreadyLiveAtInst(ScaledReg, AMBefore.BaseReg, AMBefore.ScaledReg))
+  if (valueAlreadyLiveAtInst(ScaledReg, AMBefore.BaseReg, AMBefore.ScaledReg))
     ScaledReg = nullptr;
 
   // If folding this instruction (and it's subexprs) didn't extend any live
@@ -2800,19 +5008,25 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
   if (!BaseReg && !ScaledReg)
     return true;
 
-  // If all uses of this instruction are ultimately load/store/inlineasm's,
-  // check to see if their addressing modes will include this instruction.  If
-  // so, we can fold it into all uses, so it doesn't matter if it has multiple
-  // uses.
+  // If all uses of this instruction can have the address mode sunk into them,
+  // we can remove the addressing mode and effectively trade one live register
+  // for another (at worst.)  In this context, folding an addressing mode into
+  // the use is just a particularly nice way of sinking it.
   SmallVector<std::pair<Instruction*,unsigned>, 16> MemoryUses;
   SmallPtrSet<Instruction*, 16> ConsideredInsts;
-  if (FindAllMemoryUses(I, MemoryUses, ConsideredInsts, TLI))
+  if (FindAllMemoryUses(I, MemoryUses, ConsideredInsts, TLI, TRI, OptSize,
+                        PSI, BFI))
     return false;  // Has a non-memory, non-foldable use!
 
   // Now that we know that all uses of this instruction are part of a chain of
   // computation involving only operations that could theoretically be folded
-  // into a memory use, loop over each of these uses and see if they could
-  // *actually* fold the instruction.
+  // into a memory use, loop over each of these memory operation uses and see
+  // if they could  *actually* fold the instruction.  The assumption is that
+  // addressing modes are cheap and that duplicating the computation involved
+  // many times is worthwhile, even on a fastpath. For sinking candidates
+  // (i.e. cold call sites), this serves as a way to prevent excessive code
+  // growth since most architectures have some reasonable small and fast way to
+  // compute an effective address.  (i.e LEA on x86)
   SmallVector<Instruction*, 32> MatchedAddrModeInsts;
   for (unsigned i = 0, e = MemoryUses.size(); i != e; ++i) {
     Instruction *User = MemoryUses[i].first;
@@ -2821,21 +5035,26 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
     // Get the access type of this use.  If the use isn't a pointer, we don't
     // know what it accesses.
     Value *Address = User->getOperand(OpNo);
-    if (!Address->getType()->isPointerTy())
+    PointerType *AddrTy = dyn_cast<PointerType>(Address->getType());
+    if (!AddrTy)
       return false;
-    Type *AddressAccessTy = Address->getType()->getPointerElementType();
+    Type *AddressAccessTy = AddrTy->getElementType();
+    unsigned AS = AddrTy->getAddressSpace();
 
     // Do a match against the root of this address, ignoring profitability. This
     // will tell us if the addressing mode for the memory operation will
     // *actually* cover the shared instruction.
     ExtAddrMode Result;
+    std::pair<AssertingVH<GetElementPtrInst>, int64_t> LargeOffsetGEP(nullptr,
+                                                                      0);
     TypePromotionTransaction::ConstRestorationPt LastKnownGood =
         TPT.getRestorationPoint();
-    AddressingModeMatcher Matcher(MatchedAddrModeInsts, TLI, AddressAccessTy,
-                                  MemoryInst, Result, InsertedTruncs,
-                                  PromotedInsts, TPT);
+    AddressingModeMatcher Matcher(MatchedAddrModeInsts, TLI, TRI, LI, getDTFn,
+                                  AddressAccessTy, AS, MemoryInst, Result,
+                                  InsertedInsts, PromotedInsts, TPT,
+                                  LargeOffsetGEP, OptSize, PSI, BFI);
     Matcher.IgnoreProfitability = true;
-    bool Success = Matcher.MatchAddr(Address, 0);
+    bool Success = Matcher.matchAddr(Address, 0);
     (void)Success; assert(Success && "Couldn't select *anything*?");
 
     // The match was to check the profitability, the changes made are not
@@ -2844,8 +5063,7 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
     TPT.rollback(LastKnownGood);
 
     // If the match didn't cover I, then it won't be shared by it.
-    if (std::find(MatchedAddrModeInsts.begin(), MatchedAddrModeInsts.end(),
-                  I) == MatchedAddrModeInsts.end())
+    if (!is_contained(MatchedAddrModeInsts, I))
       return false;
 
     MatchedAddrModeInsts.clear();
@@ -2854,9 +5072,7 @@ IsProfitableToFoldIntoAddressingMode(Instruction *I, ExtAddrMode &AMBefore,
   return true;
 }
 
-} // end anonymous namespace
-
-/// IsNonLocalValue - Return true if the specified values are defined in a
+/// Return true if the specified values are defined in a
 /// different basic block than BB.
 static bool IsNonLocalValue(Value *V, BasicBlock *BB) {
   if (Instruction *I = dyn_cast<Instruction>(V))
@@ -2864,17 +5080,27 @@ static bool IsNonLocalValue(Value *V, BasicBlock *BB) {
   return false;
 }
 
-/// OptimizeMemoryInst - Load and Store Instructions often have
-/// addressing modes that can do significant amounts of computation.  As such,
-/// instruction selection will try to get the load or store to do as much
-/// computation as possible for the program.  The problem is that isel can only
-/// see within a single block.  As such, we sink as much legal addressing mode
-/// stuff into the block as possible.
+/// Sink addressing mode computation immediate before MemoryInst if doing so
+/// can be done without increasing register pressure.  The need for the
+/// register pressure constraint means this can end up being an all or nothing
+/// decision for all uses of the same addressing computation.
+///
+/// Load and Store Instructions often have addressing modes that can do
+/// significant amounts of computation. As such, instruction selection will try
+/// to get the load or store to do as much computation as possible for the
+/// program. The problem is that isel can only see within a single block. As
+/// such, we sink as much legal addressing mode work into the block as possible.
 ///
 /// This method is used to optimize both load/store and inline asms with memory
-/// operands.
-bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
-                                        Type *AccessTy) {
+/// operands.  It's also used to sink addressing computations feeding into cold
+/// call sites into their (cold) basic block.
+///
+/// The motivation for handling sinking into cold blocks is that doing so can
+/// both enable other address mode sinking (by satisfying the register pressure
+/// constraint above), and reduce register pressure globally (by removing the
+/// addressing mode computation from the fast path entirely.).
+bool CodeGenPrepare::optimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
+                                        Type *AccessTy, unsigned AddrSpace) {
   Value *Repl = Addr;
 
   // Try to collapse single-value PHI nodes.  This is necessary to undo
@@ -2883,95 +5109,101 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
   SmallPtrSet<Value*, 16> Visited;
   worklist.push_back(Addr);
 
-  // Use a worklist to iteratively look through PHI nodes, and ensure that
-  // the addressing mode obtained from the non-PHI roots of the graph
-  // are equivalent.
-  Value *Consensus = nullptr;
-  unsigned NumUsesConsensus = 0;
-  bool IsNumUsesConsensusValid = false;
+  // Use a worklist to iteratively look through PHI and select nodes, and
+  // ensure that the addressing mode obtained from the non-PHI/select roots of
+  // the graph are compatible.
+  bool PhiOrSelectSeen = false;
   SmallVector<Instruction*, 16> AddrModeInsts;
-  ExtAddrMode AddrMode;
-  TypePromotionTransaction TPT;
+  const SimplifyQuery SQ(*DL, TLInfo);
+  AddressingModeCombiner AddrModes(SQ, Addr);
+  TypePromotionTransaction TPT(RemovedInsts);
   TypePromotionTransaction::ConstRestorationPt LastKnownGood =
       TPT.getRestorationPoint();
   while (!worklist.empty()) {
     Value *V = worklist.back();
     worklist.pop_back();
 
-    // Break use-def graph loops.
-    if (!Visited.insert(V).second) {
-      Consensus = nullptr;
-      break;
-    }
+    // We allow traversing cyclic Phi nodes.
+    // In case of success after this loop we ensure that traversing through
+    // Phi nodes ends up with all cases to compute address of the form
+    //    BaseGV + Base + Scale * Index + Offset
+    // where Scale and Offset are constans and BaseGV, Base and Index
+    // are exactly the same Values in all cases.
+    // It means that BaseGV, Scale and Offset dominate our memory instruction
+    // and have the same value as they had in address computation represented
+    // as Phi. So we can safely sink address computation to memory instruction.
+    if (!Visited.insert(V).second)
+      continue;
 
     // For a PHI node, push all of its incoming values.
     if (PHINode *P = dyn_cast<PHINode>(V)) {
-      for (unsigned i = 0, e = P->getNumIncomingValues(); i != e; ++i)
-        worklist.push_back(P->getIncomingValue(i));
+      append_range(worklist, P->incoming_values());
+      PhiOrSelectSeen = true;
+      continue;
+    }
+    // Similar for select.
+    if (SelectInst *SI = dyn_cast<SelectInst>(V)) {
+      worklist.push_back(SI->getFalseValue());
+      worklist.push_back(SI->getTrueValue());
+      PhiOrSelectSeen = true;
       continue;
     }
 
-    // For non-PHIs, determine the addressing mode being computed.
-    SmallVector<Instruction*, 16> NewAddrModeInsts;
+    // For non-PHIs, determine the addressing mode being computed.  Note that
+    // the result may differ depending on what other uses our candidate
+    // addressing instructions might have.
+    AddrModeInsts.clear();
+    std::pair<AssertingVH<GetElementPtrInst>, int64_t> LargeOffsetGEP(nullptr,
+                                                                      0);
+    // Defer the query (and possible computation of) the dom tree to point of
+    // actual use.  It's expected that most address matches don't actually need
+    // the domtree.
+    auto getDTFn = [MemoryInst, this]() -> const DominatorTree & {
+      Function *F = MemoryInst->getParent()->getParent();
+      return this->getDT(*F);
+    };
     ExtAddrMode NewAddrMode = AddressingModeMatcher::Match(
-        V, AccessTy, MemoryInst, NewAddrModeInsts, *TLI, InsertedTruncsSet,
-        PromotedInsts, TPT);
+        V, AccessTy, AddrSpace, MemoryInst, AddrModeInsts, *TLI, *LI, getDTFn,
+        *TRI, InsertedInsts, PromotedInsts, TPT, LargeOffsetGEP, OptSize, PSI,
+        BFI.get());
 
-    // This check is broken into two cases with very similar code to avoid using
-    // getNumUses() as much as possible. Some values have a lot of uses, so
-    // calling getNumUses() unconditionally caused a significant compile-time
-    // regression.
-    if (!Consensus) {
-      Consensus = V;
-      AddrMode = NewAddrMode;
-      AddrModeInsts = NewAddrModeInsts;
-      continue;
-    } else if (NewAddrMode == AddrMode) {
-      if (!IsNumUsesConsensusValid) {
-        NumUsesConsensus = Consensus->getNumUses();
-        IsNumUsesConsensusValid = true;
-      }
-
-      // Ensure that the obtained addressing mode is equivalent to that obtained
-      // for all other roots of the PHI traversal.  Also, when choosing one
-      // such root as representative, select the one with the most uses in order
-      // to keep the cost modeling heuristics in AddressingModeMatcher
-      // applicable.
-      unsigned NumUses = V->getNumUses();
-      if (NumUses > NumUsesConsensus) {
-        Consensus = V;
-        NumUsesConsensus = NumUses;
-        AddrModeInsts = NewAddrModeInsts;
-      }
-      continue;
+    GetElementPtrInst *GEP = LargeOffsetGEP.first;
+    if (GEP && !NewGEPBases.count(GEP)) {
+      // If splitting the underlying data structure can reduce the offset of a
+      // GEP, collect the GEP.  Skip the GEPs that are the new bases of
+      // previously split data structures.
+      LargeOffsetGEPMap[GEP->getPointerOperand()].push_back(LargeOffsetGEP);
+      if (LargeOffsetGEPID.find(GEP) == LargeOffsetGEPID.end())
+        LargeOffsetGEPID[GEP] = LargeOffsetGEPID.size();
     }
 
-    Consensus = nullptr;
-    break;
+    NewAddrMode.OriginalValue = V;
+    if (!AddrModes.addNewAddrMode(NewAddrMode))
+      break;
   }
 
-  // If the addressing mode couldn't be determined, or if multiple different
-  // ones were determined, bail out now.
-  if (!Consensus) {
+  // Try to combine the AddrModes we've collected. If we couldn't collect any,
+  // or we have multiple but either couldn't combine them or combining them
+  // wouldn't do anything useful, bail out now.
+  if (!AddrModes.combineAddrModes()) {
     TPT.rollback(LastKnownGood);
     return false;
   }
-  TPT.commit();
+  bool Modified = TPT.commit();
 
-  // Check to see if any of the instructions supersumed by this addr mode are
-  // non-local to I's BB.
-  bool AnyNonLocal = false;
-  for (unsigned i = 0, e = AddrModeInsts.size(); i != e; ++i) {
-    if (IsNonLocalValue(AddrModeInsts[i], MemoryInst->getParent())) {
-      AnyNonLocal = true;
-      break;
-    }
-  }
+  // Get the combined AddrMode (or the only AddrMode, if we only had one).
+  ExtAddrMode AddrMode = AddrModes.getAddrMode();
 
   // If all the instructions matched are already in this BB, don't do anything.
-  if (!AnyNonLocal) {
-    DEBUG(dbgs() << "CGP: Found      local addrmode: " << AddrMode << "\n");
-    return false;
+  // If we saw a Phi node then it is not local definitely, and if we saw a select
+  // then we want to push the address calculation past it even if it's already
+  // in this BB.
+  if (!PhiOrSelectSeen && none_of(AddrModeInsts, [&](Value *V) {
+        return IsNonLocalValue(V, MemoryInst->getParent());
+                  })) {
+    LLVM_DEBUG(dbgs() << "CGP: Found      local addrmode: " << AddrMode
+                      << "\n");
+    return Modified;
   }
 
   // Insert this computation right after this user.  Since our caller is
@@ -2981,21 +5213,25 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
 
   // Now that we determined the addressing expression we want to use and know
   // that we have to sink it into this block.  Check to see if we have already
-  // done this for some other load/store instr in this block.  If so, reuse the
-  // computation.
-  Value *&SunkAddr = SunkAddrs[Addr];
+  // done this for some other load/store instr in this block.  If so, reuse
+  // the computation.  Before attempting reuse, check if the address is valid
+  // as it may have been erased.
+
+  WeakTrackingVH SunkAddrVH = SunkAddrs[Addr];
+
+  Value * SunkAddr = SunkAddrVH.pointsToAliveValue() ? SunkAddrVH : nullptr;
   if (SunkAddr) {
-    DEBUG(dbgs() << "CGP: Reusing nonlocal addrmode: " << AddrMode << " for "
-                 << *MemoryInst << "\n");
+    LLVM_DEBUG(dbgs() << "CGP: Reusing nonlocal addrmode: " << AddrMode
+                      << " for " << *MemoryInst << "\n");
     if (SunkAddr->getType() != Addr->getType())
-      SunkAddr = Builder.CreateBitCast(SunkAddr, Addr->getType());
+      SunkAddr = Builder.CreatePointerCast(SunkAddr, Addr->getType());
   } else if (AddrSinkUsingGEPs || (!AddrSinkUsingGEPs.getNumOccurrences() &&
-               TM && TM->getSubtarget<TargetSubtargetInfo>().useAA())) {
+                                   SubtargetInfo->addrSinkUsingGEPs())) {
     // By default, we use the GEP-based method when AA is used later. This
     // prevents new inttoptr/ptrtoint pairs from degrading AA capabilities.
-    DEBUG(dbgs() << "CGP: SINKING nonlocal addrmode: " << AddrMode << " for "
-                 << *MemoryInst << "\n");
-    Type *IntPtrTy = TLI->getDataLayout()->getIntPtrType(Addr->getType());
+    LLVM_DEBUG(dbgs() << "CGP: SINKING nonlocal addrmode: " << AddrMode
+                      << " for " << *MemoryInst << "\n");
+    Type *IntPtrTy = DL->getIntPtrType(Addr->getType());
     Value *ResultPtr = nullptr, *ResultIndex = nullptr;
 
     // First, find the pointer.
@@ -3008,15 +5244,29 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
       // We can't add more than one pointer together, nor can we scale a
       // pointer (both of which seem meaningless).
       if (ResultPtr || AddrMode.Scale != 1)
-        return false;
+        return Modified;
 
       ResultPtr = AddrMode.ScaledReg;
       AddrMode.Scale = 0;
     }
 
+    // It is only safe to sign extend the BaseReg if we know that the math
+    // required to create it did not overflow before we extend it. Since
+    // the original IR value was tossed in favor of a constant back when
+    // the AddrMode was created we need to bail out gracefully if widths
+    // do not match instead of extending it.
+    //
+    // (See below for code to add the scale.)
+    if (AddrMode.Scale) {
+      Type *ScaledRegTy = AddrMode.ScaledReg->getType();
+      if (cast<IntegerType>(IntPtrTy)->getBitWidth() >
+          cast<IntegerType>(ScaledRegTy)->getBitWidth())
+        return Modified;
+    }
+
     if (AddrMode.BaseGV) {
       if (ResultPtr)
-        return false;
+        return Modified;
 
       ResultPtr = AddrMode.BaseGV;
     }
@@ -3024,24 +5274,27 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
     // If the real base value actually came from an inttoptr, then the matcher
     // will look through it and provide only the integer value. In that case,
     // use it here.
-    if (!ResultPtr && AddrMode.BaseReg) {
-      ResultPtr =
-        Builder.CreateIntToPtr(AddrMode.BaseReg, Addr->getType(), "sunkaddr");
-      AddrMode.BaseReg = nullptr;
-    } else if (!ResultPtr && AddrMode.Scale == 1) {
-      ResultPtr =
-        Builder.CreateIntToPtr(AddrMode.ScaledReg, Addr->getType(), "sunkaddr");
-      AddrMode.Scale = 0;
+    if (!DL->isNonIntegralPointerType(Addr->getType())) {
+      if (!ResultPtr && AddrMode.BaseReg) {
+        ResultPtr = Builder.CreateIntToPtr(AddrMode.BaseReg, Addr->getType(),
+                                           "sunkaddr");
+        AddrMode.BaseReg = nullptr;
+      } else if (!ResultPtr && AddrMode.Scale == 1) {
+        ResultPtr = Builder.CreateIntToPtr(AddrMode.ScaledReg, Addr->getType(),
+                                           "sunkaddr");
+        AddrMode.Scale = 0;
+      }
     }
 
     if (!ResultPtr &&
         !AddrMode.BaseReg && !AddrMode.Scale && !AddrMode.BaseOffs) {
       SunkAddr = Constant::getNullValue(Addr->getType());
     } else if (!ResultPtr) {
-      return false;
+      return Modified;
     } else {
       Type *I8PtrTy =
-        Builder.getInt8PtrTy(Addr->getType()->getPointerAddressSpace());
+          Builder.getInt8PtrTy(Addr->getType()->getPointerAddressSpace());
+      Type *I8Ty = Builder.getInt8Ty();
 
       // Start with the base register. Do this first so that subsequent address
       // matching finds it last, which will prevent it from trying to match it
@@ -3061,19 +5314,11 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
         Value *V = AddrMode.ScaledReg;
         if (V->getType() == IntPtrTy) {
           // done.
-        } else if (cast<IntegerType>(IntPtrTy)->getBitWidth() <
-                   cast<IntegerType>(V->getType())->getBitWidth()) {
-          V = Builder.CreateTrunc(V, IntPtrTy, "sunkaddr");
         } else {
-          // It is only safe to sign extend the BaseReg if we know that the math
-          // required to create it did not overflow before we extend it. Since
-          // the original IR value was tossed in favor of a constant back when
-          // the AddrMode was created we need to bail out gracefully if widths
-          // do not match instead of extending it.
-          Instruction *I = dyn_cast_or_null<Instruction>(ResultIndex);
-          if (I && (ResultIndex != AddrMode.BaseReg))
-            I->eraseFromParent();
-          return false;
+          assert(cast<IntegerType>(IntPtrTy)->getBitWidth() <
+                 cast<IntegerType>(V->getType())->getBitWidth() &&
+                 "We can't transform if ScaledReg is too narrow");
+          V = Builder.CreateTrunc(V, IntPtrTy, "sunkaddr");
         }
 
         if (AddrMode.Scale != 1)
@@ -3092,8 +5337,12 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
           // We need to add this separately from the scale above to help with
           // SDAG consecutive load/store merging.
           if (ResultPtr->getType() != I8PtrTy)
-            ResultPtr = Builder.CreateBitCast(ResultPtr, I8PtrTy);
-          ResultPtr = Builder.CreateGEP(ResultPtr, ResultIndex, "sunkaddr");
+            ResultPtr = Builder.CreatePointerCast(ResultPtr, I8PtrTy);
+          ResultPtr =
+              AddrMode.InBounds
+                  ? Builder.CreateInBoundsGEP(I8Ty, ResultPtr, ResultIndex,
+                                              "sunkaddr")
+                  : Builder.CreateGEP(I8Ty, ResultPtr, ResultIndex, "sunkaddr");
         }
 
         ResultIndex = V;
@@ -3103,17 +5352,34 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
         SunkAddr = ResultPtr;
       } else {
         if (ResultPtr->getType() != I8PtrTy)
-          ResultPtr = Builder.CreateBitCast(ResultPtr, I8PtrTy);
-        SunkAddr = Builder.CreateGEP(ResultPtr, ResultIndex, "sunkaddr");
+          ResultPtr = Builder.CreatePointerCast(ResultPtr, I8PtrTy);
+        SunkAddr =
+            AddrMode.InBounds
+                ? Builder.CreateInBoundsGEP(I8Ty, ResultPtr, ResultIndex,
+                                            "sunkaddr")
+                : Builder.CreateGEP(I8Ty, ResultPtr, ResultIndex, "sunkaddr");
       }
 
       if (SunkAddr->getType() != Addr->getType())
-        SunkAddr = Builder.CreateBitCast(SunkAddr, Addr->getType());
+        SunkAddr = Builder.CreatePointerCast(SunkAddr, Addr->getType());
     }
   } else {
-    DEBUG(dbgs() << "CGP: SINKING nonlocal addrmode: " << AddrMode << " for "
-                 << *MemoryInst << "\n");
-    Type *IntPtrTy = TLI->getDataLayout()->getIntPtrType(Addr->getType());
+    // We'd require a ptrtoint/inttoptr down the line, which we can't do for
+    // non-integral pointers, so in that case bail out now.
+    Type *BaseTy = AddrMode.BaseReg ? AddrMode.BaseReg->getType() : nullptr;
+    Type *ScaleTy = AddrMode.Scale ? AddrMode.ScaledReg->getType() : nullptr;
+    PointerType *BasePtrTy = dyn_cast_or_null<PointerType>(BaseTy);
+    PointerType *ScalePtrTy = dyn_cast_or_null<PointerType>(ScaleTy);
+    if (DL->isNonIntegralPointerType(Addr->getType()) ||
+        (BasePtrTy && DL->isNonIntegralPointerType(BasePtrTy)) ||
+        (ScalePtrTy && DL->isNonIntegralPointerType(ScalePtrTy)) ||
+        (AddrMode.BaseGV &&
+         DL->isNonIntegralPointerType(AddrMode.BaseGV->getType())))
+      return Modified;
+
+    LLVM_DEBUG(dbgs() << "CGP: SINKING nonlocal addrmode: " << AddrMode
+                      << " for " << *MemoryInst << "\n");
+    Type *IntPtrTy = DL->getIntPtrType(Addr->getType());
     Value *Result = nullptr;
 
     // Start with the base register. Do this first so that subsequent address
@@ -3149,7 +5415,7 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
         Instruction *I = dyn_cast_or_null<Instruction>(Result);
         if (I && (Result != AddrMode.BaseReg))
           I->eraseFromParent();
-        return false;
+        return Modified;
       }
       if (AddrMode.Scale != 1)
         V = Builder.CreateMul(V, ConstantInt::get(IntPtrTy, AddrMode.Scale),
@@ -3185,36 +5451,170 @@ bool CodeGenPrepare::OptimizeMemoryInst(Instruction *MemoryInst, Value *Addr,
   }
 
   MemoryInst->replaceUsesOfWith(Repl, SunkAddr);
+  // Store the newly computed address into the cache. In the case we reused a
+  // value, this should be idempotent.
+  SunkAddrs[Addr] = WeakTrackingVH(SunkAddr);
 
   // If we have no uses, recursively delete the value and all dead instructions
   // using it.
   if (Repl->use_empty()) {
-    // This can cause recursive deletion, which can invalidate our iterator.
-    // Use a WeakVH to hold onto it in case this happens.
-    WeakVH IterHandle(CurInstIterator);
-    BasicBlock *BB = CurInstIterator->getParent();
-
-    RecursivelyDeleteTriviallyDeadInstructions(Repl, TLInfo);
-
-    if (IterHandle != CurInstIterator) {
-      // If the iterator instruction was recursively deleted, start over at the
-      // start of the block.
-      CurInstIterator = BB->begin();
-      SunkAddrs.clear();
-    }
+    resetIteratorIfInvalidatedWhileCalling(CurInstIterator->getParent(), [&]() {
+      RecursivelyDeleteTriviallyDeadInstructions(
+          Repl, TLInfo, nullptr,
+          [&](Value *V) { removeAllAssertingVHReferences(V); });
+    });
   }
   ++NumMemoryInsts;
   return true;
 }
 
-/// OptimizeInlineAsmInst - If there are any memory operands, use
-/// OptimizeMemoryInst to sink their address computing into the block when
-/// possible / profitable.
-bool CodeGenPrepare::OptimizeInlineAsmInst(CallInst *CS) {
+/// Rewrite GEP input to gather/scatter to enable SelectionDAGBuilder to find
+/// a uniform base to use for ISD::MGATHER/MSCATTER. SelectionDAGBuilder can
+/// only handle a 2 operand GEP in the same basic block or a splat constant
+/// vector. The 2 operands to the GEP must have a scalar pointer and a vector
+/// index.
+///
+/// If the existing GEP has a vector base pointer that is splat, we can look
+/// through the splat to find the scalar pointer. If we can't find a scalar
+/// pointer there's nothing we can do.
+///
+/// If we have a GEP with more than 2 indices where the middle indices are all
+/// zeroes, we can replace it with 2 GEPs where the second has 2 operands.
+///
+/// If the final index isn't a vector or is a splat, we can emit a scalar GEP
+/// followed by a GEP with an all zeroes vector index. This will enable
+/// SelectionDAGBuilder to use the scalar GEP as the uniform base and have a
+/// zero index.
+bool CodeGenPrepare::optimizeGatherScatterInst(Instruction *MemoryInst,
+                                               Value *Ptr) {
+  Value *NewAddr;
+
+  if (const auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    // Don't optimize GEPs that don't have indices.
+    if (!GEP->hasIndices())
+      return false;
+
+    // If the GEP and the gather/scatter aren't in the same BB, don't optimize.
+    // FIXME: We should support this by sinking the GEP.
+    if (MemoryInst->getParent() != GEP->getParent())
+      return false;
+
+    SmallVector<Value *, 2> Ops(GEP->operands());
+
+    bool RewriteGEP = false;
+
+    if (Ops[0]->getType()->isVectorTy()) {
+      Ops[0] = getSplatValue(Ops[0]);
+      if (!Ops[0])
+        return false;
+      RewriteGEP = true;
+    }
+
+    unsigned FinalIndex = Ops.size() - 1;
+
+    // Ensure all but the last index is 0.
+    // FIXME: This isn't strictly required. All that's required is that they are
+    // all scalars or splats.
+    for (unsigned i = 1; i < FinalIndex; ++i) {
+      auto *C = dyn_cast<Constant>(Ops[i]);
+      if (!C)
+        return false;
+      if (isa<VectorType>(C->getType()))
+        C = C->getSplatValue();
+      auto *CI = dyn_cast_or_null<ConstantInt>(C);
+      if (!CI || !CI->isZero())
+        return false;
+      // Scalarize the index if needed.
+      Ops[i] = CI;
+    }
+
+    // Try to scalarize the final index.
+    if (Ops[FinalIndex]->getType()->isVectorTy()) {
+      if (Value *V = getSplatValue(Ops[FinalIndex])) {
+        auto *C = dyn_cast<ConstantInt>(V);
+        // Don't scalarize all zeros vector.
+        if (!C || !C->isZero()) {
+          Ops[FinalIndex] = V;
+          RewriteGEP = true;
+        }
+      }
+    }
+
+    // If we made any changes or the we have extra operands, we need to generate
+    // new instructions.
+    if (!RewriteGEP && Ops.size() == 2)
+      return false;
+
+    auto NumElts = cast<VectorType>(Ptr->getType())->getElementCount();
+
+    IRBuilder<> Builder(MemoryInst);
+
+    Type *SourceTy = GEP->getSourceElementType();
+    Type *ScalarIndexTy = DL->getIndexType(Ops[0]->getType()->getScalarType());
+
+    // If the final index isn't a vector, emit a scalar GEP containing all ops
+    // and a vector GEP with all zeroes final index.
+    if (!Ops[FinalIndex]->getType()->isVectorTy()) {
+      NewAddr = Builder.CreateGEP(SourceTy, Ops[0],
+                                  makeArrayRef(Ops).drop_front());
+      auto *IndexTy = VectorType::get(ScalarIndexTy, NumElts);
+      NewAddr = Builder.CreateGEP(NewAddr, Constant::getNullValue(IndexTy));
+    } else {
+      Value *Base = Ops[0];
+      Value *Index = Ops[FinalIndex];
+
+      // Create a scalar GEP if there are more than 2 operands.
+      if (Ops.size() != 2) {
+        // Replace the last index with 0.
+        Ops[FinalIndex] = Constant::getNullValue(ScalarIndexTy);
+        Base = Builder.CreateGEP(SourceTy, Base,
+                                 makeArrayRef(Ops).drop_front());
+      }
+
+      // Now create the GEP with scalar pointer and vector index.
+      NewAddr = Builder.CreateGEP(Base, Index);
+    }
+  } else if (!isa<Constant>(Ptr)) {
+    // Not a GEP, maybe its a splat and we can create a GEP to enable
+    // SelectionDAGBuilder to use it as a uniform base.
+    Value *V = getSplatValue(Ptr);
+    if (!V)
+      return false;
+
+    auto NumElts = cast<VectorType>(Ptr->getType())->getElementCount();
+
+    IRBuilder<> Builder(MemoryInst);
+
+    // Emit a vector GEP with a scalar pointer and all 0s vector index.
+    Type *ScalarIndexTy = DL->getIndexType(V->getType()->getScalarType());
+    auto *IndexTy = VectorType::get(ScalarIndexTy, NumElts);
+    NewAddr = Builder.CreateGEP(V, Constant::getNullValue(IndexTy));
+  } else {
+    // Constant, SelectionDAGBuilder knows to check if its a splat.
+    return false;
+  }
+
+  MemoryInst->replaceUsesOfWith(Ptr, NewAddr);
+
+  // If we have no uses, recursively delete the value and all dead instructions
+  // using it.
+  if (Ptr->use_empty())
+    RecursivelyDeleteTriviallyDeadInstructions(
+        Ptr, TLInfo, nullptr,
+        [&](Value *V) { removeAllAssertingVHReferences(V); });
+
+  return true;
+}
+
+/// If there are any memory operands, use OptimizeMemoryInst to sink their
+/// address computing into the block when possible / profitable.
+bool CodeGenPrepare::optimizeInlineAsmInst(CallInst *CS) {
   bool MadeChange = false;
 
-  TargetLowering::AsmOperandInfoVector
-    TargetConstraints = TLI->ParseConstraints(CS);
+  const TargetRegisterInfo *TRI =
+      TM->getSubtargetImpl(*CS->getFunction())->getRegisterInfo();
+  TargetLowering::AsmOperandInfoVector TargetConstraints =
+      TLI->ParseConstraints(*DL, TRI, *CS);
   unsigned ArgNo = 0;
   for (unsigned i = 0, e = TargetConstraints.size(); i != e; ++i) {
     TargetLowering::AsmOperandInfo &OpInfo = TargetConstraints[i];
@@ -3225,7 +5625,7 @@ bool CodeGenPrepare::OptimizeInlineAsmInst(CallInst *CS) {
     if (OpInfo.ConstraintType == TargetLowering::C_Memory &&
         OpInfo.isIndirect) {
       Value *OpVal = CS->getArgOperand(ArgNo++);
-      MadeChange |= OptimizeMemoryInst(CS, OpVal, OpVal->getType());
+      MadeChange |= optimizeMemoryInst(CS, OpVal, OpVal->getType(), ~0u);
     } else if (OpInfo.Type == InlineAsm::isInput)
       ArgNo++;
   }
@@ -3233,14 +5633,14 @@ bool CodeGenPrepare::OptimizeInlineAsmInst(CallInst *CS) {
   return MadeChange;
 }
 
-/// \brief Check if all the uses of \p Inst are equivalent (or free) zero or
+/// Check if all the uses of \p Val are equivalent (or free) zero or
 /// sign extensions.
-static bool hasSameExtUse(Instruction *Inst, const TargetLowering &TLI) {
-  assert(!Inst->use_empty() && "Input must have at least one use");
-  const Instruction *FirstUser = cast<Instruction>(*Inst->user_begin());
+static bool hasSameExtUse(Value *Val, const TargetLowering &TLI) {
+  assert(!Val->use_empty() && "Input must have at least one use");
+  const Instruction *FirstUser = cast<Instruction>(*Val->user_begin());
   bool IsSExt = isa<SExtInst>(FirstUser);
   Type *ExtTy = FirstUser->getType();
-  for (const User *U : Inst->users()) {
+  for (const User *U : Val->users()) {
     const Instruction *UI = cast<Instruction>(U);
     if ((IsSExt && !isa<SExtInst>(UI)) || (!IsSExt && !isa<ZExtInst>(UI)))
       return false;
@@ -3250,11 +5650,11 @@ static bool hasSameExtUse(Instruction *Inst, const TargetLowering &TLI) {
       continue;
 
     // If IsSExt is true, we are in this situation:
-    // a = Inst
+    // a = Val
     // b = sext ty1 a to ty2
     // c = sext ty1 a to ty3
     // Assuming ty2 is shorter than ty3, this could be turned into:
-    // a = Inst
+    // a = Val
     // b = sext ty1 a to ty2
     // c = sext ty2 b to ty3
     // However, the last sext is not free.
@@ -3281,59 +5681,53 @@ static bool hasSameExtUse(Instruction *Inst, const TargetLowering &TLI) {
   return true;
 }
 
-/// \brief Try to form ExtLd by promoting \p Exts until they reach a
-/// load instruction.
-/// If an ext(load) can be formed, it is returned via \p LI for the load
-/// and \p Inst for the extension.
-/// Otherwise LI == nullptr and Inst == nullptr.
-/// When some promotion happened, \p TPT contains the proper state to
-/// revert them.
+/// Try to speculatively promote extensions in \p Exts and continue
+/// promoting through newly promoted operands recursively as far as doing so is
+/// profitable. Save extensions profitably moved up, in \p ProfitablyMovedExts.
+/// When some promotion happened, \p TPT contains the proper state to revert
+/// them.
 ///
-/// \return true when promoting was necessary to expose the ext(load)
-/// opportunity, false otherwise.
-///
-/// Example:
-/// \code
-/// %ld = load i32* %addr
-/// %add = add nuw i32 %ld, 4
-/// %zext = zext i32 %add to i64
-/// \endcode
-/// =>
-/// \code
-/// %ld = load i32* %addr
-/// %zext = zext i32 %ld to i64
-/// %add = add nuw i64 %zext, 4
-/// \encode
-/// Thanks to the promotion, we can match zext(load i32*) to i64.
-bool CodeGenPrepare::ExtLdPromotion(TypePromotionTransaction &TPT,
-                                    LoadInst *&LI, Instruction *&Inst,
-                                    const SmallVectorImpl<Instruction *> &Exts,
-                                    unsigned CreatedInsts = 0) {
-  // Iterate over all the extensions to see if one form an ext(load).
-  for (auto I : Exts) {
-    // Check if we directly have ext(load).
-    if ((LI = dyn_cast<LoadInst>(I->getOperand(0)))) {
-      Inst = I;
-      // No promotion happened here.
-      return false;
+/// \return true if some promotion happened, false otherwise.
+bool CodeGenPrepare::tryToPromoteExts(
+    TypePromotionTransaction &TPT, const SmallVectorImpl<Instruction *> &Exts,
+    SmallVectorImpl<Instruction *> &ProfitablyMovedExts,
+    unsigned CreatedInstsCost) {
+  bool Promoted = false;
+
+  // Iterate over all the extensions to try to promote them.
+  for (auto *I : Exts) {
+    // Early check if we directly have ext(load).
+    if (isa<LoadInst>(I->getOperand(0))) {
+      ProfitablyMovedExts.push_back(I);
+      continue;
     }
-    // Check whether or not we want to do any promotion.
-    if (!TLI || !TLI->enableExtLdPromotion() || DisableExtLdPromotion)
-      continue;
+
+    // Check whether or not we want to do any promotion.  The reason we have
+    // this check inside the for loop is to catch the case where an extension
+    // is directly fed by a load because in such case the extension can be moved
+    // up without any promotion on its operands.
+    if (!TLI->enableExtLdPromotion() || DisableExtLdPromotion)
+      return false;
+
     // Get the action to perform the promotion.
-    TypePromotionHelper::Action TPH = TypePromotionHelper::getAction(
-        I, InsertedTruncsSet, *TLI, PromotedInsts);
+    TypePromotionHelper::Action TPH =
+        TypePromotionHelper::getAction(I, InsertedInsts, *TLI, PromotedInsts);
     // Check if we can promote.
-    if (!TPH)
+    if (!TPH) {
+      // Save the current extension as we cannot move up through its operand.
+      ProfitablyMovedExts.push_back(I);
       continue;
+    }
+
     // Save the current state.
     TypePromotionTransaction::ConstRestorationPt LastKnownGood =
         TPT.getRestorationPoint();
     SmallVector<Instruction *, 4> NewExts;
-    unsigned NewCreatedInsts = 0;
+    unsigned NewCreatedInstsCost = 0;
+    unsigned ExtCost = !TLI->isExtFree(I);
     // Promote.
-    Value *PromotedVal =
-        TPH(I, TPT, PromotedInsts, NewCreatedInsts, &NewExts, nullptr);
+    Value *PromotedVal = TPH(I, TPT, PromotedInsts, NewCreatedInstsCost,
+                             &NewExts, nullptr, *TLI);
     assert(PromotedVal &&
            "TypePromotionHelper should have filtered out those cases");
 
@@ -3343,101 +5737,579 @@ bool CodeGenPrepare::ExtLdPromotion(TypePromotionTransaction &TPT,
     // With exactly 2, the transformation is neutral, because we will merge
     // one extension but leave one. However, we optimistically keep going,
     // because the new extension may be removed too.
-    unsigned TotalCreatedInsts = CreatedInsts + NewCreatedInsts;
+    long long TotalCreatedInstsCost = CreatedInstsCost + NewCreatedInstsCost;
+    // FIXME: It would be possible to propagate a negative value instead of
+    // conservatively ceiling it to 0.
+    TotalCreatedInstsCost =
+        std::max((long long)0, (TotalCreatedInstsCost - ExtCost));
     if (!StressExtLdPromotion &&
-        (TotalCreatedInsts > 1 ||
-         !isPromotedInstructionLegal(*TLI, PromotedVal))) {
-      // The promotion is not profitable, rollback to the previous state.
+        (TotalCreatedInstsCost > 1 ||
+         !isPromotedInstructionLegal(*TLI, *DL, PromotedVal))) {
+      // This promotion is not profitable, rollback to the previous state, and
+      // save the current extension in ProfitablyMovedExts as the latest
+      // speculative promotion turned out to be unprofitable.
       TPT.rollback(LastKnownGood);
+      ProfitablyMovedExts.push_back(I);
+      continue;
+    }
+    // Continue promoting NewExts as far as doing so is profitable.
+    SmallVector<Instruction *, 2> NewlyMovedExts;
+    (void)tryToPromoteExts(TPT, NewExts, NewlyMovedExts, TotalCreatedInstsCost);
+    bool NewPromoted = false;
+    for (auto *ExtInst : NewlyMovedExts) {
+      Instruction *MovedExt = cast<Instruction>(ExtInst);
+      Value *ExtOperand = MovedExt->getOperand(0);
+      // If we have reached to a load, we need this extra profitability check
+      // as it could potentially be merged into an ext(load).
+      if (isa<LoadInst>(ExtOperand) &&
+          !(StressExtLdPromotion || NewCreatedInstsCost <= ExtCost ||
+            (ExtOperand->hasOneUse() || hasSameExtUse(ExtOperand, *TLI))))
+        continue;
+
+      ProfitablyMovedExts.push_back(MovedExt);
+      NewPromoted = true;
+    }
+
+    // If none of speculative promotions for NewExts is profitable, rollback
+    // and save the current extension (I) as the last profitable extension.
+    if (!NewPromoted) {
+      TPT.rollback(LastKnownGood);
+      ProfitablyMovedExts.push_back(I);
       continue;
     }
     // The promotion is profitable.
-    // Check if it exposes an ext(load).
-    (void)ExtLdPromotion(TPT, LI, Inst, NewExts, TotalCreatedInsts);
-    if (LI && (StressExtLdPromotion || NewCreatedInsts == 0 ||
-               // If we have created a new extension, i.e., now we have two
-               // extensions. We must make sure one of them is merged with
-               // the load, otherwise we may degrade the code quality.
-               (LI->hasOneUse() || hasSameExtUse(LI, *TLI))))
-      // Promotion happened.
-      return true;
-    // If this does not help to expose an ext(load) then, rollback.
-    TPT.rollback(LastKnownGood);
+    Promoted = true;
   }
-  // None of the extension can form an ext(load).
-  LI = nullptr;
-  Inst = nullptr;
-  return false;
+  return Promoted;
 }
 
-/// MoveExtToFormExtLoad - Move a zext or sext fed by a load into the same
-/// basic block as the load, unless conditions are unfavorable. This allows
-/// SelectionDAG to fold the extend into the load.
-/// \p I[in/out] the extension may be modified during the process if some
-/// promotions apply.
-///
-bool CodeGenPrepare::MoveExtToFormExtLoad(Instruction *&I) {
-  // Try to promote a chain of computation if it allows to form
-  // an extended load.
-  TypePromotionTransaction TPT;
-  TypePromotionTransaction::ConstRestorationPt LastKnownGood =
-    TPT.getRestorationPoint();
-  SmallVector<Instruction *, 1> Exts;
-  Exts.push_back(I);
-  // Look for a load being extended.
-  LoadInst *LI = nullptr;
-  Instruction *OldExt = I;
-  bool HasPromoted = ExtLdPromotion(TPT, LI, I, Exts);
-  if (!LI || !I) {
-    assert(!HasPromoted && !LI && "If we did not match any load instruction "
-                                  "the code must remain the same");
-    I = OldExt;
-    return false;
+/// Merging redundant sexts when one is dominating the other.
+bool CodeGenPrepare::mergeSExts(Function &F) {
+  bool Changed = false;
+  for (auto &Entry : ValToSExtendedUses) {
+    SExts &Insts = Entry.second;
+    SExts CurPts;
+    for (Instruction *Inst : Insts) {
+      if (RemovedInsts.count(Inst) || !isa<SExtInst>(Inst) ||
+          Inst->getOperand(0) != Entry.first)
+        continue;
+      bool inserted = false;
+      for (auto &Pt : CurPts) {
+        if (getDT(F).dominates(Inst, Pt)) {
+          Pt->replaceAllUsesWith(Inst);
+          RemovedInsts.insert(Pt);
+          Pt->removeFromParent();
+          Pt = Inst;
+          inserted = true;
+          Changed = true;
+          break;
+        }
+        if (!getDT(F).dominates(Pt, Inst))
+          // Give up if we need to merge in a common dominator as the
+          // experiments show it is not profitable.
+          continue;
+        Inst->replaceAllUsesWith(Pt);
+        RemovedInsts.insert(Inst);
+        Inst->removeFromParent();
+        inserted = true;
+        Changed = true;
+        break;
+      }
+      if (!inserted)
+        CurPts.push_back(Inst);
+    }
   }
+  return Changed;
+}
+
+// Splitting large data structures so that the GEPs accessing them can have
+// smaller offsets so that they can be sunk to the same blocks as their users.
+// For example, a large struct starting from %base is split into two parts
+// where the second part starts from %new_base.
+//
+// Before:
+// BB0:
+//   %base     =
+//
+// BB1:
+//   %gep0     = gep %base, off0
+//   %gep1     = gep %base, off1
+//   %gep2     = gep %base, off2
+//
+// BB2:
+//   %load1    = load %gep0
+//   %load2    = load %gep1
+//   %load3    = load %gep2
+//
+// After:
+// BB0:
+//   %base     =
+//   %new_base = gep %base, off0
+//
+// BB1:
+//   %new_gep0 = %new_base
+//   %new_gep1 = gep %new_base, off1 - off0
+//   %new_gep2 = gep %new_base, off2 - off0
+//
+// BB2:
+//   %load1    = load i32, i32* %new_gep0
+//   %load2    = load i32, i32* %new_gep1
+//   %load3    = load i32, i32* %new_gep2
+//
+// %new_gep1 and %new_gep2 can be sunk to BB2 now after the splitting because
+// their offsets are smaller enough to fit into the addressing mode.
+bool CodeGenPrepare::splitLargeGEPOffsets() {
+  bool Changed = false;
+  for (auto &Entry : LargeOffsetGEPMap) {
+    Value *OldBase = Entry.first;
+    SmallVectorImpl<std::pair<AssertingVH<GetElementPtrInst>, int64_t>>
+        &LargeOffsetGEPs = Entry.second;
+    auto compareGEPOffset =
+        [&](const std::pair<GetElementPtrInst *, int64_t> &LHS,
+            const std::pair<GetElementPtrInst *, int64_t> &RHS) {
+          if (LHS.first == RHS.first)
+            return false;
+          if (LHS.second != RHS.second)
+            return LHS.second < RHS.second;
+          return LargeOffsetGEPID[LHS.first] < LargeOffsetGEPID[RHS.first];
+        };
+    // Sorting all the GEPs of the same data structures based on the offsets.
+    llvm::sort(LargeOffsetGEPs, compareGEPOffset);
+    LargeOffsetGEPs.erase(
+        std::unique(LargeOffsetGEPs.begin(), LargeOffsetGEPs.end()),
+        LargeOffsetGEPs.end());
+    // Skip if all the GEPs have the same offsets.
+    if (LargeOffsetGEPs.front().second == LargeOffsetGEPs.back().second)
+      continue;
+    GetElementPtrInst *BaseGEP = LargeOffsetGEPs.begin()->first;
+    int64_t BaseOffset = LargeOffsetGEPs.begin()->second;
+    Value *NewBaseGEP = nullptr;
+
+    auto *LargeOffsetGEP = LargeOffsetGEPs.begin();
+    while (LargeOffsetGEP != LargeOffsetGEPs.end()) {
+      GetElementPtrInst *GEP = LargeOffsetGEP->first;
+      int64_t Offset = LargeOffsetGEP->second;
+      if (Offset != BaseOffset) {
+        TargetLowering::AddrMode AddrMode;
+        AddrMode.BaseOffs = Offset - BaseOffset;
+        // The result type of the GEP might not be the type of the memory
+        // access.
+        if (!TLI->isLegalAddressingMode(*DL, AddrMode,
+                                        GEP->getResultElementType(),
+                                        GEP->getAddressSpace())) {
+          // We need to create a new base if the offset to the current base is
+          // too large to fit into the addressing mode. So, a very large struct
+          // may be split into several parts.
+          BaseGEP = GEP;
+          BaseOffset = Offset;
+          NewBaseGEP = nullptr;
+        }
+      }
+
+      // Generate a new GEP to replace the current one.
+      LLVMContext &Ctx = GEP->getContext();
+      Type *IntPtrTy = DL->getIntPtrType(GEP->getType());
+      Type *I8PtrTy =
+          Type::getInt8PtrTy(Ctx, GEP->getType()->getPointerAddressSpace());
+      Type *I8Ty = Type::getInt8Ty(Ctx);
+
+      if (!NewBaseGEP) {
+        // Create a new base if we don't have one yet.  Find the insertion
+        // pointer for the new base first.
+        BasicBlock::iterator NewBaseInsertPt;
+        BasicBlock *NewBaseInsertBB;
+        if (auto *BaseI = dyn_cast<Instruction>(OldBase)) {
+          // If the base of the struct is an instruction, the new base will be
+          // inserted close to it.
+          NewBaseInsertBB = BaseI->getParent();
+          if (isa<PHINode>(BaseI))
+            NewBaseInsertPt = NewBaseInsertBB->getFirstInsertionPt();
+          else if (InvokeInst *Invoke = dyn_cast<InvokeInst>(BaseI)) {
+            NewBaseInsertBB =
+                SplitEdge(NewBaseInsertBB, Invoke->getNormalDest());
+            NewBaseInsertPt = NewBaseInsertBB->getFirstInsertionPt();
+          } else
+            NewBaseInsertPt = std::next(BaseI->getIterator());
+        } else {
+          // If the current base is an argument or global value, the new base
+          // will be inserted to the entry block.
+          NewBaseInsertBB = &BaseGEP->getFunction()->getEntryBlock();
+          NewBaseInsertPt = NewBaseInsertBB->getFirstInsertionPt();
+        }
+        IRBuilder<> NewBaseBuilder(NewBaseInsertBB, NewBaseInsertPt);
+        // Create a new base.
+        Value *BaseIndex = ConstantInt::get(IntPtrTy, BaseOffset);
+        NewBaseGEP = OldBase;
+        if (NewBaseGEP->getType() != I8PtrTy)
+          NewBaseGEP = NewBaseBuilder.CreatePointerCast(NewBaseGEP, I8PtrTy);
+        NewBaseGEP =
+            NewBaseBuilder.CreateGEP(I8Ty, NewBaseGEP, BaseIndex, "splitgep");
+        NewGEPBases.insert(NewBaseGEP);
+      }
+
+      IRBuilder<> Builder(GEP);
+      Value *NewGEP = NewBaseGEP;
+      if (Offset == BaseOffset) {
+        if (GEP->getType() != I8PtrTy)
+          NewGEP = Builder.CreatePointerCast(NewGEP, GEP->getType());
+      } else {
+        // Calculate the new offset for the new GEP.
+        Value *Index = ConstantInt::get(IntPtrTy, Offset - BaseOffset);
+        NewGEP = Builder.CreateGEP(I8Ty, NewBaseGEP, Index);
+
+        if (GEP->getType() != I8PtrTy)
+          NewGEP = Builder.CreatePointerCast(NewGEP, GEP->getType());
+      }
+      GEP->replaceAllUsesWith(NewGEP);
+      LargeOffsetGEPID.erase(GEP);
+      LargeOffsetGEP = LargeOffsetGEPs.erase(LargeOffsetGEP);
+      GEP->eraseFromParent();
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
+bool CodeGenPrepare::optimizePhiType(
+    PHINode *I, SmallPtrSetImpl<PHINode *> &Visited,
+    SmallPtrSetImpl<Instruction *> &DeletedInstrs) {
+  // We are looking for a collection on interconnected phi nodes that together
+  // only use loads/bitcasts and are used by stores/bitcasts, and the bitcasts
+  // are of the same type. Convert the whole set of nodes to the type of the
+  // bitcast.
+  Type *PhiTy = I->getType();
+  Type *ConvertTy = nullptr;
+  if (Visited.count(I) ||
+      (!I->getType()->isIntegerTy() && !I->getType()->isFloatingPointTy()))
+    return false;
+
+  SmallVector<Instruction *, 4> Worklist;
+  Worklist.push_back(cast<Instruction>(I));
+  SmallPtrSet<PHINode *, 4> PhiNodes;
+  PhiNodes.insert(I);
+  Visited.insert(I);
+  SmallPtrSet<Instruction *, 4> Defs;
+  SmallPtrSet<Instruction *, 4> Uses;
+  // This works by adding extra bitcasts between load/stores and removing
+  // existing bicasts. If we have a phi(bitcast(load)) or a store(bitcast(phi))
+  // we can get in the situation where we remove a bitcast in one iteration
+  // just to add it again in the next. We need to ensure that at least one
+  // bitcast we remove are anchored to something that will not change back.
+  bool AnyAnchored = false;
+
+  while (!Worklist.empty()) {
+    Instruction *II = Worklist.pop_back_val();
+
+    if (auto *Phi = dyn_cast<PHINode>(II)) {
+      // Handle Defs, which might also be PHI's
+      for (Value *V : Phi->incoming_values()) {
+        if (auto *OpPhi = dyn_cast<PHINode>(V)) {
+          if (!PhiNodes.count(OpPhi)) {
+            if (Visited.count(OpPhi))
+              return false;
+            PhiNodes.insert(OpPhi);
+            Visited.insert(OpPhi);
+            Worklist.push_back(OpPhi);
+          }
+        } else if (auto *OpLoad = dyn_cast<LoadInst>(V)) {
+          if (!OpLoad->isSimple())
+            return false;
+          if (!Defs.count(OpLoad)) {
+            Defs.insert(OpLoad);
+            Worklist.push_back(OpLoad);
+          }
+        } else if (auto *OpEx = dyn_cast<ExtractElementInst>(V)) {
+          if (!Defs.count(OpEx)) {
+            Defs.insert(OpEx);
+            Worklist.push_back(OpEx);
+          }
+        } else if (auto *OpBC = dyn_cast<BitCastInst>(V)) {
+          if (!ConvertTy)
+            ConvertTy = OpBC->getOperand(0)->getType();
+          if (OpBC->getOperand(0)->getType() != ConvertTy)
+            return false;
+          if (!Defs.count(OpBC)) {
+            Defs.insert(OpBC);
+            Worklist.push_back(OpBC);
+            AnyAnchored |= !isa<LoadInst>(OpBC->getOperand(0)) &&
+                           !isa<ExtractElementInst>(OpBC->getOperand(0));
+          }
+        } else if (!isa<UndefValue>(V)) {
+          return false;
+        }
+      }
+    }
+
+    // Handle uses which might also be phi's
+    for (User *V : II->users()) {
+      if (auto *OpPhi = dyn_cast<PHINode>(V)) {
+        if (!PhiNodes.count(OpPhi)) {
+          if (Visited.count(OpPhi))
+            return false;
+          PhiNodes.insert(OpPhi);
+          Visited.insert(OpPhi);
+          Worklist.push_back(OpPhi);
+        }
+      } else if (auto *OpStore = dyn_cast<StoreInst>(V)) {
+        if (!OpStore->isSimple() || OpStore->getOperand(0) != II)
+          return false;
+        Uses.insert(OpStore);
+      } else if (auto *OpBC = dyn_cast<BitCastInst>(V)) {
+        if (!ConvertTy)
+          ConvertTy = OpBC->getType();
+        if (OpBC->getType() != ConvertTy)
+          return false;
+        Uses.insert(OpBC);
+        AnyAnchored |=
+            any_of(OpBC->users(), [](User *U) { return !isa<StoreInst>(U); });
+      } else {
+        return false;
+      }
+    }
+  }
+
+  if (!ConvertTy || !AnyAnchored || !TLI->shouldConvertPhiType(PhiTy, ConvertTy))
+    return false;
+
+  LLVM_DEBUG(dbgs() << "Converting " << *I << "\n  and connected nodes to "
+                    << *ConvertTy << "\n");
+
+  // Create all the new phi nodes of the new type, and bitcast any loads to the
+  // correct type.
+  ValueToValueMap ValMap;
+  ValMap[UndefValue::get(PhiTy)] = UndefValue::get(ConvertTy);
+  for (Instruction *D : Defs) {
+    if (isa<BitCastInst>(D)) {
+      ValMap[D] = D->getOperand(0);
+      DeletedInstrs.insert(D);
+    } else {
+      ValMap[D] =
+          new BitCastInst(D, ConvertTy, D->getName() + ".bc", D->getNextNode());
+    }
+  }
+  for (PHINode *Phi : PhiNodes)
+    ValMap[Phi] = PHINode::Create(ConvertTy, Phi->getNumIncomingValues(),
+                                  Phi->getName() + ".tc", Phi);
+  // Pipe together all the PhiNodes.
+  for (PHINode *Phi : PhiNodes) {
+    PHINode *NewPhi = cast<PHINode>(ValMap[Phi]);
+    for (int i = 0, e = Phi->getNumIncomingValues(); i < e; i++)
+      NewPhi->addIncoming(ValMap[Phi->getIncomingValue(i)],
+                          Phi->getIncomingBlock(i));
+    Visited.insert(NewPhi);
+  }
+  // And finally pipe up the stores and bitcasts
+  for (Instruction *U : Uses) {
+    if (isa<BitCastInst>(U)) {
+      DeletedInstrs.insert(U);
+      U->replaceAllUsesWith(ValMap[U->getOperand(0)]);
+    } else {
+      U->setOperand(0,
+                    new BitCastInst(ValMap[U->getOperand(0)], PhiTy, "bc", U));
+    }
+  }
+
+  // Save the removed phis to be deleted later.
+  for (PHINode *Phi : PhiNodes)
+    DeletedInstrs.insert(Phi);
+  return true;
+}
+
+bool CodeGenPrepare::optimizePhiTypes(Function &F) {
+  if (!OptimizePhiTypes)
+    return false;
+
+  bool Changed = false;
+  SmallPtrSet<PHINode *, 4> Visited;
+  SmallPtrSet<Instruction *, 4> DeletedInstrs;
+
+  // Attempt to optimize all the phis in the functions to the correct type.
+  for (auto &BB : F)
+    for (auto &Phi : BB.phis())
+      Changed |= optimizePhiType(&Phi, Visited, DeletedInstrs);
+
+  // Remove any old phi's that have been converted.
+  for (auto *I : DeletedInstrs) {
+    I->replaceAllUsesWith(UndefValue::get(I->getType()));
+    I->eraseFromParent();
+  }
+
+  return Changed;
+}
+
+/// Return true, if an ext(load) can be formed from an extension in
+/// \p MovedExts.
+bool CodeGenPrepare::canFormExtLd(
+    const SmallVectorImpl<Instruction *> &MovedExts, LoadInst *&LI,
+    Instruction *&Inst, bool HasPromoted) {
+  for (auto *MovedExtInst : MovedExts) {
+    if (isa<LoadInst>(MovedExtInst->getOperand(0))) {
+      LI = cast<LoadInst>(MovedExtInst->getOperand(0));
+      Inst = MovedExtInst;
+      break;
+    }
+  }
+  if (!LI)
+    return false;
 
   // If they're already in the same block, there's nothing to do.
   // Make the cheap checks first if we did not promote.
   // If we promoted, we need to check if it is indeed profitable.
-  if (!HasPromoted && LI->getParent() == I->getParent())
+  if (!HasPromoted && LI->getParent() == Inst->getParent())
     return false;
 
-  EVT VT = TLI->getValueType(I->getType());
-  EVT LoadVT = TLI->getValueType(LI->getType());
-
-  // If the load has other users and the truncate is not free, this probably
-  // isn't worthwhile.
-  if (!LI->hasOneUse() && TLI &&
-      (TLI->isTypeLegal(LoadVT) || !TLI->isTypeLegal(VT)) &&
-      !TLI->isTruncateFree(I->getType(), LI->getType())) {
-    I = OldExt;
-    TPT.rollback(LastKnownGood);
-    return false;
-  }
-
-  // Check whether the target supports casts folded into loads.
-  unsigned LType;
-  if (isa<ZExtInst>(I))
-    LType = ISD::ZEXTLOAD;
-  else {
-    assert(isa<SExtInst>(I) && "Unexpected ext type!");
-    LType = ISD::SEXTLOAD;
-  }
-  if (TLI && !TLI->isLoadExtLegal(LType, VT, LoadVT)) {
-    I = OldExt;
-    TPT.rollback(LastKnownGood);
-    return false;
-  }
-
-  // Move the extend into the same block as the load, so that SelectionDAG
-  // can fold it.
-  TPT.commit();
-  I->removeFromParent();
-  I->insertAfter(LI);
-  ++NumExtsMoved;
-  return true;
+  return TLI->isExtLoad(LI, Inst, *DL);
 }
 
-bool CodeGenPrepare::OptimizeExtUses(Instruction *I) {
+/// Move a zext or sext fed by a load into the same basic block as the load,
+/// unless conditions are unfavorable. This allows SelectionDAG to fold the
+/// extend into the load.
+///
+/// E.g.,
+/// \code
+/// %ld = load i32* %addr
+/// %add = add nuw i32 %ld, 4
+/// %zext = zext i32 %add to i64
+// \endcode
+/// =>
+/// \code
+/// %ld = load i32* %addr
+/// %zext = zext i32 %ld to i64
+/// %add = add nuw i64 %zext, 4
+/// \encode
+/// Note that the promotion in %add to i64 is done in tryToPromoteExts(), which
+/// allow us to match zext(load i32*) to i64.
+///
+/// Also, try to promote the computations used to obtain a sign extended
+/// value used into memory accesses.
+/// E.g.,
+/// \code
+/// a = add nsw i32 b, 3
+/// d = sext i32 a to i64
+/// e = getelementptr ..., i64 d
+/// \endcode
+/// =>
+/// \code
+/// f = sext i32 b to i64
+/// a = add nsw i64 f, 3
+/// e = getelementptr ..., i64 a
+/// \endcode
+///
+/// \p Inst[in/out] the extension may be modified during the process if some
+/// promotions apply.
+bool CodeGenPrepare::optimizeExt(Instruction *&Inst) {
+  bool AllowPromotionWithoutCommonHeader = false;
+  /// See if it is an interesting sext operations for the address type
+  /// promotion before trying to promote it, e.g., the ones with the right
+  /// type and used in memory accesses.
+  bool ATPConsiderable = TTI->shouldConsiderAddressTypePromotion(
+      *Inst, AllowPromotionWithoutCommonHeader);
+  TypePromotionTransaction TPT(RemovedInsts);
+  TypePromotionTransaction::ConstRestorationPt LastKnownGood =
+      TPT.getRestorationPoint();
+  SmallVector<Instruction *, 1> Exts;
+  SmallVector<Instruction *, 2> SpeculativelyMovedExts;
+  Exts.push_back(Inst);
+
+  bool HasPromoted = tryToPromoteExts(TPT, Exts, SpeculativelyMovedExts);
+
+  // Look for a load being extended.
+  LoadInst *LI = nullptr;
+  Instruction *ExtFedByLoad;
+
+  // Try to promote a chain of computation if it allows to form an extended
+  // load.
+  if (canFormExtLd(SpeculativelyMovedExts, LI, ExtFedByLoad, HasPromoted)) {
+    assert(LI && ExtFedByLoad && "Expect a valid load and extension");
+    TPT.commit();
+    // Move the extend into the same block as the load.
+    ExtFedByLoad->moveAfter(LI);
+    ++NumExtsMoved;
+    Inst = ExtFedByLoad;
+    return true;
+  }
+
+  // Continue promoting SExts if known as considerable depending on targets.
+  if (ATPConsiderable &&
+      performAddressTypePromotion(Inst, AllowPromotionWithoutCommonHeader,
+                                  HasPromoted, TPT, SpeculativelyMovedExts))
+    return true;
+
+  TPT.rollback(LastKnownGood);
+  return false;
+}
+
+// Perform address type promotion if doing so is profitable.
+// If AllowPromotionWithoutCommonHeader == false, we should find other sext
+// instructions that sign extended the same initial value. However, if
+// AllowPromotionWithoutCommonHeader == true, we expect promoting the
+// extension is just profitable.
+bool CodeGenPrepare::performAddressTypePromotion(
+    Instruction *&Inst, bool AllowPromotionWithoutCommonHeader,
+    bool HasPromoted, TypePromotionTransaction &TPT,
+    SmallVectorImpl<Instruction *> &SpeculativelyMovedExts) {
+  bool Promoted = false;
+  SmallPtrSet<Instruction *, 1> UnhandledExts;
+  bool AllSeenFirst = true;
+  for (auto *I : SpeculativelyMovedExts) {
+    Value *HeadOfChain = I->getOperand(0);
+    DenseMap<Value *, Instruction *>::iterator AlreadySeen =
+        SeenChainsForSExt.find(HeadOfChain);
+    // If there is an unhandled SExt which has the same header, try to promote
+    // it as well.
+    if (AlreadySeen != SeenChainsForSExt.end()) {
+      if (AlreadySeen->second != nullptr)
+        UnhandledExts.insert(AlreadySeen->second);
+      AllSeenFirst = false;
+    }
+  }
+
+  if (!AllSeenFirst || (AllowPromotionWithoutCommonHeader &&
+                        SpeculativelyMovedExts.size() == 1)) {
+    TPT.commit();
+    if (HasPromoted)
+      Promoted = true;
+    for (auto *I : SpeculativelyMovedExts) {
+      Value *HeadOfChain = I->getOperand(0);
+      SeenChainsForSExt[HeadOfChain] = nullptr;
+      ValToSExtendedUses[HeadOfChain].push_back(I);
+    }
+    // Update Inst as promotion happen.
+    Inst = SpeculativelyMovedExts.pop_back_val();
+  } else {
+    // This is the first chain visited from the header, keep the current chain
+    // as unhandled. Defer to promote this until we encounter another SExt
+    // chain derived from the same header.
+    for (auto *I : SpeculativelyMovedExts) {
+      Value *HeadOfChain = I->getOperand(0);
+      SeenChainsForSExt[HeadOfChain] = Inst;
+    }
+    return false;
+  }
+
+  if (!AllSeenFirst && !UnhandledExts.empty())
+    for (auto *VisitedSExt : UnhandledExts) {
+      if (RemovedInsts.count(VisitedSExt))
+        continue;
+      TypePromotionTransaction TPT(RemovedInsts);
+      SmallVector<Instruction *, 1> Exts;
+      SmallVector<Instruction *, 2> Chains;
+      Exts.push_back(VisitedSExt);
+      bool HasPromoted = tryToPromoteExts(TPT, Exts, Chains);
+      TPT.commit();
+      if (HasPromoted)
+        Promoted = true;
+      for (auto *I : Chains) {
+        Value *HeadOfChain = I->getOperand(0);
+        // Mark this as handled.
+        SeenChainsForSExt[HeadOfChain] = nullptr;
+        ValToSExtendedUses[HeadOfChain].push_back(I);
+      }
+    }
+  return Promoted;
+}
+
+bool CodeGenPrepare::optimizeExtUses(Instruction *I) {
   BasicBlock *DefBB = I->getParent();
 
   // If the result of a {s|z}ext and its source are both live out, rewrite all
@@ -3447,7 +6319,7 @@ bool CodeGenPrepare::OptimizeExtUses(Instruction *I) {
     return false;
 
   // Only do this xform if truncating is free.
-  if (TLI && !TLI->isTruncateFree(I->getType(), Src->getType()))
+  if (!TLI->isTruncateFree(I->getType(), Src->getType()))
     return false;
 
   // Only safe to perform the optimization if the source is also defined in
@@ -3495,8 +6367,9 @@ bool CodeGenPrepare::OptimizeExtUses(Instruction *I) {
 
     if (!InsertedTrunc) {
       BasicBlock::iterator InsertPt = UserBB->getFirstInsertionPt();
-      InsertedTrunc = new TruncInst(I, Src->getType(), "", InsertPt);
-      InsertedTruncsSet.insert(InsertedTrunc);
+      assert(InsertPt != UserBB->end());
+      InsertedTrunc = new TruncInst(I, Src->getType(), "", &*InsertPt);
+      InsertedInsts.insert(InsertedTrunc);
     }
 
     // Replace a use of the {s|z}ext source with a use of the result.
@@ -3508,42 +6381,351 @@ bool CodeGenPrepare::OptimizeExtUses(Instruction *I) {
   return MadeChange;
 }
 
-/// isFormingBranchFromSelectProfitable - Returns true if a SelectInst should be
-/// turned into an explicit branch.
-static bool isFormingBranchFromSelectProfitable(SelectInst *SI) {
+// Find loads whose uses only use some of the loaded value's bits.  Add an "and"
+// just after the load if the target can fold this into one extload instruction,
+// with the hope of eliminating some of the other later "and" instructions using
+// the loaded value.  "and"s that are made trivially redundant by the insertion
+// of the new "and" are removed by this function, while others (e.g. those whose
+// path from the load goes through a phi) are left for isel to potentially
+// remove.
+//
+// For example:
+//
+// b0:
+//   x = load i32
+//   ...
+// b1:
+//   y = and x, 0xff
+//   z = use y
+//
+// becomes:
+//
+// b0:
+//   x = load i32
+//   x' = and x, 0xff
+//   ...
+// b1:
+//   z = use x'
+//
+// whereas:
+//
+// b0:
+//   x1 = load i32
+//   ...
+// b1:
+//   x2 = load i32
+//   ...
+// b2:
+//   x = phi x1, x2
+//   y = and x, 0xff
+//
+// becomes (after a call to optimizeLoadExt for each load):
+//
+// b0:
+//   x1 = load i32
+//   x1' = and x1, 0xff
+//   ...
+// b1:
+//   x2 = load i32
+//   x2' = and x2, 0xff
+//   ...
+// b2:
+//   x = phi x1', x2'
+//   y = and x, 0xff
+bool CodeGenPrepare::optimizeLoadExt(LoadInst *Load) {
+  if (!Load->isSimple() || !Load->getType()->isIntOrPtrTy())
+    return false;
+
+  // Skip loads we've already transformed.
+  if (Load->hasOneUse() &&
+      InsertedInsts.count(cast<Instruction>(*Load->user_begin())))
+    return false;
+
+  // Look at all uses of Load, looking through phis, to determine how many bits
+  // of the loaded value are needed.
+  SmallVector<Instruction *, 8> WorkList;
+  SmallPtrSet<Instruction *, 16> Visited;
+  SmallVector<Instruction *, 8> AndsToMaybeRemove;
+  for (auto *U : Load->users())
+    WorkList.push_back(cast<Instruction>(U));
+
+  EVT LoadResultVT = TLI->getValueType(*DL, Load->getType());
+  unsigned BitWidth = LoadResultVT.getSizeInBits();
+  APInt DemandBits(BitWidth, 0);
+  APInt WidestAndBits(BitWidth, 0);
+
+  while (!WorkList.empty()) {
+    Instruction *I = WorkList.back();
+    WorkList.pop_back();
+
+    // Break use-def graph loops.
+    if (!Visited.insert(I).second)
+      continue;
+
+    // For a PHI node, push all of its users.
+    if (auto *Phi = dyn_cast<PHINode>(I)) {
+      for (auto *U : Phi->users())
+        WorkList.push_back(cast<Instruction>(U));
+      continue;
+    }
+
+    switch (I->getOpcode()) {
+    case Instruction::And: {
+      auto *AndC = dyn_cast<ConstantInt>(I->getOperand(1));
+      if (!AndC)
+        return false;
+      APInt AndBits = AndC->getValue();
+      DemandBits |= AndBits;
+      // Keep track of the widest and mask we see.
+      if (AndBits.ugt(WidestAndBits))
+        WidestAndBits = AndBits;
+      if (AndBits == WidestAndBits && I->getOperand(0) == Load)
+        AndsToMaybeRemove.push_back(I);
+      break;
+    }
+
+    case Instruction::Shl: {
+      auto *ShlC = dyn_cast<ConstantInt>(I->getOperand(1));
+      if (!ShlC)
+        return false;
+      uint64_t ShiftAmt = ShlC->getLimitedValue(BitWidth - 1);
+      DemandBits.setLowBits(BitWidth - ShiftAmt);
+      break;
+    }
+
+    case Instruction::Trunc: {
+      EVT TruncVT = TLI->getValueType(*DL, I->getType());
+      unsigned TruncBitWidth = TruncVT.getSizeInBits();
+      DemandBits.setLowBits(TruncBitWidth);
+      break;
+    }
+
+    default:
+      return false;
+    }
+  }
+
+  uint32_t ActiveBits = DemandBits.getActiveBits();
+  // Avoid hoisting (and (load x) 1) since it is unlikely to be folded by the
+  // target even if isLoadExtLegal says an i1 EXTLOAD is valid.  For example,
+  // for the AArch64 target isLoadExtLegal(ZEXTLOAD, i32, i1) returns true, but
+  // (and (load x) 1) is not matched as a single instruction, rather as a LDR
+  // followed by an AND.
+  // TODO: Look into removing this restriction by fixing backends to either
+  // return false for isLoadExtLegal for i1 or have them select this pattern to
+  // a single instruction.
+  //
+  // Also avoid hoisting if we didn't see any ands with the exact DemandBits
+  // mask, since these are the only ands that will be removed by isel.
+  if (ActiveBits <= 1 || !DemandBits.isMask(ActiveBits) ||
+      WidestAndBits != DemandBits)
+    return false;
+
+  LLVMContext &Ctx = Load->getType()->getContext();
+  Type *TruncTy = Type::getIntNTy(Ctx, ActiveBits);
+  EVT TruncVT = TLI->getValueType(*DL, TruncTy);
+
+  // Reject cases that won't be matched as extloads.
+  if (!LoadResultVT.bitsGT(TruncVT) || !TruncVT.isRound() ||
+      !TLI->isLoadExtLegal(ISD::ZEXTLOAD, LoadResultVT, TruncVT))
+    return false;
+
+  IRBuilder<> Builder(Load->getNextNode());
+  auto *NewAnd = cast<Instruction>(
+      Builder.CreateAnd(Load, ConstantInt::get(Ctx, DemandBits)));
+  // Mark this instruction as "inserted by CGP", so that other
+  // optimizations don't touch it.
+  InsertedInsts.insert(NewAnd);
+
+  // Replace all uses of load with new and (except for the use of load in the
+  // new and itself).
+  Load->replaceAllUsesWith(NewAnd);
+  NewAnd->setOperand(0, Load);
+
+  // Remove any and instructions that are now redundant.
+  for (auto *And : AndsToMaybeRemove)
+    // Check that the and mask is the same as the one we decided to put on the
+    // new and.
+    if (cast<ConstantInt>(And->getOperand(1))->getValue() == DemandBits) {
+      And->replaceAllUsesWith(NewAnd);
+      if (&*CurInstIterator == And)
+        CurInstIterator = std::next(And->getIterator());
+      And->eraseFromParent();
+      ++NumAndUses;
+    }
+
+  ++NumAndsAdded;
+  return true;
+}
+
+/// Check if V (an operand of a select instruction) is an expensive instruction
+/// that is only used once.
+static bool sinkSelectOperand(const TargetTransformInfo *TTI, Value *V) {
+  auto *I = dyn_cast<Instruction>(V);
+  // If it's safe to speculatively execute, then it should not have side
+  // effects; therefore, it's safe to sink and possibly *not* execute.
+  return I && I->hasOneUse() && isSafeToSpeculativelyExecute(I) &&
+         TTI->getUserCost(I, TargetTransformInfo::TCK_SizeAndLatency) >=
+         TargetTransformInfo::TCC_Expensive;
+}
+
+/// Returns true if a SelectInst should be turned into an explicit branch.
+static bool isFormingBranchFromSelectProfitable(const TargetTransformInfo *TTI,
+                                                const TargetLowering *TLI,
+                                                SelectInst *SI) {
+  // If even a predictable select is cheap, then a branch can't be cheaper.
+  if (!TLI->isPredictableSelectExpensive())
+    return false;
+
   // FIXME: This should use the same heuristics as IfConversion to determine
-  // whether a select is better represented as a branch.  This requires that
-  // branch probability metadata is preserved for the select, which is not the
-  // case currently.
+  // whether a select is better represented as a branch.
+
+  // If metadata tells us that the select condition is obviously predictable,
+  // then we want to replace the select with a branch.
+  uint64_t TrueWeight, FalseWeight;
+  if (SI->extractProfMetadata(TrueWeight, FalseWeight)) {
+    uint64_t Max = std::max(TrueWeight, FalseWeight);
+    uint64_t Sum = TrueWeight + FalseWeight;
+    if (Sum != 0) {
+      auto Probability = BranchProbability::getBranchProbability(Max, Sum);
+      if (Probability > TTI->getPredictableBranchThreshold())
+        return true;
+    }
+  }
 
   CmpInst *Cmp = dyn_cast<CmpInst>(SI->getCondition());
 
-  // If the branch is predicted right, an out of order CPU can avoid blocking on
-  // the compare.  Emit cmovs on compares with a memory operand as branches to
-  // avoid stalls on the load from memory.  If the compare has more than one use
-  // there's probably another cmov or setcc around so it's not worth emitting a
-  // branch.
-  if (!Cmp)
+  // If a branch is predictable, an out-of-order CPU can avoid blocking on its
+  // comparison condition. If the compare has more than one use, there's
+  // probably another cmov or setcc around, so it's not worth emitting a branch.
+  if (!Cmp || !Cmp->hasOneUse())
     return false;
 
-  Value *CmpOp0 = Cmp->getOperand(0);
-  Value *CmpOp1 = Cmp->getOperand(1);
+  // If either operand of the select is expensive and only needed on one side
+  // of the select, we should form a branch.
+  if (sinkSelectOperand(TTI, SI->getTrueValue()) ||
+      sinkSelectOperand(TTI, SI->getFalseValue()))
+    return true;
 
-  // We check that the memory operand has one use to avoid uses of the loaded
-  // value directly after the compare, making branches unprofitable.
-  return Cmp->hasOneUse() &&
-         ((isa<LoadInst>(CmpOp0) && CmpOp0->hasOneUse()) ||
-          (isa<LoadInst>(CmpOp1) && CmpOp1->hasOneUse()));
+  return false;
 }
 
+/// If \p isTrue is true, return the true value of \p SI, otherwise return
+/// false value of \p SI. If the true/false value of \p SI is defined by any
+/// select instructions in \p Selects, look through the defining select
+/// instruction until the true/false value is not defined in \p Selects.
+static Value *getTrueOrFalseValue(
+    SelectInst *SI, bool isTrue,
+    const SmallPtrSet<const Instruction *, 2> &Selects) {
+  Value *V = nullptr;
+
+  for (SelectInst *DefSI = SI; DefSI != nullptr && Selects.count(DefSI);
+       DefSI = dyn_cast<SelectInst>(V)) {
+    assert(DefSI->getCondition() == SI->getCondition() &&
+           "The condition of DefSI does not match with SI");
+    V = (isTrue ? DefSI->getTrueValue() : DefSI->getFalseValue());
+  }
+
+  assert(V && "Failed to get select true/false value");
+  return V;
+}
+
+bool CodeGenPrepare::optimizeShiftInst(BinaryOperator *Shift) {
+  assert(Shift->isShift() && "Expected a shift");
+
+  // If this is (1) a vector shift, (2) shifts by scalars are cheaper than
+  // general vector shifts, and (3) the shift amount is a select-of-splatted
+  // values, hoist the shifts before the select:
+  //   shift Op0, (select Cond, TVal, FVal) -->
+  //   select Cond, (shift Op0, TVal), (shift Op0, FVal)
+  //
+  // This is inverting a generic IR transform when we know that the cost of a
+  // general vector shift is more than the cost of 2 shift-by-scalars.
+  // We can't do this effectively in SDAG because we may not be able to
+  // determine if the select operands are splats from within a basic block.
+  Type *Ty = Shift->getType();
+  if (!Ty->isVectorTy() || !TLI->isVectorShiftByScalarCheap(Ty))
+    return false;
+  Value *Cond, *TVal, *FVal;
+  if (!match(Shift->getOperand(1),
+             m_OneUse(m_Select(m_Value(Cond), m_Value(TVal), m_Value(FVal)))))
+    return false;
+  if (!isSplatValue(TVal) || !isSplatValue(FVal))
+    return false;
+
+  IRBuilder<> Builder(Shift);
+  BinaryOperator::BinaryOps Opcode = Shift->getOpcode();
+  Value *NewTVal = Builder.CreateBinOp(Opcode, Shift->getOperand(0), TVal);
+  Value *NewFVal = Builder.CreateBinOp(Opcode, Shift->getOperand(0), FVal);
+  Value *NewSel = Builder.CreateSelect(Cond, NewTVal, NewFVal);
+  Shift->replaceAllUsesWith(NewSel);
+  Shift->eraseFromParent();
+  return true;
+}
+
+bool CodeGenPrepare::optimizeFunnelShift(IntrinsicInst *Fsh) {
+  Intrinsic::ID Opcode = Fsh->getIntrinsicID();
+  assert((Opcode == Intrinsic::fshl || Opcode == Intrinsic::fshr) &&
+         "Expected a funnel shift");
+
+  // If this is (1) a vector funnel shift, (2) shifts by scalars are cheaper
+  // than general vector shifts, and (3) the shift amount is select-of-splatted
+  // values, hoist the funnel shifts before the select:
+  //   fsh Op0, Op1, (select Cond, TVal, FVal) -->
+  //   select Cond, (fsh Op0, Op1, TVal), (fsh Op0, Op1, FVal)
+  //
+  // This is inverting a generic IR transform when we know that the cost of a
+  // general vector shift is more than the cost of 2 shift-by-scalars.
+  // We can't do this effectively in SDAG because we may not be able to
+  // determine if the select operands are splats from within a basic block.
+  Type *Ty = Fsh->getType();
+  if (!Ty->isVectorTy() || !TLI->isVectorShiftByScalarCheap(Ty))
+    return false;
+  Value *Cond, *TVal, *FVal;
+  if (!match(Fsh->getOperand(2),
+             m_OneUse(m_Select(m_Value(Cond), m_Value(TVal), m_Value(FVal)))))
+    return false;
+  if (!isSplatValue(TVal) || !isSplatValue(FVal))
+    return false;
+
+  IRBuilder<> Builder(Fsh);
+  Value *X = Fsh->getOperand(0), *Y = Fsh->getOperand(1);
+  Value *NewTVal = Builder.CreateIntrinsic(Opcode, Ty, { X, Y, TVal });
+  Value *NewFVal = Builder.CreateIntrinsic(Opcode, Ty, { X, Y, FVal });
+  Value *NewSel = Builder.CreateSelect(Cond, NewTVal, NewFVal);
+  Fsh->replaceAllUsesWith(NewSel);
+  Fsh->eraseFromParent();
+  return true;
+}
 
 /// If we have a SelectInst that will likely profit from branch prediction,
 /// turn it into a branch.
-bool CodeGenPrepare::OptimizeSelectInst(SelectInst *SI) {
+bool CodeGenPrepare::optimizeSelectInst(SelectInst *SI) {
+  if (DisableSelectToBranch)
+    return false;
+
+  // Find all consecutive select instructions that share the same condition.
+  SmallVector<SelectInst *, 2> ASI;
+  ASI.push_back(SI);
+  for (BasicBlock::iterator It = ++BasicBlock::iterator(SI);
+       It != SI->getParent()->end(); ++It) {
+    SelectInst *I = dyn_cast<SelectInst>(&*It);
+    if (I && SI->getCondition() == I->getCondition()) {
+      ASI.push_back(I);
+    } else {
+      break;
+    }
+  }
+
+  SelectInst *LastSI = ASI.back();
+  // Increment the current iterator to skip all the rest of select instructions
+  // because they will be either "not lowered" or "all lowered" to branch.
+  CurInstIterator = std::next(LastSI->getIterator());
+
   bool VectorCond = !SI->getCondition()->getType()->isIntegerTy(1);
 
   // Can we convert the 'select' to CF ?
-  if (DisableSelectToBranch || OptSize || !TLI || VectorCond)
+  if (VectorCond || SI->getMetadata(LLVMContext::MD_unpredictable))
     return false;
 
   TargetLowering::SelectSupportKind SelectKind;
@@ -3554,116 +6736,285 @@ bool CodeGenPrepare::OptimizeSelectInst(SelectInst *SI) {
   else
     SelectKind = TargetLowering::ScalarValSelect;
 
-  // Do we have efficient codegen support for this kind of 'selects' ?
-  if (TLI->isSelectSupported(SelectKind)) {
-    // We have efficient codegen support for the select instruction.
-    // Check if it is profitable to keep this 'select'.
-    if (!TLI->isPredictableSelectExpensive() ||
-        !isFormingBranchFromSelectProfitable(SI))
-      return false;
-  }
+  if (TLI->isSelectSupported(SelectKind) &&
+      (!isFormingBranchFromSelectProfitable(TTI, TLI, SI) || OptSize ||
+       llvm::shouldOptimizeForSize(SI->getParent(), PSI, BFI.get())))
+    return false;
 
-  ModifiedDT = true;
+  // The DominatorTree needs to be rebuilt by any consumers after this
+  // transformation. We simply reset here rather than setting the ModifiedDT
+  // flag to avoid restarting the function walk in runOnFunction for each
+  // select optimized.
+  DT.reset();
+
+  // Transform a sequence like this:
+  //    start:
+  //       %cmp = cmp uge i32 %a, %b
+  //       %sel = select i1 %cmp, i32 %c, i32 %d
+  //
+  // Into:
+  //    start:
+  //       %cmp = cmp uge i32 %a, %b
+  //       %cmp.frozen = freeze %cmp
+  //       br i1 %cmp.frozen, label %select.true, label %select.false
+  //    select.true:
+  //       br label %select.end
+  //    select.false:
+  //       br label %select.end
+  //    select.end:
+  //       %sel = phi i32 [ %c, %select.true ], [ %d, %select.false ]
+  //
+  // %cmp should be frozen, otherwise it may introduce undefined behavior.
+  // In addition, we may sink instructions that produce %c or %d from
+  // the entry block into the destination(s) of the new branch.
+  // If the true or false blocks do not contain a sunken instruction, that
+  // block and its branch may be optimized away. In that case, one side of the
+  // first branch will point directly to select.end, and the corresponding PHI
+  // predecessor block will be the start block.
 
   // First, we split the block containing the select into 2 blocks.
   BasicBlock *StartBlock = SI->getParent();
-  BasicBlock::iterator SplitPt = ++(BasicBlock::iterator(SI));
-  BasicBlock *NextBlock = StartBlock->splitBasicBlock(SplitPt, "select.end");
+  BasicBlock::iterator SplitPt = ++(BasicBlock::iterator(LastSI));
+  BasicBlock *EndBlock = StartBlock->splitBasicBlock(SplitPt, "select.end");
+  BFI->setBlockFreq(EndBlock, BFI->getBlockFreq(StartBlock).getFrequency());
 
-  // Create a new block serving as the landing pad for the branch.
-  BasicBlock *SmallBlock = BasicBlock::Create(SI->getContext(), "select.mid",
-                                             NextBlock->getParent(), NextBlock);
-
-  // Move the unconditional branch from the block with the select in it into our
-  // landing pad block.
+  // Delete the unconditional branch that was just created by the split.
   StartBlock->getTerminator()->eraseFromParent();
-  BranchInst::Create(NextBlock, SmallBlock);
+
+  // These are the new basic blocks for the conditional branch.
+  // At least one will become an actual new basic block.
+  BasicBlock *TrueBlock = nullptr;
+  BasicBlock *FalseBlock = nullptr;
+  BranchInst *TrueBranch = nullptr;
+  BranchInst *FalseBranch = nullptr;
+
+  // Sink expensive instructions into the conditional blocks to avoid executing
+  // them speculatively.
+  for (SelectInst *SI : ASI) {
+    if (sinkSelectOperand(TTI, SI->getTrueValue())) {
+      if (TrueBlock == nullptr) {
+        TrueBlock = BasicBlock::Create(SI->getContext(), "select.true.sink",
+                                       EndBlock->getParent(), EndBlock);
+        TrueBranch = BranchInst::Create(EndBlock, TrueBlock);
+        TrueBranch->setDebugLoc(SI->getDebugLoc());
+      }
+      auto *TrueInst = cast<Instruction>(SI->getTrueValue());
+      TrueInst->moveBefore(TrueBranch);
+    }
+    if (sinkSelectOperand(TTI, SI->getFalseValue())) {
+      if (FalseBlock == nullptr) {
+        FalseBlock = BasicBlock::Create(SI->getContext(), "select.false.sink",
+                                        EndBlock->getParent(), EndBlock);
+        FalseBranch = BranchInst::Create(EndBlock, FalseBlock);
+        FalseBranch->setDebugLoc(SI->getDebugLoc());
+      }
+      auto *FalseInst = cast<Instruction>(SI->getFalseValue());
+      FalseInst->moveBefore(FalseBranch);
+    }
+  }
+
+  // If there was nothing to sink, then arbitrarily choose the 'false' side
+  // for a new input value to the PHI.
+  if (TrueBlock == FalseBlock) {
+    assert(TrueBlock == nullptr &&
+           "Unexpected basic block transform while optimizing select");
+
+    FalseBlock = BasicBlock::Create(SI->getContext(), "select.false",
+                                    EndBlock->getParent(), EndBlock);
+    auto *FalseBranch = BranchInst::Create(EndBlock, FalseBlock);
+    FalseBranch->setDebugLoc(SI->getDebugLoc());
+  }
 
   // Insert the real conditional branch based on the original condition.
-  BranchInst::Create(NextBlock, SmallBlock, SI->getCondition(), SI);
+  // If we did not create a new block for one of the 'true' or 'false' paths
+  // of the condition, it means that side of the branch goes to the end block
+  // directly and the path originates from the start block from the point of
+  // view of the new PHI.
+  BasicBlock *TT, *FT;
+  if (TrueBlock == nullptr) {
+    TT = EndBlock;
+    FT = FalseBlock;
+    TrueBlock = StartBlock;
+  } else if (FalseBlock == nullptr) {
+    TT = TrueBlock;
+    FT = EndBlock;
+    FalseBlock = StartBlock;
+  } else {
+    TT = TrueBlock;
+    FT = FalseBlock;
+  }
+  IRBuilder<> IB(SI);
+  auto *CondFr = IB.CreateFreeze(SI->getCondition(), SI->getName() + ".frozen");
+  IB.CreateCondBr(CondFr, TT, FT, SI);
 
-  // The select itself is replaced with a PHI Node.
-  PHINode *PN = PHINode::Create(SI->getType(), 2, "", NextBlock->begin());
-  PN->takeName(SI);
-  PN->addIncoming(SI->getTrueValue(), StartBlock);
-  PN->addIncoming(SI->getFalseValue(), SmallBlock);
-  SI->replaceAllUsesWith(PN);
-  SI->eraseFromParent();
+  SmallPtrSet<const Instruction *, 2> INS;
+  INS.insert(ASI.begin(), ASI.end());
+  // Use reverse iterator because later select may use the value of the
+  // earlier select, and we need to propagate value through earlier select
+  // to get the PHI operand.
+  for (auto It = ASI.rbegin(); It != ASI.rend(); ++It) {
+    SelectInst *SI = *It;
+    // The select itself is replaced with a PHI Node.
+    PHINode *PN = PHINode::Create(SI->getType(), 2, "", &EndBlock->front());
+    PN->takeName(SI);
+    PN->addIncoming(getTrueOrFalseValue(SI, true, INS), TrueBlock);
+    PN->addIncoming(getTrueOrFalseValue(SI, false, INS), FalseBlock);
+    PN->setDebugLoc(SI->getDebugLoc());
+
+    SI->replaceAllUsesWith(PN);
+    SI->eraseFromParent();
+    INS.erase(SI);
+    ++NumSelectsExpanded;
+  }
 
   // Instruct OptimizeBlock to skip to the next block.
   CurInstIterator = StartBlock->end();
-  ++NumSelectsExpanded;
   return true;
 }
 
-static bool isBroadcastShuffle(ShuffleVectorInst *SVI) {
-  SmallVector<int, 16> Mask(SVI->getShuffleMask());
-  int SplatElem = -1;
-  for (unsigned i = 0; i < Mask.size(); ++i) {
-    if (SplatElem != -1 && Mask[i] != -1 && Mask[i] != SplatElem)
-      return false;
-    SplatElem = Mask[i];
+/// Some targets only accept certain types for splat inputs. For example a VDUP
+/// in MVE takes a GPR (integer) register, and the instruction that incorporate
+/// a VDUP (such as a VADD qd, qm, rm) also require a gpr register.
+bool CodeGenPrepare::optimizeShuffleVectorInst(ShuffleVectorInst *SVI) {
+  // Accept shuf(insertelem(undef/poison, val, 0), undef/poison, <0,0,..>) only
+  if (!match(SVI, m_Shuffle(m_InsertElt(m_Undef(), m_Value(), m_ZeroInt()),
+                            m_Undef(), m_ZeroMask())))
+    return false;
+  Type *NewType = TLI->shouldConvertSplatType(SVI);
+  if (!NewType)
+    return false;
+
+  auto *SVIVecType = cast<FixedVectorType>(SVI->getType());
+  assert(!NewType->isVectorTy() && "Expected a scalar type!");
+  assert(NewType->getScalarSizeInBits() == SVIVecType->getScalarSizeInBits() &&
+         "Expected a type of the same size!");
+  auto *NewVecType =
+      FixedVectorType::get(NewType, SVIVecType->getNumElements());
+
+  // Create a bitcast (shuffle (insert (bitcast(..))))
+  IRBuilder<> Builder(SVI->getContext());
+  Builder.SetInsertPoint(SVI);
+  Value *BC1 = Builder.CreateBitCast(
+      cast<Instruction>(SVI->getOperand(0))->getOperand(1), NewType);
+  Value *Shuffle = Builder.CreateVectorSplat(NewVecType->getNumElements(), BC1);
+  Value *BC2 = Builder.CreateBitCast(Shuffle, SVIVecType);
+
+  SVI->replaceAllUsesWith(BC2);
+  RecursivelyDeleteTriviallyDeadInstructions(
+      SVI, TLInfo, nullptr, [&](Value *V) { removeAllAssertingVHReferences(V); });
+
+  // Also hoist the bitcast up to its operand if it they are not in the same
+  // block.
+  if (auto *BCI = dyn_cast<Instruction>(BC1))
+    if (auto *Op = dyn_cast<Instruction>(BCI->getOperand(0)))
+      if (BCI->getParent() != Op->getParent() && !isa<PHINode>(Op) &&
+          !Op->isTerminator() && !Op->isEHPad())
+        BCI->moveAfter(Op);
+
+  return true;
+}
+
+bool CodeGenPrepare::tryToSinkFreeOperands(Instruction *I) {
+  // If the operands of I can be folded into a target instruction together with
+  // I, duplicate and sink them.
+  SmallVector<Use *, 4> OpsToSink;
+  if (!TLI->shouldSinkOperands(I, OpsToSink))
+    return false;
+
+  // OpsToSink can contain multiple uses in a use chain (e.g.
+  // (%u1 with %u1 = shufflevector), (%u2 with %u2 = zext %u1)). The dominating
+  // uses must come first, so we process the ops in reverse order so as to not
+  // create invalid IR.
+  BasicBlock *TargetBB = I->getParent();
+  bool Changed = false;
+  SmallVector<Use *, 4> ToReplace;
+  for (Use *U : reverse(OpsToSink)) {
+    auto *UI = cast<Instruction>(U->get());
+    if (UI->getParent() == TargetBB || isa<PHINode>(UI))
+      continue;
+    ToReplace.push_back(U);
   }
 
-  return true;
-}
+  SetVector<Instruction *> MaybeDead;
+  DenseMap<Instruction *, Instruction *> NewInstructions;
+  Instruction *InsertPoint = I;
+  for (Use *U : ToReplace) {
+    auto *UI = cast<Instruction>(U->get());
+    Instruction *NI = UI->clone();
+    NewInstructions[UI] = NI;
+    MaybeDead.insert(UI);
+    LLVM_DEBUG(dbgs() << "Sinking " << *UI << " to user " << *I << "\n");
+    NI->insertBefore(InsertPoint);
+    InsertPoint = NI;
+    InsertedInsts.insert(NI);
 
-/// Some targets have expensive vector shifts if the lanes aren't all the same
-/// (e.g. x86 only introduced "vpsllvd" and friends with AVX2). In these cases
-/// it's often worth sinking a shufflevector splat down to its use so that
-/// codegen can spot all lanes are identical.
-bool CodeGenPrepare::OptimizeShuffleVectorInst(ShuffleVectorInst *SVI) {
-  BasicBlock *DefBB = SVI->getParent();
+    // Update the use for the new instruction, making sure that we update the
+    // sunk instruction uses, if it is part of a chain that has already been
+    // sunk.
+    Instruction *OldI = cast<Instruction>(U->getUser());
+    if (NewInstructions.count(OldI))
+      NewInstructions[OldI]->setOperand(U->getOperandNo(), NI);
+    else
+      U->set(NI);
+    Changed = true;
+  }
 
-  // Only do this xform if variable vector shifts are particularly expensive.
-  if (!TLI || !TLI->isVectorShiftByScalarCheap(SVI->getType()))
-    return false;
-
-  // We only expect better codegen by sinking a shuffle if we can recognise a
-  // constant splat.
-  if (!isBroadcastShuffle(SVI))
-    return false;
-
-  // InsertedShuffles - Only insert a shuffle in each block once.
-  DenseMap<BasicBlock*, Instruction*> InsertedShuffles;
-
-  bool MadeChange = false;
-  for (User *U : SVI->users()) {
-    Instruction *UI = cast<Instruction>(U);
-
-    // Figure out which BB this ext is used in.
-    BasicBlock *UserBB = UI->getParent();
-    if (UserBB == DefBB) continue;
-
-    // For now only apply this when the splat is used by a shift instruction.
-    if (!UI->isShift()) continue;
-
-    // Everything checks out, sink the shuffle if the user's block doesn't
-    // already have a copy.
-    Instruction *&InsertedShuffle = InsertedShuffles[UserBB];
-
-    if (!InsertedShuffle) {
-      BasicBlock::iterator InsertPt = UserBB->getFirstInsertionPt();
-      InsertedShuffle = new ShuffleVectorInst(SVI->getOperand(0),
-                                              SVI->getOperand(1),
-                                              SVI->getOperand(2), "", InsertPt);
+  // Remove instructions that are dead after sinking.
+  for (auto *I : MaybeDead) {
+    if (!I->hasNUsesOrMore(1)) {
+      LLVM_DEBUG(dbgs() << "Removing dead instruction: " << *I << "\n");
+      I->eraseFromParent();
     }
-
-    UI->replaceUsesOfWith(SVI, InsertedShuffle);
-    MadeChange = true;
   }
 
-  // If we removed all uses, nuke the shuffle.
-  if (SVI->use_empty()) {
-    SVI->eraseFromParent();
-    MadeChange = true;
-  }
-
-  return MadeChange;
+  return Changed;
 }
+
+bool CodeGenPrepare::optimizeSwitchInst(SwitchInst *SI) {
+  Value *Cond = SI->getCondition();
+  Type *OldType = Cond->getType();
+  LLVMContext &Context = Cond->getContext();
+  MVT RegType = TLI->getRegisterType(Context, TLI->getValueType(*DL, OldType));
+  unsigned RegWidth = RegType.getSizeInBits();
+
+  if (RegWidth <= cast<IntegerType>(OldType)->getBitWidth())
+    return false;
+
+  // If the register width is greater than the type width, expand the condition
+  // of the switch instruction and each case constant to the width of the
+  // register. By widening the type of the switch condition, subsequent
+  // comparisons (for case comparisons) will not need to be extended to the
+  // preferred register width, so we will potentially eliminate N-1 extends,
+  // where N is the number of cases in the switch.
+  auto *NewType = Type::getIntNTy(Context, RegWidth);
+
+  // Zero-extend the switch condition and case constants unless the switch
+  // condition is a function argument that is already being sign-extended.
+  // In that case, we can avoid an unnecessary mask/extension by sign-extending
+  // everything instead.
+  Instruction::CastOps ExtType = Instruction::ZExt;
+  if (auto *Arg = dyn_cast<Argument>(Cond))
+    if (Arg->hasSExtAttr())
+      ExtType = Instruction::SExt;
+
+  auto *ExtInst = CastInst::Create(ExtType, Cond, NewType);
+  ExtInst->insertBefore(SI);
+  ExtInst->setDebugLoc(SI->getDebugLoc());
+  SI->setCondition(ExtInst);
+  for (auto Case : SI->cases()) {
+    APInt NarrowConst = Case.getCaseValue()->getValue();
+    APInt WideConst = (ExtType == Instruction::ZExt) ?
+                      NarrowConst.zext(RegWidth) : NarrowConst.sext(RegWidth);
+    Case.setValue(ConstantInt::get(Context, WideConst));
+  }
+
+  return true;
+}
+
 
 namespace {
-/// \brief Helper class to promote a scalar operation to a vector one.
+
+/// Helper class to promote a scalar operation to a vector one.
 /// This class is used to move downward extractelement transition.
 /// E.g.,
 /// a = vector_op <2 x i32>
@@ -3679,6 +7030,9 @@ namespace {
 /// Assuming both extractelement and store can be combine, we get rid of the
 /// transition.
 class VectorPromoteHelper {
+  /// DataLayout associated with the current module.
+  const DataLayout &DL;
+
   /// Used to perform some checks on the legality of vector operations.
   const TargetLowering &TLI;
 
@@ -3687,14 +7041,17 @@ class VectorPromoteHelper {
 
   /// The transition being moved downwards.
   Instruction *Transition;
+
   /// The sequence of instructions to be promoted.
   SmallVector<Instruction *, 4> InstsToBePromoted;
+
   /// Cost of combining a store and an extract.
   unsigned StoreExtractCombineCost;
-  /// Instruction that will be combined with the transition.
-  Instruction *CombineInst;
 
-  /// \brief The instruction that represents the current end of the transition.
+  /// Instruction that will be combined with the transition.
+  Instruction *CombineInst = nullptr;
+
+  /// The instruction that represents the current end of the transition.
   /// Since we are faking the promotion until we reach the end of the chain
   /// of computation, we need a way to get the current end of the transition.
   Instruction *getEndOfTransition() const {
@@ -3703,7 +7060,7 @@ class VectorPromoteHelper {
     return InstsToBePromoted.back();
   }
 
-  /// \brief Return the index of the original value in the transition.
+  /// Return the index of the original value in the transition.
   /// E.g., for "extractelement <2 x i32> c, i32 1" the original value,
   /// c, is at index 0.
   unsigned getTransitionOriginalValueIdx() const {
@@ -3712,7 +7069,7 @@ class VectorPromoteHelper {
     return 0;
   }
 
-  /// \brief Return the index of the index in the transition.
+  /// Return the index of the index in the transition.
   /// E.g., for "extractelement <2 x i32> c, i32 0" the index
   /// is at index 1.
   unsigned getTransitionIdx() const {
@@ -3721,7 +7078,7 @@ class VectorPromoteHelper {
     return 1;
   }
 
-  /// \brief Get the type of the transition.
+  /// Get the type of the transition.
   /// This is the type of the original value.
   /// E.g., for "extractelement <2 x i32> c, i32 1" the type of the
   /// transition is <2 x i32>.
@@ -3729,7 +7086,7 @@ class VectorPromoteHelper {
     return Transition->getOperand(getTransitionOriginalValueIdx())->getType();
   }
 
-  /// \brief Promote \p ToBePromoted by moving \p Def downward through.
+  /// Promote \p ToBePromoted by moving \p Def downward through.
   /// I.e., we have the following sequence:
   /// Def = Transition <ty1> a to <ty2>
   /// b = ToBePromoted <ty2> Def, ...
@@ -3738,7 +7095,7 @@ class VectorPromoteHelper {
   /// Def = Transition <ty1> ToBePromoted to <ty2>
   void promoteImpl(Instruction *ToBePromoted);
 
-  /// \brief Check whether or not it is profitable to promote all the
+  /// Check whether or not it is profitable to promote all the
   /// instructions enqueued to be promoted.
   bool isProfitableToPromote() {
     Value *ValIdx = Transition->getOperand(getTransitionOriginalValueIdx());
@@ -3749,10 +7106,10 @@ class VectorPromoteHelper {
 
     StoreInst *ST = cast<StoreInst>(CombineInst);
     unsigned AS = ST->getPointerAddressSpace();
-    unsigned Align = ST->getAlignment();
     // Check if this store is supported.
     if (!TLI.allowsMisalignedMemoryAccesses(
-            TLI.getValueType(ST->getValueOperand()->getType()), AS, Align)) {
+            TLI.getValueType(DL, ST->getValueOperand()->getType()), AS,
+            ST->getAlign())) {
       // If this is not supported, there is no way we can combine
       // the extract with the store.
       return false;
@@ -3761,9 +7118,11 @@ class VectorPromoteHelper {
     // The scalar chain of computation has to pay for the transition
     // scalar to vector.
     // The vector chain has to account for the combining cost.
-    uint64_t ScalarCost =
+    InstructionCost ScalarCost =
         TTI.getVectorInstrCost(Transition->getOpcode(), PromotedType, Index);
-    uint64_t VectorCost = StoreExtractCombineCost;
+    InstructionCost VectorCost = StoreExtractCombineCost;
+    enum TargetTransformInfo::TargetCostKind CostKind =
+      TargetTransformInfo::TCK_RecipThroughput;
     for (const auto &Inst : InstsToBePromoted) {
       // Compute the cost.
       // By construction, all instructions being promoted are arithmetic ones.
@@ -3779,25 +7138,27 @@ class VectorPromoteHelper {
           !IsArg0Constant ? TargetTransformInfo::OK_UniformConstantValue
                           : TargetTransformInfo::OK_AnyValue;
       ScalarCost += TTI.getArithmeticInstrCost(
-          Inst->getOpcode(), Inst->getType(), Arg0OVK, Arg1OVK);
+          Inst->getOpcode(), Inst->getType(), CostKind, Arg0OVK, Arg1OVK);
       VectorCost += TTI.getArithmeticInstrCost(Inst->getOpcode(), PromotedType,
+                                               CostKind,
                                                Arg0OVK, Arg1OVK);
     }
-    DEBUG(dbgs() << "Estimated cost of computation to be promoted:\nScalar: "
-                 << ScalarCost << "\nVector: " << VectorCost << '\n');
+    LLVM_DEBUG(
+        dbgs() << "Estimated cost of computation to be promoted:\nScalar: "
+               << ScalarCost << "\nVector: " << VectorCost << '\n');
     return ScalarCost > VectorCost;
   }
 
-  /// \brief Generate a constant vector with \p Val with the same
+  /// Generate a constant vector with \p Val with the same
   /// number of elements as the transition.
   /// \p UseSplat defines whether or not \p Val should be replicated
-  /// accross the whole vector.
+  /// across the whole vector.
   /// In other words, if UseSplat == true, we generate <Val, Val, ..., Val>,
   /// otherwise we generate a vector with as many undef as possible:
   /// <undef, ..., undef, Val, undef, ..., undef> where \p Val is only
   /// used at the index of the extract.
   Value *getConstantVector(Constant *Val, bool UseSplat) const {
-    unsigned ExtractIdx = UINT_MAX;
+    unsigned ExtractIdx = std::numeric_limits<unsigned>::max();
     if (!UseSplat) {
       // If we cannot determine where the constant must be, we have to
       // use a splat constant.
@@ -3808,22 +7169,26 @@ class VectorPromoteHelper {
         UseSplat = true;
     }
 
-    unsigned End = getTransitionType()->getVectorNumElements();
+    ElementCount EC = cast<VectorType>(getTransitionType())->getElementCount();
     if (UseSplat)
-      return ConstantVector::getSplat(End, Val);
+      return ConstantVector::getSplat(EC, Val);
 
-    SmallVector<Constant *, 4> ConstVec;
-    UndefValue *UndefVal = UndefValue::get(Val->getType());
-    for (unsigned Idx = 0; Idx != End; ++Idx) {
-      if (Idx == ExtractIdx)
-        ConstVec.push_back(Val);
-      else
-        ConstVec.push_back(UndefVal);
-    }
-    return ConstantVector::get(ConstVec);
+    if (!EC.isScalable()) {
+      SmallVector<Constant *, 4> ConstVec;
+      UndefValue *UndefVal = UndefValue::get(Val->getType());
+      for (unsigned Idx = 0; Idx != EC.getKnownMinValue(); ++Idx) {
+        if (Idx == ExtractIdx)
+          ConstVec.push_back(Val);
+        else
+          ConstVec.push_back(UndefVal);
+      }
+      return ConstantVector::get(ConstVec);
+    } else
+      llvm_unreachable(
+          "Generate scalable vector for non-splat is unimplemented");
   }
 
-  /// \brief Check if promoting to a vector type an operand at \p OperandIdx
+  /// Check if promoting to a vector type an operand at \p OperandIdx
   /// in \p Use can trigger undefined behavior.
   static bool canCauseUndefinedBehavior(const Instruction *Use,
                                         unsigned OperandIdx) {
@@ -3847,20 +7212,21 @@ class VectorPromoteHelper {
   }
 
 public:
-  VectorPromoteHelper(const TargetLowering &TLI, const TargetTransformInfo &TTI,
-                      Instruction *Transition, unsigned CombineCost)
-      : TLI(TLI), TTI(TTI), Transition(Transition),
-        StoreExtractCombineCost(CombineCost), CombineInst(nullptr) {
+  VectorPromoteHelper(const DataLayout &DL, const TargetLowering &TLI,
+                      const TargetTransformInfo &TTI, Instruction *Transition,
+                      unsigned CombineCost)
+      : DL(DL), TLI(TLI), TTI(TTI), Transition(Transition),
+        StoreExtractCombineCost(CombineCost) {
     assert(Transition && "Do not know how to promote null");
   }
 
-  /// \brief Check if we can promote \p ToBePromoted to \p Type.
+  /// Check if we can promote \p ToBePromoted to \p Type.
   bool canPromote(const Instruction *ToBePromoted) const {
     // We could support CastInst too.
     return isa<BinaryOperator>(ToBePromoted);
   }
 
-  /// \brief Check if it is profitable to promote \p ToBePromoted
+  /// Check if it is profitable to promote \p ToBePromoted
   /// by moving downward the transition through.
   bool shouldPromote(const Instruction *ToBePromoted) const {
     // Promote only if all the operands can be statically expanded.
@@ -3885,26 +7251,26 @@ public:
       return false;
     return StressStoreExtract ||
            TLI.isOperationLegalOrCustom(
-               ISDOpcode, TLI.getValueType(getTransitionType(), true));
+               ISDOpcode, TLI.getValueType(DL, getTransitionType(), true));
   }
 
-  /// \brief Check whether or not \p Use can be combined
+  /// Check whether or not \p Use can be combined
   /// with the transition.
   /// I.e., is it possible to do Use(Transition) => AnotherUse?
   bool canCombine(const Instruction *Use) { return isa<StoreInst>(Use); }
 
-  /// \brief Record \p ToBePromoted as part of the chain to be promoted.
+  /// Record \p ToBePromoted as part of the chain to be promoted.
   void enqueueForPromotion(Instruction *ToBePromoted) {
     InstsToBePromoted.push_back(ToBePromoted);
   }
 
-  /// \brief Set the instruction that will be combined with the transition.
+  /// Set the instruction that will be combined with the transition.
   void recordCombineInstruction(Instruction *ToBeCombined) {
     assert(canCombine(ToBeCombined) && "Unsupported instruction to combine");
     CombineInst = ToBeCombined;
   }
 
-  /// \brief Promote all the instructions enqueued for promotion if it is
+  /// Promote all the instructions enqueued for promotion if it is
   /// is profitable.
   /// \return True if the promotion happened, false otherwise.
   bool promote() {
@@ -3925,7 +7291,8 @@ public:
     return true;
   }
 };
-} // End of anonymous namespace.
+
+} // end anonymous namespace
 
 void VectorPromoteHelper::promoteImpl(Instruction *ToBePromoted) {
   // At this point, we know that all the operands of ToBePromoted but Def
@@ -3964,159 +7331,16 @@ void VectorPromoteHelper::promoteImpl(Instruction *ToBePromoted) {
                        "this?");
     ToBePromoted->setOperand(U.getOperandNo(), NewVal);
   }
-  Transition->removeFromParent();
-  Transition->insertAfter(ToBePromoted);
+  Transition->moveAfter(ToBePromoted);
   Transition->setOperand(getTransitionOriginalValueIdx(), ToBePromoted);
-}
-
-// See if we can speculate calls to intrinsic cttz/ctlz.
-//
-// Example:
-// entry:
-//   ...
-//   %cmp = icmp eq i64 %val, 0
-//   br i1 %cmp, label %end.bb, label %then.bb
-//
-// then.bb:
-//   %c = tail call i64 @llvm.cttz.i64(i64 %val, i1 true)
-//   br label %EndBB
-//
-// end.bb:
-//   %cond = phi i64 [ %c, %then.bb ], [ 64, %entry ]
-//
-// ==>
-//
-// entry:
-//   ...
-//   %c = tail call i64 @llvm.cttz.i64(i64 %val, i1 false)
-//
-static bool OptimizeBranchInst(BranchInst *BrInst, const TargetLowering &TLI) {
-  assert(BrInst->isConditional() && "Expected a conditional branch!");
-  BasicBlock *ThenBB = BrInst->getSuccessor(1);
-  BasicBlock *EndBB = BrInst->getSuccessor(0);
-
-  // See if ThenBB contains only one instruction (excluding the
-  // terminator and DbgInfoIntrinsic calls).
-  IntrinsicInst *II = nullptr;
-  CastInst *CI = nullptr;
-  for (BasicBlock::iterator I = ThenBB->begin(),
-                            E = std::prev(ThenBB->end()); I != E; ++I) {
-    // Skip debug info.
-    if (isa<DbgInfoIntrinsic>(I))
-      continue;
-
-    // Check if this is a zero extension or a truncate of a previously
-    // matched call to intrinsic cttz/ctlz.
-    if (II) {
-      // Early exit if we already found a "free" zero extend/truncate.
-      if (CI)
-        return false;
-
-      Type *SrcTy = II->getType();
-      Type *DestTy = I->getType();
-      Value *V;
- 
-      if (match(cast<Instruction>(I), m_ZExt(m_Value(V))) && V == II) {
-        // Speculate this zero extend only if it is "free" for the target.
-        if (TLI.isZExtFree(SrcTy, DestTy)) {
-          CI = cast<CastInst>(I);
-          continue;
-        }
-      } else if (match(cast<Instruction>(I), m_Trunc(m_Value(V))) && V == II) {
-        // Speculate this truncate only if it is "free" for the target.
-        if (TLI.isTruncateFree(SrcTy, DestTy)) {
-          CI = cast<CastInst>(I);
-          continue;
-        }
-      } else {
-        // Avoid speculating more than one instruction.
-        return false;
-      }
-    }
-
-    // See if this is a call to intrinsic cttz/ctlz.
-    if (match(cast<Instruction>(I), m_Intrinsic<Intrinsic::cttz>())) {
-      // Avoid speculating expensive intrinsic calls.
-      if (!TLI.isCheapToSpeculateCttz())
-        return false;
-    }
-    else if (match(cast<Instruction>(I), m_Intrinsic<Intrinsic::ctlz>())) {
-      // Avoid speculating expensive intrinsic calls.
-      if (!TLI.isCheapToSpeculateCtlz())
-        return false;
-    } else
-      return false;
-    
-    II = cast<IntrinsicInst>(I);
-  }
-
-  // Look for PHI nodes with 'II' as the incoming value from 'ThenBB'.
-  BasicBlock *EntryBB = BrInst->getParent();
-  for (BasicBlock::iterator I = EndBB->begin();
-       PHINode *PN = dyn_cast<PHINode>(I); ++I) {
-    Value *ThenV = PN->getIncomingValueForBlock(ThenBB);
-    Value *OrigV = PN->getIncomingValueForBlock(EntryBB);
-
-    if (!OrigV)
-      return false;
-
-    if (ThenV != II && (!CI || ThenV != CI))
-      return false;
-    
-    if (ConstantInt *CInt = dyn_cast<ConstantInt>(OrigV)) {
-      unsigned BitWidth = II->getType()->getIntegerBitWidth();
-
-      // Don't try to simplify this phi node if 'ThenV' is a cttz/ctlz
-      // intrinsic call, but 'OrigV' is not equal to the 'size-of' in bits
-      // of the value in input to the cttz/ctlz.
-      if (CInt->getValue() != BitWidth)
-        return false;
-
-      // Hoist the call to cttz/ctlz from ThenBB into EntryBB.
-      EntryBB->getInstList().splice(BrInst, ThenBB->getInstList(),
-                                    ThenBB->begin(), std::prev(ThenBB->end()));
- 
-      // Update PN setting ThenV as the incoming value from both 'EntryBB'
-      // and 'ThenBB'. Eventually, method 'OptimizeInst' will fold this
-      // phi node if all the incoming values are the same.
-      PN->setIncomingValue(PN->getBasicBlockIndex(EntryBB), ThenV);
-      PN->setIncomingValue(PN->getBasicBlockIndex(ThenBB), ThenV);
-
-      // Clear the 'undef on zero' flag of the cttz/ctlz intrinsic call.
-      if (cast<ConstantInt>(II->getArgOperand(1))->isOne()) {
-        Type *Ty = II->getArgOperand(0)->getType();
-        Value *Args[] = { II->getArgOperand(0),
-                          ConstantInt::getFalse(II->getContext()) };
-        Module *M = EntryBB->getParent()->getParent();
-        Value *IF = Intrinsic::getDeclaration(M, II->getIntrinsicID(), Ty);
-        IRBuilder<> Builder(II);
-        Instruction *NewI = Builder.CreateCall(IF, Args);
-
-        // Replace the old call to cttz/ctlz.
-        II->replaceAllUsesWith(NewI);
-        II->eraseFromParent();
-      }
- 
-      // Update BrInst condition so that the branch to EndBB is always taken.
-      // Later on, method 'ConstantFoldTerminator' will simplify this branch
-      // replacing it with a direct branch to 'EndBB'.
-      // As a side effect, CodeGenPrepare will attempt to simplify the control
-      // flow graph by deleting basic block 'ThenBB' and merging 'EntryBB' into
-      // 'EndBB' (calling method 'EliminateFallThrough').
-      BrInst->setCondition(ConstantInt::getTrue(BrInst->getContext()));
-      return true;
-    }
-  }
-
-  return false;
 }
 
 /// Some targets can do store(extractelement) with one instruction.
 /// Try to push the extractelement towards the stores when the target
 /// has this feature and this is profitable.
-bool CodeGenPrepare::OptimizeExtractElementInst(Instruction *Inst) {
-  unsigned CombineCost = UINT_MAX;
-  if (DisableStoreExtract || !TLI ||
+bool CodeGenPrepare::optimizeExtractElementInst(Instruction *Inst) {
+  unsigned CombineCost = std::numeric_limits<unsigned>::max();
+  if (DisableStoreExtract ||
       (!StressStoreExtract &&
        !TLI->canCombineStoreAndExtract(Inst->getOperand(0)->getType(),
                                        Inst->getOperand(1), CombineCost)))
@@ -4130,35 +7354,36 @@ bool CodeGenPrepare::OptimizeExtractElementInst(Instruction *Inst) {
   //   => we would need to check that we are moving it at a cheaper place and
   //      we do not do that for now.
   BasicBlock *Parent = Inst->getParent();
-  DEBUG(dbgs() << "Found an interesting transition: " << *Inst << '\n');
-  VectorPromoteHelper VPH(*TLI, *TTI, Inst, CombineCost);
+  LLVM_DEBUG(dbgs() << "Found an interesting transition: " << *Inst << '\n');
+  VectorPromoteHelper VPH(*DL, *TLI, *TTI, Inst, CombineCost);
   // If the transition has more than one use, assume this is not going to be
   // beneficial.
   while (Inst->hasOneUse()) {
     Instruction *ToBePromoted = cast<Instruction>(*Inst->user_begin());
-    DEBUG(dbgs() << "Use: " << *ToBePromoted << '\n');
+    LLVM_DEBUG(dbgs() << "Use: " << *ToBePromoted << '\n');
 
     if (ToBePromoted->getParent() != Parent) {
-      DEBUG(dbgs() << "Instruction to promote is in a different block ("
-                   << ToBePromoted->getParent()->getName()
-                   << ") than the transition (" << Parent->getName() << ").\n");
+      LLVM_DEBUG(dbgs() << "Instruction to promote is in a different block ("
+                        << ToBePromoted->getParent()->getName()
+                        << ") than the transition (" << Parent->getName()
+                        << ").\n");
       return false;
     }
 
     if (VPH.canCombine(ToBePromoted)) {
-      DEBUG(dbgs() << "Assume " << *Inst << '\n'
-                   << "will be combined with: " << *ToBePromoted << '\n');
+      LLVM_DEBUG(dbgs() << "Assume " << *Inst << '\n'
+                        << "will be combined with: " << *ToBePromoted << '\n');
       VPH.recordCombineInstruction(ToBePromoted);
       bool Changed = VPH.promote();
       NumStoreExtractExposed += Changed;
       return Changed;
     }
 
-    DEBUG(dbgs() << "Try promoting.\n");
+    LLVM_DEBUG(dbgs() << "Try promoting.\n");
     if (!VPH.canPromote(ToBePromoted) || !VPH.shouldPromote(ToBePromoted))
       return false;
 
-    DEBUG(dbgs() << "Promoting is possible... Enqueue for promotion!\n");
+    LLVM_DEBUG(dbgs() << "Promoting is possible... Enqueue for promotion!\n");
 
     VPH.enqueueForPromotion(ToBePromoted);
     Inst = ToBePromoted;
@@ -4166,13 +7391,377 @@ bool CodeGenPrepare::OptimizeExtractElementInst(Instruction *Inst) {
   return false;
 }
 
-bool CodeGenPrepare::OptimizeInst(Instruction *I, bool& ModifiedDT) {
+/// For the instruction sequence of store below, F and I values
+/// are bundled together as an i64 value before being stored into memory.
+/// Sometimes it is more efficient to generate separate stores for F and I,
+/// which can remove the bitwise instructions or sink them to colder places.
+///
+///   (store (or (zext (bitcast F to i32) to i64),
+///              (shl (zext I to i64), 32)), addr)  -->
+///   (store F, addr) and (store I, addr+4)
+///
+/// Similarly, splitting for other merged store can also be beneficial, like:
+/// For pair of {i32, i32}, i64 store --> two i32 stores.
+/// For pair of {i32, i16}, i64 store --> two i32 stores.
+/// For pair of {i16, i16}, i32 store --> two i16 stores.
+/// For pair of {i16, i8},  i32 store --> two i16 stores.
+/// For pair of {i8, i8},   i16 store --> two i8 stores.
+///
+/// We allow each target to determine specifically which kind of splitting is
+/// supported.
+///
+/// The store patterns are commonly seen from the simple code snippet below
+/// if only std::make_pair(...) is sroa transformed before inlined into hoo.
+///   void goo(const std::pair<int, float> &);
+///   hoo() {
+///     ...
+///     goo(std::make_pair(tmp, ftmp));
+///     ...
+///   }
+///
+/// Although we already have similar splitting in DAG Combine, we duplicate
+/// it in CodeGenPrepare to catch the case in which pattern is across
+/// multiple BBs. The logic in DAG Combine is kept to catch case generated
+/// during code expansion.
+static bool splitMergedValStore(StoreInst &SI, const DataLayout &DL,
+                                const TargetLowering &TLI) {
+  // Handle simple but common cases only.
+  Type *StoreType = SI.getValueOperand()->getType();
+
+  // The code below assumes shifting a value by <number of bits>,
+  // whereas scalable vectors would have to be shifted by
+  // <2log(vscale) + number of bits> in order to store the
+  // low/high parts. Bailing out for now.
+  if (isa<ScalableVectorType>(StoreType))
+    return false;
+
+  if (!DL.typeSizeEqualsStoreSize(StoreType) ||
+      DL.getTypeSizeInBits(StoreType) == 0)
+    return false;
+
+  unsigned HalfValBitSize = DL.getTypeSizeInBits(StoreType) / 2;
+  Type *SplitStoreType = Type::getIntNTy(SI.getContext(), HalfValBitSize);
+  if (!DL.typeSizeEqualsStoreSize(SplitStoreType))
+    return false;
+
+  // Don't split the store if it is volatile.
+  if (SI.isVolatile())
+    return false;
+
+  // Match the following patterns:
+  // (store (or (zext LValue to i64),
+  //            (shl (zext HValue to i64), 32)), HalfValBitSize)
+  //  or
+  // (store (or (shl (zext HValue to i64), 32)), HalfValBitSize)
+  //            (zext LValue to i64),
+  // Expect both operands of OR and the first operand of SHL have only
+  // one use.
+  Value *LValue, *HValue;
+  if (!match(SI.getValueOperand(),
+             m_c_Or(m_OneUse(m_ZExt(m_Value(LValue))),
+                    m_OneUse(m_Shl(m_OneUse(m_ZExt(m_Value(HValue))),
+                                   m_SpecificInt(HalfValBitSize))))))
+    return false;
+
+  // Check LValue and HValue are int with size less or equal than 32.
+  if (!LValue->getType()->isIntegerTy() ||
+      DL.getTypeSizeInBits(LValue->getType()) > HalfValBitSize ||
+      !HValue->getType()->isIntegerTy() ||
+      DL.getTypeSizeInBits(HValue->getType()) > HalfValBitSize)
+    return false;
+
+  // If LValue/HValue is a bitcast instruction, use the EVT before bitcast
+  // as the input of target query.
+  auto *LBC = dyn_cast<BitCastInst>(LValue);
+  auto *HBC = dyn_cast<BitCastInst>(HValue);
+  EVT LowTy = LBC ? EVT::getEVT(LBC->getOperand(0)->getType())
+                  : EVT::getEVT(LValue->getType());
+  EVT HighTy = HBC ? EVT::getEVT(HBC->getOperand(0)->getType())
+                   : EVT::getEVT(HValue->getType());
+  if (!ForceSplitStore && !TLI.isMultiStoresCheaperThanBitsMerge(LowTy, HighTy))
+    return false;
+
+  // Start to split store.
+  IRBuilder<> Builder(SI.getContext());
+  Builder.SetInsertPoint(&SI);
+
+  // If LValue/HValue is a bitcast in another BB, create a new one in current
+  // BB so it may be merged with the splitted stores by dag combiner.
+  if (LBC && LBC->getParent() != SI.getParent())
+    LValue = Builder.CreateBitCast(LBC->getOperand(0), LBC->getType());
+  if (HBC && HBC->getParent() != SI.getParent())
+    HValue = Builder.CreateBitCast(HBC->getOperand(0), HBC->getType());
+
+  bool IsLE = SI.getModule()->getDataLayout().isLittleEndian();
+  auto CreateSplitStore = [&](Value *V, bool Upper) {
+    V = Builder.CreateZExtOrBitCast(V, SplitStoreType);
+    Value *Addr = Builder.CreateBitCast(
+        SI.getOperand(1),
+        SplitStoreType->getPointerTo(SI.getPointerAddressSpace()));
+    Align Alignment = SI.getAlign();
+    const bool IsOffsetStore = (IsLE && Upper) || (!IsLE && !Upper);
+    if (IsOffsetStore) {
+      Addr = Builder.CreateGEP(
+          SplitStoreType, Addr,
+          ConstantInt::get(Type::getInt32Ty(SI.getContext()), 1));
+
+      // When splitting the store in half, naturally one half will retain the
+      // alignment of the original wider store, regardless of whether it was
+      // over-aligned or not, while the other will require adjustment.
+      Alignment = commonAlignment(Alignment, HalfValBitSize / 8);
+    }
+    Builder.CreateAlignedStore(V, Addr, Alignment);
+  };
+
+  CreateSplitStore(LValue, false);
+  CreateSplitStore(HValue, true);
+
+  // Delete the old store.
+  SI.eraseFromParent();
+  return true;
+}
+
+// Return true if the GEP has two operands, the first operand is of a sequential
+// type, and the second operand is a constant.
+static bool GEPSequentialConstIndexed(GetElementPtrInst *GEP) {
+  gep_type_iterator I = gep_type_begin(*GEP);
+  return GEP->getNumOperands() == 2 &&
+      I.isSequential() &&
+      isa<ConstantInt>(GEP->getOperand(1));
+}
+
+// Try unmerging GEPs to reduce liveness interference (register pressure) across
+// IndirectBr edges. Since IndirectBr edges tend to touch on many blocks,
+// reducing liveness interference across those edges benefits global register
+// allocation. Currently handles only certain cases.
+//
+// For example, unmerge %GEPI and %UGEPI as below.
+//
+// ---------- BEFORE ----------
+// SrcBlock:
+//   ...
+//   %GEPIOp = ...
+//   ...
+//   %GEPI = gep %GEPIOp, Idx
+//   ...
+//   indirectbr ... [ label %DstB0, label %DstB1, ... label %DstBi ... ]
+//   (* %GEPI is alive on the indirectbr edges due to other uses ahead)
+//   (* %GEPIOp is alive on the indirectbr edges only because of it's used by
+//   %UGEPI)
+//
+// DstB0: ... (there may be a gep similar to %UGEPI to be unmerged)
+// DstB1: ... (there may be a gep similar to %UGEPI to be unmerged)
+// ...
+//
+// DstBi:
+//   ...
+//   %UGEPI = gep %GEPIOp, UIdx
+// ...
+// ---------------------------
+//
+// ---------- AFTER ----------
+// SrcBlock:
+//   ... (same as above)
+//    (* %GEPI is still alive on the indirectbr edges)
+//    (* %GEPIOp is no longer alive on the indirectbr edges as a result of the
+//    unmerging)
+// ...
+//
+// DstBi:
+//   ...
+//   %UGEPI = gep %GEPI, (UIdx-Idx)
+//   ...
+// ---------------------------
+//
+// The register pressure on the IndirectBr edges is reduced because %GEPIOp is
+// no longer alive on them.
+//
+// We try to unmerge GEPs here in CodGenPrepare, as opposed to limiting merging
+// of GEPs in the first place in InstCombiner::visitGetElementPtrInst() so as
+// not to disable further simplications and optimizations as a result of GEP
+// merging.
+//
+// Note this unmerging may increase the length of the data flow critical path
+// (the path from %GEPIOp to %UGEPI would go through %GEPI), which is a tradeoff
+// between the register pressure and the length of data-flow critical
+// path. Restricting this to the uncommon IndirectBr case would minimize the
+// impact of potentially longer critical path, if any, and the impact on compile
+// time.
+static bool tryUnmergingGEPsAcrossIndirectBr(GetElementPtrInst *GEPI,
+                                             const TargetTransformInfo *TTI) {
+  BasicBlock *SrcBlock = GEPI->getParent();
+  // Check that SrcBlock ends with an IndirectBr. If not, give up. The common
+  // (non-IndirectBr) cases exit early here.
+  if (!isa<IndirectBrInst>(SrcBlock->getTerminator()))
+    return false;
+  // Check that GEPI is a simple gep with a single constant index.
+  if (!GEPSequentialConstIndexed(GEPI))
+    return false;
+  ConstantInt *GEPIIdx = cast<ConstantInt>(GEPI->getOperand(1));
+  // Check that GEPI is a cheap one.
+  if (TTI->getIntImmCost(GEPIIdx->getValue(), GEPIIdx->getType(),
+                         TargetTransformInfo::TCK_SizeAndLatency)
+      > TargetTransformInfo::TCC_Basic)
+    return false;
+  Value *GEPIOp = GEPI->getOperand(0);
+  // Check that GEPIOp is an instruction that's also defined in SrcBlock.
+  if (!isa<Instruction>(GEPIOp))
+    return false;
+  auto *GEPIOpI = cast<Instruction>(GEPIOp);
+  if (GEPIOpI->getParent() != SrcBlock)
+    return false;
+  // Check that GEP is used outside the block, meaning it's alive on the
+  // IndirectBr edge(s).
+  if (find_if(GEPI->users(), [&](User *Usr) {
+        if (auto *I = dyn_cast<Instruction>(Usr)) {
+          if (I->getParent() != SrcBlock) {
+            return true;
+          }
+        }
+        return false;
+      }) == GEPI->users().end())
+    return false;
+  // The second elements of the GEP chains to be unmerged.
+  std::vector<GetElementPtrInst *> UGEPIs;
+  // Check each user of GEPIOp to check if unmerging would make GEPIOp not alive
+  // on IndirectBr edges.
+  for (User *Usr : GEPIOp->users()) {
+    if (Usr == GEPI) continue;
+    // Check if Usr is an Instruction. If not, give up.
+    if (!isa<Instruction>(Usr))
+      return false;
+    auto *UI = cast<Instruction>(Usr);
+    // Check if Usr in the same block as GEPIOp, which is fine, skip.
+    if (UI->getParent() == SrcBlock)
+      continue;
+    // Check if Usr is a GEP. If not, give up.
+    if (!isa<GetElementPtrInst>(Usr))
+      return false;
+    auto *UGEPI = cast<GetElementPtrInst>(Usr);
+    // Check if UGEPI is a simple gep with a single constant index and GEPIOp is
+    // the pointer operand to it. If so, record it in the vector. If not, give
+    // up.
+    if (!GEPSequentialConstIndexed(UGEPI))
+      return false;
+    if (UGEPI->getOperand(0) != GEPIOp)
+      return false;
+    if (GEPIIdx->getType() !=
+        cast<ConstantInt>(UGEPI->getOperand(1))->getType())
+      return false;
+    ConstantInt *UGEPIIdx = cast<ConstantInt>(UGEPI->getOperand(1));
+    if (TTI->getIntImmCost(UGEPIIdx->getValue(), UGEPIIdx->getType(),
+                           TargetTransformInfo::TCK_SizeAndLatency)
+        > TargetTransformInfo::TCC_Basic)
+      return false;
+    UGEPIs.push_back(UGEPI);
+  }
+  if (UGEPIs.size() == 0)
+    return false;
+  // Check the materializing cost of (Uidx-Idx).
+  for (GetElementPtrInst *UGEPI : UGEPIs) {
+    ConstantInt *UGEPIIdx = cast<ConstantInt>(UGEPI->getOperand(1));
+    APInt NewIdx = UGEPIIdx->getValue() - GEPIIdx->getValue();
+    InstructionCost ImmCost = TTI->getIntImmCost(
+        NewIdx, GEPIIdx->getType(), TargetTransformInfo::TCK_SizeAndLatency);
+    if (ImmCost > TargetTransformInfo::TCC_Basic)
+      return false;
+  }
+  // Now unmerge between GEPI and UGEPIs.
+  for (GetElementPtrInst *UGEPI : UGEPIs) {
+    UGEPI->setOperand(0, GEPI);
+    ConstantInt *UGEPIIdx = cast<ConstantInt>(UGEPI->getOperand(1));
+    Constant *NewUGEPIIdx =
+        ConstantInt::get(GEPIIdx->getType(),
+                         UGEPIIdx->getValue() - GEPIIdx->getValue());
+    UGEPI->setOperand(1, NewUGEPIIdx);
+    // If GEPI is not inbounds but UGEPI is inbounds, change UGEPI to not
+    // inbounds to avoid UB.
+    if (!GEPI->isInBounds()) {
+      UGEPI->setIsInBounds(false);
+    }
+  }
+  // After unmerging, verify that GEPIOp is actually only used in SrcBlock (not
+  // alive on IndirectBr edges).
+  assert(find_if(GEPIOp->users(), [&](User *Usr) {
+        return cast<Instruction>(Usr)->getParent() != SrcBlock;
+      }) == GEPIOp->users().end() && "GEPIOp is used outside SrcBlock");
+  return true;
+}
+
+static bool optimizeBranch(BranchInst *Branch, const TargetLowering &TLI) {
+  // Try and convert
+  //  %c = icmp ult %x, 8
+  //  br %c, bla, blb
+  //  %tc = lshr %x, 3
+  // to
+  //  %tc = lshr %x, 3
+  //  %c = icmp eq %tc, 0
+  //  br %c, bla, blb
+  // Creating the cmp to zero can be better for the backend, especially if the
+  // lshr produces flags that can be used automatically.
+  if (!TLI.preferZeroCompareBranch() || !Branch->isConditional())
+    return false;
+
+  ICmpInst *Cmp = dyn_cast<ICmpInst>(Branch->getCondition());
+  if (!Cmp || !isa<ConstantInt>(Cmp->getOperand(1)) || !Cmp->hasOneUse())
+    return false;
+
+  Value *X = Cmp->getOperand(0);
+  APInt CmpC = cast<ConstantInt>(Cmp->getOperand(1))->getValue();
+
+  for (auto *U : X->users()) {
+    Instruction *UI = dyn_cast<Instruction>(U);
+    // A quick dominance check
+    if (!UI ||
+        (UI->getParent() != Branch->getParent() &&
+         UI->getParent() != Branch->getSuccessor(0) &&
+         UI->getParent() != Branch->getSuccessor(1)) ||
+        (UI->getParent() != Branch->getParent() &&
+         !UI->getParent()->getSinglePredecessor()))
+      continue;
+
+    if (CmpC.isPowerOf2() && Cmp->getPredicate() == ICmpInst::ICMP_ULT &&
+        match(UI, m_Shr(m_Specific(X), m_SpecificInt(CmpC.logBase2())))) {
+      IRBuilder<> Builder(Branch);
+      if (UI->getParent() != Branch->getParent())
+        UI->moveBefore(Branch);
+      Value *NewCmp = Builder.CreateCmp(ICmpInst::ICMP_EQ, UI,
+                                        ConstantInt::get(UI->getType(), 0));
+      LLVM_DEBUG(dbgs() << "Converting " << *Cmp << "\n");
+      LLVM_DEBUG(dbgs() << " to compare on zero: " << *NewCmp << "\n");
+      Cmp->replaceAllUsesWith(NewCmp);
+      return true;
+    }
+    if (Cmp->isEquality() &&
+        (match(UI, m_Add(m_Specific(X), m_SpecificInt(-CmpC))) ||
+         match(UI, m_Sub(m_Specific(X), m_SpecificInt(CmpC))))) {
+      IRBuilder<> Builder(Branch);
+      if (UI->getParent() != Branch->getParent())
+        UI->moveBefore(Branch);
+      Value *NewCmp = Builder.CreateCmp(Cmp->getPredicate(), UI,
+                                        ConstantInt::get(UI->getType(), 0));
+      LLVM_DEBUG(dbgs() << "Converting " << *Cmp << "\n");
+      LLVM_DEBUG(dbgs() << " to compare on zero: " << *NewCmp << "\n");
+      Cmp->replaceAllUsesWith(NewCmp);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CodeGenPrepare::optimizeInst(Instruction *I, bool &ModifiedDT) {
+  // Bail out if we inserted the instruction to prevent optimizations from
+  // stepping on each other's toes.
+  if (InsertedInsts.count(I))
+    return false;
+
+  // TODO: Move into the switch on opcode below here.
   if (PHINode *P = dyn_cast<PHINode>(I)) {
     // It is possible for very late stage optimizations (such as SimplifyCFG)
     // to introduce PHI nodes too late to be cleaned up.  If we detect such a
     // trivial PHI, go ahead and zap it here.
-    if (Value *V = SimplifyInstruction(P, TLI ? TLI->getDataLayout() : nullptr,
-                                       TLInfo, DT)) {
+    if (Value *V = SimplifyInstruction(P, {*DL, TLInfo})) {
+      LargeOffsetGEPMap.erase(P);
       P->replaceAllUsesWith(V);
       P->eraseFromParent();
       ++NumPHIsElim;
@@ -4191,50 +7780,69 @@ bool CodeGenPrepare::OptimizeInst(Instruction *I, bool& ModifiedDT) {
     if (isa<Constant>(CI->getOperand(0)))
       return false;
 
-    if (TLI && OptimizeNoopCopyExpression(CI, *TLI))
+    if (OptimizeNoopCopyExpression(CI, *TLI, *DL))
       return true;
 
     if (isa<ZExtInst>(I) || isa<SExtInst>(I)) {
       /// Sink a zext or sext into its user blocks if the target type doesn't
       /// fit in one register
-      if (TLI && TLI->getTypeAction(CI->getContext(),
-                                    TLI->getValueType(CI->getType())) ==
-                     TargetLowering::TypeExpandInteger) {
+      if (TLI->getTypeAction(CI->getContext(),
+                             TLI->getValueType(*DL, CI->getType())) ==
+          TargetLowering::TypeExpandInteger) {
         return SinkCast(CI);
       } else {
-        bool MadeChange = MoveExtToFormExtLoad(I);
-        return MadeChange | OptimizeExtUses(I);
+        bool MadeChange = optimizeExt(I);
+        return MadeChange | optimizeExtUses(I);
       }
     }
     return false;
   }
 
-  if (CmpInst *CI = dyn_cast<CmpInst>(I))
-    if (!TLI || !TLI->hasMultipleConditionRegisters())
-      return OptimizeCmpExpression(CI);
+  if (auto *Cmp = dyn_cast<CmpInst>(I))
+    if (optimizeCmp(Cmp, ModifiedDT))
+      return true;
 
   if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-    if (TLI)
-      return OptimizeMemoryInst(I, I->getOperand(0), LI->getType());
-    return false;
+    LI->setMetadata(LLVMContext::MD_invariant_group, nullptr);
+    bool Modified = optimizeLoadExt(LI);
+    unsigned AS = LI->getPointerAddressSpace();
+    Modified |= optimizeMemoryInst(I, I->getOperand(0), LI->getType(), AS);
+    return Modified;
   }
 
   if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
-    if (TLI)
-      return OptimizeMemoryInst(I, SI->getOperand(1),
-                                SI->getOperand(0)->getType());
-    return false;
+    if (splitMergedValStore(*SI, *DL, *TLI))
+      return true;
+    SI->setMetadata(LLVMContext::MD_invariant_group, nullptr);
+    unsigned AS = SI->getPointerAddressSpace();
+    return optimizeMemoryInst(I, SI->getOperand(1),
+                              SI->getOperand(0)->getType(), AS);
+  }
+
+  if (AtomicRMWInst *RMW = dyn_cast<AtomicRMWInst>(I)) {
+      unsigned AS = RMW->getPointerAddressSpace();
+      return optimizeMemoryInst(I, RMW->getPointerOperand(),
+                                RMW->getType(), AS);
+  }
+
+  if (AtomicCmpXchgInst *CmpX = dyn_cast<AtomicCmpXchgInst>(I)) {
+      unsigned AS = CmpX->getPointerAddressSpace();
+      return optimizeMemoryInst(I, CmpX->getPointerOperand(),
+                                CmpX->getCompareOperand()->getType(), AS);
   }
 
   BinaryOperator *BinOp = dyn_cast<BinaryOperator>(I);
 
+  if (BinOp && (BinOp->getOpcode() == Instruction::And) && EnableAndCmpSinking)
+    return sinkAndCmp0Expression(BinOp, *TLI, InsertedInsts);
+
+  // TODO: Move this into the switch on opcode - it handles shifts already.
   if (BinOp && (BinOp->getOpcode() == Instruction::AShr ||
                 BinOp->getOpcode() == Instruction::LShr)) {
     ConstantInt *CI = dyn_cast<ConstantInt>(BinOp->getOperand(1));
-    if (TLI && CI && TLI->hasExtractBitsInsn())
-      return OptimizeExtractBits(BinOp, CI, *TLI);
-
-    return false;
+    if (CI && TLI->hasExtractBitsInsn())
+      if (OptimizeExtractBits(BinOp, CI, *TLI, *DL))
+        return true;
   }
 
   if (GetElementPtrInst *GEPI = dyn_cast<GetElementPtrInst>(I)) {
@@ -4242,102 +7850,200 @@ bool CodeGenPrepare::OptimizeInst(Instruction *I, bool& ModifiedDT) {
       /// The GEP operand must be a pointer, so must its result -> BitCast
       Instruction *NC = new BitCastInst(GEPI->getOperand(0), GEPI->getType(),
                                         GEPI->getName(), GEPI);
+      NC->setDebugLoc(GEPI->getDebugLoc());
       GEPI->replaceAllUsesWith(NC);
       GEPI->eraseFromParent();
       ++NumGEPsElim;
-      OptimizeInst(NC, ModifiedDT);
+      optimizeInst(NC, ModifiedDT);
+      return true;
+    }
+    if (tryUnmergingGEPsAcrossIndirectBr(GEPI, TTI)) {
       return true;
     }
     return false;
   }
 
-  if (CallInst *CI = dyn_cast<CallInst>(I))
-    return OptimizeCallInst(CI, ModifiedDT);
+  if (FreezeInst *FI = dyn_cast<FreezeInst>(I)) {
+    // freeze(icmp a, const)) -> icmp (freeze a), const
+    // This helps generate efficient conditional jumps.
+    Instruction *CmpI = nullptr;
+    if (ICmpInst *II = dyn_cast<ICmpInst>(FI->getOperand(0)))
+      CmpI = II;
+    else if (FCmpInst *F = dyn_cast<FCmpInst>(FI->getOperand(0)))
+      CmpI = F->getFastMathFlags().none() ? F : nullptr;
 
-  if (SelectInst *SI = dyn_cast<SelectInst>(I))
-    return OptimizeSelectInst(SI);
-
-  if (ShuffleVectorInst *SVI = dyn_cast<ShuffleVectorInst>(I))
-    return OptimizeShuffleVectorInst(SVI);
-
-  if (isa<ExtractElementInst>(I))
-    return OptimizeExtractElementInst(I);
-
-  if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
-    if (TLI && BI->isConditional() && BI->getCondition()->hasOneUse()) {
-      // Check if the branch condition compares a value agaist zero.
-      if (ICmpInst *ICI = dyn_cast<ICmpInst>(BI->getCondition())) {
-        if (ICI->getPredicate() == ICmpInst::ICMP_EQ &&
-            match(ICI->getOperand(1), m_Zero())) {
-          BasicBlock *ThenBB = BI->getSuccessor(1);
-          BasicBlock *EndBB = BI->getSuccessor(0);
-
-          // Check if ThenBB is only reachable from this basic block; also,
-          // check if EndBB has more than one predecessor.
-          if (ThenBB->getSinglePredecessor() &&
-              !EndBB->getSinglePredecessor()) {
-            TerminatorInst *TI = ThenBB->getTerminator();
-
-            if (TI->getNumSuccessors() == 1 && TI->getSuccessor(0) == EndBB &&
-                // Try to speculate calls to intrinsic cttz/ctlz from 'ThenBB'.
-                OptimizeBranchInst(BI, *TLI)) {
-              ModifiedDT = true;
-              return true;
-            }
-          }
+    if (CmpI && CmpI->hasOneUse()) {
+      auto Op0 = CmpI->getOperand(0), Op1 = CmpI->getOperand(1);
+      bool Const0 = isa<ConstantInt>(Op0) || isa<ConstantFP>(Op0) ||
+                    isa<ConstantPointerNull>(Op0);
+      bool Const1 = isa<ConstantInt>(Op1) || isa<ConstantFP>(Op1) ||
+                    isa<ConstantPointerNull>(Op1);
+      if (Const0 || Const1) {
+        if (!Const0 || !Const1) {
+          auto *F = new FreezeInst(Const0 ? Op1 : Op0, "", CmpI);
+          F->takeName(FI);
+          CmpI->setOperand(Const0 ? 1 : 0, F);
         }
+        FI->replaceAllUsesWith(CmpI);
+        FI->eraseFromParent();
+        return true;
       }
     }
     return false;
+  }
+
+  if (tryToSinkFreeOperands(I))
+    return true;
+
+  switch (I->getOpcode()) {
+  case Instruction::Shl:
+  case Instruction::LShr:
+  case Instruction::AShr:
+    return optimizeShiftInst(cast<BinaryOperator>(I));
+  case Instruction::Call:
+    return optimizeCallInst(cast<CallInst>(I), ModifiedDT);
+  case Instruction::Select:
+    return optimizeSelectInst(cast<SelectInst>(I));
+  case Instruction::ShuffleVector:
+    return optimizeShuffleVectorInst(cast<ShuffleVectorInst>(I));
+  case Instruction::Switch:
+    return optimizeSwitchInst(cast<SwitchInst>(I));
+  case Instruction::ExtractElement:
+    return optimizeExtractElementInst(cast<ExtractElementInst>(I));
+  case Instruction::Br:
+    return optimizeBranch(cast<BranchInst>(I), *TLI);
   }
 
   return false;
 }
 
+/// Given an OR instruction, check to see if this is a bitreverse
+/// idiom. If so, insert the new intrinsic and return true.
+bool CodeGenPrepare::makeBitReverse(Instruction &I) {
+  if (!I.getType()->isIntegerTy() ||
+      !TLI->isOperationLegalOrCustom(ISD::BITREVERSE,
+                                     TLI->getValueType(*DL, I.getType(), true)))
+    return false;
+
+  SmallVector<Instruction*, 4> Insts;
+  if (!recognizeBSwapOrBitReverseIdiom(&I, false, true, Insts))
+    return false;
+  Instruction *LastInst = Insts.back();
+  I.replaceAllUsesWith(LastInst);
+  RecursivelyDeleteTriviallyDeadInstructions(
+      &I, TLInfo, nullptr, [&](Value *V) { removeAllAssertingVHReferences(V); });
+  return true;
+}
+
 // In this pass we look for GEP and cast instructions that are used
 // across basic blocks and rewrite them to improve basic-block-at-a-time
 // selection.
-bool CodeGenPrepare::OptimizeBlock(BasicBlock &BB, bool& ModifiedDT) {
+bool CodeGenPrepare::optimizeBlock(BasicBlock &BB, bool &ModifiedDT) {
   SunkAddrs.clear();
   bool MadeChange = false;
 
   CurInstIterator = BB.begin();
   while (CurInstIterator != BB.end()) {
-    MadeChange |= OptimizeInst(CurInstIterator++, ModifiedDT);
+    MadeChange |= optimizeInst(&*CurInstIterator++, ModifiedDT);
     if (ModifiedDT)
       return true;
   }
-  MadeChange |= DupRetToEnableTailCallOpts(&BB);
+
+  bool MadeBitReverse = true;
+  while (MadeBitReverse) {
+    MadeBitReverse = false;
+    for (auto &I : reverse(BB)) {
+      if (makeBitReverse(I)) {
+        MadeBitReverse = MadeChange = true;
+        break;
+      }
+    }
+  }
+  MadeChange |= dupRetToEnableTailCallOpts(&BB, ModifiedDT);
 
   return MadeChange;
 }
 
-// llvm.dbg.value is far away from the value then iSel may not be able
-// handle it properly. iSel will drop llvm.dbg.value if it can not
-// find a node corresponding to the value.
-bool CodeGenPrepare::PlaceDbgValues(Function &F) {
-  bool MadeChange = false;
-  for (BasicBlock &BB : F) {
-    Instruction *PrevNonDbgInst = nullptr;
-    for (BasicBlock::iterator BI = BB.begin(), BE = BB.end(); BI != BE;) {
-      Instruction *Insn = BI++;
-      DbgValueInst *DVI = dyn_cast<DbgValueInst>(Insn);
-      // Leave dbg.values that refer to an alloca alone. These
-      // instrinsics describe the address of a variable (= the alloca)
-      // being taken.  They should not be moved next to the alloca
-      // (and to the beginning of the scope), but rather stay close to
-      // where said address is used.
-      if (!DVI || (DVI->getValue() && isa<AllocaInst>(DVI->getValue()))) {
-        PrevNonDbgInst = Insn;
-        continue;
-      }
+// Some CGP optimizations may move or alter what's computed in a block. Check
+// whether a dbg.value intrinsic could be pointed at a more appropriate operand.
+bool CodeGenPrepare::fixupDbgValue(Instruction *I) {
+  assert(isa<DbgValueInst>(I));
+  DbgValueInst &DVI = *cast<DbgValueInst>(I);
 
-      Instruction *VI = dyn_cast_or_null<Instruction>(DVI->getValue());
-      if (VI && VI != PrevNonDbgInst && !VI->isTerminator()) {
-        DEBUG(dbgs() << "Moving Debug Value before :\n" << *DVI << ' ' << *VI);
+  // Does this dbg.value refer to a sunk address calculation?
+  bool AnyChange = false;
+  for (Value *Location : DVI.getValues()) {
+    WeakTrackingVH SunkAddrVH = SunkAddrs[Location];
+    Value *SunkAddr = SunkAddrVH.pointsToAliveValue() ? SunkAddrVH : nullptr;
+    if (SunkAddr) {
+      // Point dbg.value at locally computed address, which should give the best
+      // opportunity to be accurately lowered. This update may change the type
+      // of pointer being referred to; however this makes no difference to
+      // debugging information, and we can't generate bitcasts that may affect
+      // codegen.
+      DVI.replaceVariableLocationOp(Location, SunkAddr);
+      AnyChange = true;
+    }
+  }
+  return AnyChange;
+}
+
+// A llvm.dbg.value may be using a value before its definition, due to
+// optimizations in this pass and others. Scan for such dbg.values, and rescue
+// them by moving the dbg.value to immediately after the value definition.
+// FIXME: Ideally this should never be necessary, and this has the potential
+// to re-order dbg.value intrinsics.
+bool CodeGenPrepare::placeDbgValues(Function &F) {
+  bool MadeChange = false;
+  DominatorTree DT(F);
+
+  for (BasicBlock &BB : F) {
+    for (BasicBlock::iterator BI = BB.begin(), BE = BB.end(); BI != BE;) {
+      Instruction *Insn = &*BI++;
+      DbgValueInst *DVI = dyn_cast<DbgValueInst>(Insn);
+      if (!DVI)
+        continue;
+
+      SmallVector<Instruction *, 4> VIs;
+      for (Value *V : DVI->getValues())
+        if (Instruction *VI = dyn_cast_or_null<Instruction>(V))
+          VIs.push_back(VI);
+
+      // This DVI may depend on multiple instructions, complicating any
+      // potential sink. This block takes the defensive approach, opting to
+      // "undef" the DVI if it has more than one instruction and any of them do
+      // not dominate DVI.
+      for (Instruction *VI : VIs) {
+        if (VI->isTerminator())
+          continue;
+
+        // If VI is a phi in a block with an EHPad terminator, we can't insert
+        // after it.
+        if (isa<PHINode>(VI) && VI->getParent()->getTerminator()->isEHPad())
+          continue;
+
+        // If the defining instruction dominates the dbg.value, we do not need
+        // to move the dbg.value.
+        if (DT.dominates(VI, DVI))
+          continue;
+
+        // If we depend on multiple instructions and any of them doesn't
+        // dominate this DVI, we probably can't salvage it: moving it to
+        // after any of the instructions could cause us to lose the others.
+        if (VIs.size() > 1) {
+          LLVM_DEBUG(
+              dbgs()
+              << "Unable to find valid location for Debug Value, undefing:\n"
+              << *DVI);
+          DVI->setUndef();
+          break;
+        }
+
+        LLVM_DEBUG(dbgs() << "Moving Debug Value before :\n"
+                          << *DVI << ' ' << *VI);
         DVI->removeFromParent();
         if (isa<PHINode>(VI))
-          DVI->insertBefore(VI->getParent()->getFirstInsertionPt());
+          DVI->insertBefore(&*VI->getParent()->getFirstInsertionPt());
         else
           DVI->insertAfter(VI);
         MadeChange = true;
@@ -4348,105 +8054,37 @@ bool CodeGenPrepare::PlaceDbgValues(Function &F) {
   return MadeChange;
 }
 
-// If there is a sequence that branches based on comparing a single bit
-// against zero that can be combined into a single instruction, and the
-// target supports folding these into a single instruction, sink the
-// mask and compare into the branch uses. Do this before OptimizeBlock ->
-// OptimizeInst -> OptimizeCmpExpression, which perturbs the pattern being
-// searched for.
-bool CodeGenPrepare::sinkAndCmp(Function &F) {
-  if (!EnableAndCmpSinking)
-    return false;
-  if (!TLI || !TLI->isMaskAndBranchFoldingLegal())
-    return false;
+// Group scattered pseudo probes in a block to favor SelectionDAG. Scattered
+// probes can be chained dependencies of other regular DAG nodes and block DAG
+// combine optimizations.
+bool CodeGenPrepare::placePseudoProbes(Function &F) {
   bool MadeChange = false;
-  for (Function::iterator I = F.begin(), E = F.end(); I != E; ) {
-    BasicBlock *BB = I++;
-
-    // Does this BB end with the following?
-    //   %andVal = and %val, #single-bit-set
-    //   %icmpVal = icmp %andResult, 0
-    //   br i1 %cmpVal label %dest1, label %dest2"
-    BranchInst *Brcc = dyn_cast<BranchInst>(BB->getTerminator());
-    if (!Brcc || !Brcc->isConditional())
-      continue;
-    ICmpInst *Cmp = dyn_cast<ICmpInst>(Brcc->getOperand(0));
-    if (!Cmp || Cmp->getParent() != BB)
-      continue;
-    ConstantInt *Zero = dyn_cast<ConstantInt>(Cmp->getOperand(1));
-    if (!Zero || !Zero->isZero())
-      continue;
-    Instruction *And = dyn_cast<Instruction>(Cmp->getOperand(0));
-    if (!And || And->getOpcode() != Instruction::And || And->getParent() != BB)
-      continue;
-    ConstantInt* Mask = dyn_cast<ConstantInt>(And->getOperand(1));
-    if (!Mask || !Mask->getUniqueInteger().isPowerOf2())
-      continue;
-    DEBUG(dbgs() << "found and; icmp ?,0; brcc\n"); DEBUG(BB->dump());
-
-    // Push the "and; icmp" for any users that are conditional branches.
-    // Since there can only be one branch use per BB, we don't need to keep
-    // track of which BBs we insert into.
-    for (Value::use_iterator UI = Cmp->use_begin(), E = Cmp->use_end();
-         UI != E; ) {
-      Use &TheUse = *UI;
-      // Find brcc use.
-      BranchInst *BrccUser = dyn_cast<BranchInst>(*UI);
-      ++UI;
-      if (!BrccUser || !BrccUser->isConditional())
-        continue;
-      BasicBlock *UserBB = BrccUser->getParent();
-      if (UserBB == BB) continue;
-      DEBUG(dbgs() << "found Brcc use\n");
-
-      // Sink the "and; icmp" to use.
-      MadeChange = true;
-      BinaryOperator *NewAnd =
-        BinaryOperator::CreateAnd(And->getOperand(0), And->getOperand(1), "",
-                                  BrccUser);
-      CmpInst *NewCmp =
-        CmpInst::Create(Cmp->getOpcode(), Cmp->getPredicate(), NewAnd, Zero,
-                        "", BrccUser);
-      TheUse = NewCmp;
-      ++NumAndCmpsMoved;
-      DEBUG(BrccUser->getParent()->dump());
+  for (auto &Block : F) {
+    // Move the rest probes to the beginning of the block.
+    auto FirstInst = Block.getFirstInsertionPt();
+    while (FirstInst != Block.end() && FirstInst->isDebugOrPseudoInst())
+      ++FirstInst;
+    BasicBlock::iterator I(FirstInst);
+    I++;
+    while (I != Block.end()) {
+      if (auto *II = dyn_cast<PseudoProbeInst>(I++)) {
+        II->moveBefore(&*FirstInst);
+        MadeChange = true;
+      }
     }
   }
   return MadeChange;
 }
 
-/// \brief Retrieve the probabilities of a conditional branch. Returns true on
-/// success, or returns false if no or invalid metadata was found.
-static bool extractBranchMetadata(BranchInst *BI,
-                                  uint64_t &ProbTrue, uint64_t &ProbFalse) {
-  assert(BI->isConditional() &&
-         "Looking for probabilities on unconditional branch?");
-  auto *ProfileData = BI->getMetadata(LLVMContext::MD_prof);
-  if (!ProfileData || ProfileData->getNumOperands() != 3)
-    return false;
-
-  const auto *CITrue =
-      mdconst::dyn_extract<ConstantInt>(ProfileData->getOperand(1));
-  const auto *CIFalse =
-      mdconst::dyn_extract<ConstantInt>(ProfileData->getOperand(2));
-  if (!CITrue || !CIFalse)
-    return false;
-
-  ProbTrue = CITrue->getValue().getZExtValue();
-  ProbFalse = CIFalse->getValue().getZExtValue();
-
-  return true;
-}
-
-/// \brief Scale down both weights to fit into uint32_t.
+/// Scale down both weights to fit into uint32_t.
 static void scaleWeights(uint64_t &NewTrue, uint64_t &NewFalse) {
   uint64_t NewMax = (NewTrue > NewFalse) ? NewTrue : NewFalse;
-  uint32_t Scale = (NewMax / UINT32_MAX) + 1;
+  uint32_t Scale = (NewMax / std::numeric_limits<uint32_t>::max()) + 1;
   NewTrue = NewTrue / Scale;
   NewFalse = NewFalse / Scale;
 }
 
-/// \brief Some targets prefer to split a conditional branch like:
+/// Some targets prefer to split a conditional branch like:
 /// \code
 ///   %0 = icmp ne i32 %a, 0
 ///   %1 = icmp ne i32 %b, 0
@@ -4468,9 +8106,8 @@ static void scaleWeights(uint64_t &NewTrue, uint64_t &NewFalse) {
 ///
 /// FIXME: Remove the (equivalent?) implementation in SelectionDAG.
 ///
-bool CodeGenPrepare::splitBranchCondition(Function &F) {
-  if (!TM || TM->Options.EnableFastISel != true ||
-      !TLI || TLI->isJumpExpensive())
+bool CodeGenPrepare::splitBranchCondition(Function &F, bool &ModifiedDT) {
+  if (!TM->Options.EnableFastISel || TLI->isJumpExpensive())
     return false;
 
   bool MadeChange = false;
@@ -4480,43 +8117,54 @@ bool CodeGenPrepare::splitBranchCondition(Function &F) {
     //   %cond2 = icmp|fcmp|binary instruction ...
     //   %cond.or = or|and i1 %cond1, cond2
     //   br i1 %cond.or label %dest1, label %dest2"
-    BinaryOperator *LogicOp;
+    Instruction *LogicOp;
     BasicBlock *TBB, *FBB;
-    if (!match(BB.getTerminator(), m_Br(m_OneUse(m_BinOp(LogicOp)), TBB, FBB)))
+    if (!match(BB.getTerminator(),
+               m_Br(m_OneUse(m_Instruction(LogicOp)), TBB, FBB)))
+      continue;
+
+    auto *Br1 = cast<BranchInst>(BB.getTerminator());
+    if (Br1->getMetadata(LLVMContext::MD_unpredictable))
+      continue;
+
+    // The merging of mostly empty BB can cause a degenerate branch.
+    if (TBB == FBB)
       continue;
 
     unsigned Opc;
     Value *Cond1, *Cond2;
-    if (match(LogicOp, m_And(m_OneUse(m_Value(Cond1)),
-                             m_OneUse(m_Value(Cond2)))))
+    if (match(LogicOp,
+              m_LogicalAnd(m_OneUse(m_Value(Cond1)), m_OneUse(m_Value(Cond2)))))
       Opc = Instruction::And;
-    else if (match(LogicOp, m_Or(m_OneUse(m_Value(Cond1)),
-                                 m_OneUse(m_Value(Cond2)))))
+    else if (match(LogicOp, m_LogicalOr(m_OneUse(m_Value(Cond1)),
+                                        m_OneUse(m_Value(Cond2)))))
       Opc = Instruction::Or;
     else
       continue;
 
-    if (!match(Cond1, m_CombineOr(m_Cmp(), m_BinOp())) ||
-        !match(Cond2, m_CombineOr(m_Cmp(), m_BinOp()))   )
+    auto IsGoodCond = [](Value *Cond) {
+      return match(
+          Cond,
+          m_CombineOr(m_Cmp(), m_CombineOr(m_LogicalAnd(m_Value(), m_Value()),
+                                           m_LogicalOr(m_Value(), m_Value()))));
+    };
+    if (!IsGoodCond(Cond1) || !IsGoodCond(Cond2))
       continue;
 
-    DEBUG(dbgs() << "Before branch condition splitting\n"; BB.dump());
+    LLVM_DEBUG(dbgs() << "Before branch condition splitting\n"; BB.dump());
 
     // Create a new BB.
-    auto *InsertBefore = std::next(Function::iterator(BB))
-        .getNodePtrUnchecked();
-    auto TmpBB = BasicBlock::Create(BB.getContext(),
-                                    BB.getName() + ".cond.split",
-                                    BB.getParent(), InsertBefore);
+    auto *TmpBB =
+        BasicBlock::Create(BB.getContext(), BB.getName() + ".cond.split",
+                           BB.getParent(), BB.getNextNode());
 
     // Update original basic block by using the first condition directly by the
     // branch instruction and removing the no longer needed and/or instruction.
-    auto *Br1 = cast<BranchInst>(BB.getTerminator());
     Br1->setCondition(Cond1);
     LogicOp->eraseFromParent();
 
-    // Depending on the conditon we have to either replace the true or the false
-    // successor of the original branch instruction.
+    // Depending on the condition we have to either replace the true or the
+    // false successor of the original branch instruction.
     if (Opc == Instruction::And)
       Br1->setSuccessor(0, TmpBB);
     else
@@ -4530,34 +8178,24 @@ bool CodeGenPrepare::splitBranchCondition(Function &F) {
     }
 
     // Update PHI nodes in both successors. The original BB needs to be
-    // replaced in one succesor's PHI nodes, because the branch comes now from
+    // replaced in one successor's PHI nodes, because the branch comes now from
     // the newly generated BB (NewBB). In the other successor we need to add one
     // incoming edge to the PHI nodes, because both branch instructions target
     // now the same successor. Depending on the original branch condition
     // (and/or) we have to swap the successors (TrueDest, FalseDest), so that
-    // we perfrom the correct update for the PHI nodes.
+    // we perform the correct update for the PHI nodes.
     // This doesn't change the successor order of the just created branch
     // instruction (or any other instruction).
     if (Opc == Instruction::Or)
       std::swap(TBB, FBB);
 
     // Replace the old BB with the new BB.
-    for (auto &I : *TBB) {
-      PHINode *PN = dyn_cast<PHINode>(&I);
-      if (!PN)
-        break;
-      int i;
-      while ((i = PN->getBasicBlockIndex(&BB)) >= 0)
-        PN->setIncomingBlock(i, TmpBB);
-    }
+    TBB->replacePhiUsesWith(&BB, TmpBB);
 
     // Add another incoming edge form the new BB.
-    for (auto &I : *FBB) {
-      PHINode *PN = dyn_cast<PHINode>(&I);
-      if (!PN)
-        break;
-      auto *Val = PN->getIncomingValueForBlock(&BB);
-      PN->addIncoming(Val, TmpBB);
+    for (PHINode &PN : FBB->phis()) {
+      auto *Val = PN.getIncomingValueForBlock(&BB);
+      PN.addIncoming(Val, TmpBB);
     }
 
     // Update the branch weights (from SelectionDAGBuilder::
@@ -4575,15 +8213,15 @@ bool CodeGenPrepare::splitBranchCondition(Function &F) {
       // We have flexibility in setting Prob for BB1 and Prob for NewBB.
       // The requirement is that
       //   TrueProb for BB1 + (FalseProb for BB1 * TrueProb for TmpBB)
-      //     = TrueProb for orignal BB.
-      // Assuming the orignal weights are A and B, one choice is to set BB1's
+      //     = TrueProb for original BB.
+      // Assuming the original weights are A and B, one choice is to set BB1's
       // weights to A and A+2B, and set TmpBB's weights to A and 2B. This choice
       // assumes that
       //   TrueProb for BB1 == FalseProb for BB1 * TrueProb for TmpBB.
       // Another choice is to assume TrueProb for BB1 equals to TrueProb for
       // TmpBB, but the math is more complicated.
       uint64_t TrueWeight, FalseWeight;
-      if (extractBranchMetadata(Br1, TrueWeight, FalseWeight)) {
+      if (Br1->extractProfMetadata(TrueWeight, FalseWeight)) {
         uint64_t NewTrueWeight = TrueWeight;
         uint64_t NewFalseWeight = TrueWeight + 2 * FalseWeight;
         scaleWeights(NewTrueWeight, NewFalseWeight);
@@ -4610,13 +8248,13 @@ bool CodeGenPrepare::splitBranchCondition(Function &F) {
       // We have flexibility in setting Prob for BB1 and Prob for TmpBB.
       // The requirement is that
       //   FalseProb for BB1 + (TrueProb for BB1 * FalseProb for TmpBB)
-      //     = FalseProb for orignal BB.
-      // Assuming the orignal weights are A and B, one choice is to set BB1's
+      //     = FalseProb for original BB.
+      // Assuming the original weights are A and B, one choice is to set BB1's
       // weights to 2A+B and B, and set TmpBB's weights to 2A and B. This choice
       // assumes that
       //   FalseProb for BB1 == TrueProb for BB1 * FalseProb for TmpBB.
       uint64_t TrueWeight, FalseWeight;
-      if (extractBranchMetadata(Br1, TrueWeight, FalseWeight)) {
+      if (Br1->extractProfMetadata(TrueWeight, FalseWeight)) {
         uint64_t NewTrueWeight = 2 * TrueWeight + FalseWeight;
         uint64_t NewFalseWeight = FalseWeight;
         scaleWeights(NewTrueWeight, NewFalseWeight);
@@ -4631,16 +8269,11 @@ bool CodeGenPrepare::splitBranchCondition(Function &F) {
       }
     }
 
-    // Request DOM Tree update.
-    // Note: No point in getting fancy here, since the DT info is never
-    // available to CodeGenPrepare and the existing update code is broken
-    // anyways.
     ModifiedDT = true;
-
     MadeChange = true;
 
-    DEBUG(dbgs() << "After branch condition splitting\n"; BB.dump();
-          TmpBB->dump());
+    LLVM_DEBUG(dbgs() << "After branch condition splitting\n"; BB.dump();
+               TmpBB->dump());
   }
   return MadeChange;
 }

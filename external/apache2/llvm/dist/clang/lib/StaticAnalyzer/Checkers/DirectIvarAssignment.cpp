@@ -1,9 +1,8 @@
 //=- DirectIvarAssignment.cpp - Check rules on ObjC properties -*- C++ ----*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -21,7 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/StmtVisitor.h"
@@ -41,13 +40,12 @@ namespace {
 /// Checks for the init, dealloc, and any other functions that might be allowed
 /// to perform direct instance variable assignment based on their name.
 static bool DefaultMethodFilter(const ObjCMethodDecl *M) {
-  if (M->getMethodFamily() == OMF_init || M->getMethodFamily() == OMF_dealloc ||
-      M->getMethodFamily() == OMF_copy ||
-      M->getMethodFamily() == OMF_mutableCopy ||
-      M->getSelector().getNameForSlot(0).find("init") != StringRef::npos ||
-      M->getSelector().getNameForSlot(0).find("Init") != StringRef::npos)
-    return true;
-  return false;
+  return M->getMethodFamily() == OMF_init ||
+         M->getMethodFamily() == OMF_dealloc ||
+         M->getMethodFamily() == OMF_copy ||
+         M->getMethodFamily() == OMF_mutableCopy ||
+         M->getSelector().getNameForSlot(0).find("init") != StringRef::npos ||
+         M->getSelector().getNameForSlot(0).find("Init") != StringRef::npos;
 }
 
 class DirectIvarAssignment :
@@ -78,9 +76,9 @@ class DirectIvarAssignment :
     void VisitBinaryOperator(const BinaryOperator *BO);
 
     void VisitChildren(const Stmt *S) {
-      for (Stmt::const_child_range I = S->children(); I; ++I)
-        if (*I)
-         this->Visit(*I);
+      for (const Stmt *Child : S->children())
+        if (Child)
+          this->Visit(Child);
     }
   };
 
@@ -124,7 +122,7 @@ void DirectIvarAssignment::checkASTDecl(const ObjCImplementationDecl *D,
   IvarToPropertyMapTy IvarToPropMap;
 
   // Find all properties for this class.
-  for (const auto *PD : InterD->properties()) {
+  for (const auto *PD : InterD->instance_properties()) {
     // Find the corresponding IVar.
     const ObjCIvarDecl *ID = findPropertyBackingIvar(PD, InterD,
                                                      Mgr.getASTContext());
@@ -146,6 +144,8 @@ void DirectIvarAssignment::checkASTDecl(const ObjCImplementationDecl *D,
       continue;
 
     const Stmt *Body = M->getBody();
+    if (M->isSynthesizedAccessorStub())
+      continue;
     assert(Body);
 
     MethodCrawler MC(IvarToPropMap, M->getCanonicalDecl(), InterD, BR, this,
@@ -207,12 +207,6 @@ void DirectIvarAssignment::MethodCrawler::VisitBinaryOperator(
 }
 }
 
-// Register the checker that checks for direct accesses in all functions,
-// except for the initialization and copy routines.
-void ento::registerDirectIvarAssignment(CheckerManager &mgr) {
-  mgr.registerChecker<DirectIvarAssignment>();
-}
-
 // Register the checker that checks for direct accesses in functions annotated
 // with __attribute__((annotate("objc_no_direct_instance_variable_assignment"))).
 static bool AttrFilter(const ObjCMethodDecl *M) {
@@ -222,7 +216,15 @@ static bool AttrFilter(const ObjCMethodDecl *M) {
   return true;
 }
 
-void ento::registerDirectIvarAssignmentForAnnotatedFunctions(
-    CheckerManager &mgr) {
-  mgr.registerChecker<DirectIvarAssignment>()->ShouldSkipMethod = &AttrFilter;
+// Register the checker that checks for direct accesses in all functions,
+// except for the initialization and copy routines.
+void ento::registerDirectIvarAssignment(CheckerManager &mgr) {
+  auto Chk = mgr.registerChecker<DirectIvarAssignment>();
+  if (mgr.getAnalyzerOptions().getCheckerBooleanOption(Chk,
+                                                       "AnnotatedFunctions"))
+    Chk->ShouldSkipMethod = &AttrFilter;
+}
+
+bool ento::shouldRegisterDirectIvarAssignment(const CheckerManager &mgr) {
+  return true;
 }

@@ -1,9 +1,8 @@
 //===-- llvm/Support/CodeGen.h - CodeGen Concepts ---------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,22 +14,26 @@
 #ifndef LLVM_SUPPORT_CODEGEN_H
 #define LLVM_SUPPORT_CODEGEN_H
 
-#include "llvm-c/TargetMachine.h"
-#include "llvm/Support/ErrorHandling.h"
-
 namespace llvm {
 
   // Relocation model types.
   namespace Reloc {
-    enum Model { Default, Static, PIC_, DynamicNoPIC };
+    // Cannot be named PIC due to collision with -DPIC
+    enum Model { Static, PIC_, DynamicNoPIC, ROPI, RWPI, ROPI_RWPI };
   }
 
   // Code model types.
   namespace CodeModel {
-    enum Model { Default, JITDefault, Small, Kernel, Medium, Large };
+    // Sync changes with CodeGenCWrappers.h.
+    enum Model { Tiny, Small, Kernel, Medium, Large };
   }
 
   namespace PICLevel {
+    // This is used to map -fpic/-fPIC.
+    enum Level { NotPIC=0, SmallPIC=1, BigPIC=2 };
+  }
+
+  namespace PIELevel {
     enum Level { Default=0, Small=1, Large=2 };
   }
 
@@ -47,49 +50,25 @@ namespace llvm {
   // Code generation optimization level.
   namespace CodeGenOpt {
     enum Level {
-      None,        // -O0
-      Less,        // -O1
-      Default,     // -O2, -Os
-      Aggressive   // -O3
+      None = 0,      // -O0
+      Less = 1,      // -O1
+      Default = 2,   // -O2, -Os
+      Aggressive = 3 // -O3
     };
   }
 
-  // Create wrappers for C Binding types (see CBindingWrapping.h).
-  inline CodeModel::Model unwrap(LLVMCodeModel Model) {
-    switch (Model) {
-      case LLVMCodeModelDefault:
-        return CodeModel::Default;
-      case LLVMCodeModelJITDefault:
-        return CodeModel::JITDefault;
-      case LLVMCodeModelSmall:
-        return CodeModel::Small;
-      case LLVMCodeModelKernel:
-        return CodeModel::Kernel;
-      case LLVMCodeModelMedium:
-        return CodeModel::Medium;
-      case LLVMCodeModelLarge:
-        return CodeModel::Large;
-    }
-    return CodeModel::Default;
-  }
+  /// These enums are meant to be passed into addPassesToEmitFile to indicate
+  /// what type of file to emit, and returned by it to indicate what type of
+  /// file could actually be made.
+  enum CodeGenFileType {
+    CGFT_AssemblyFile,
+    CGFT_ObjectFile,
+    CGFT_Null         // Do not emit any output.
+  };
 
-  inline LLVMCodeModel wrap(CodeModel::Model Model) {
-    switch (Model) {
-      case CodeModel::Default:
-        return LLVMCodeModelDefault;
-      case CodeModel::JITDefault:
-        return LLVMCodeModelJITDefault;
-      case CodeModel::Small:
-        return LLVMCodeModelSmall;
-      case CodeModel::Kernel:
-        return LLVMCodeModelKernel;
-      case CodeModel::Medium:
-        return LLVMCodeModelMedium;
-      case CodeModel::Large:
-        return LLVMCodeModelLarge;
-    }
-    llvm_unreachable("Bad CodeModel!");
-  }
+  // Specify what functions should keep the frame pointer.
+  enum class FramePointerKind { None, NonLeaf, All };
+
 }  // end llvm namespace
 
 #endif

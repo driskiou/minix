@@ -1,9 +1,8 @@
 //=- AnalysisBasedWarnings.cpp - Sema warnings based on libAnalysis -*- C++ -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -25,25 +24,22 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
+#include "clang/Analysis/Analyses/CalledOnceCheck.h"
 #include "clang/Analysis/Analyses/Consumed.h"
 #include "clang/Analysis/Analyses/ReachableCode.h"
 #include "clang/Analysis/Analyses/ThreadSafety.h"
 #include "clang/Analysis/Analyses/UninitializedValues.h"
-#include "clang/Analysis/AnalysisContext.h"
+#include "clang/Analysis/AnalysisDeclContext.h"
 #include "clang/Analysis/CFG.h"
 #include "clang/Analysis/CFGStmtMap.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Lex/Lexer.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaInternal.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
-#include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/ImmutableMap.h"
 #include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -51,7 +47,6 @@
 #include <algorithm>
 #include <deque>
 #include <iterator>
-#include <vector>
 
 using namespace clang;
 
@@ -62,6 +57,8 @@ using namespace clang;
 namespace {
   class UnreachableCodeHandler : public reachable_code::Callback {
     Sema &S;
+    SourceRange PreviousSilenceableCondVal;
+
   public:
     UnreachableCodeHandler(Sema &s) : S(s) {}
 
@@ -70,6 +67,14 @@ namespace {
                            SourceRange SilenceableCondVal,
                            SourceRange R1,
                            SourceRange R2) override {
+      // Avoid reporting multiple unreachable code diagnostics that are
+      // triggered by the same conditional value.
+      if (PreviousSilenceableCondVal.isValid() &&
+          SilenceableCondVal.isValid() &&
+          PreviousSilenceableCondVal == SilenceableCondVal)
+        return;
+      PreviousSilenceableCondVal = SilenceableCondVal;
+
       unsigned diag = diag::warn_unreachable;
       switch (UK) {
         case reachable_code::UK_Break:
@@ -86,7 +91,7 @@ namespace {
       }
 
       S.Diag(L, diag) << R1 << R2;
-      
+
       SourceLocation Open = SilenceableCondVal.getBegin();
       if (Open.isValid()) {
         SourceLocation Close = SilenceableCondVal.getEnd();
@@ -99,7 +104,7 @@ namespace {
       }
     }
   };
-}
+} // anonymous namespace
 
 /// CheckUnreachable - Check for unreachable code.
 static void CheckUnreachable(Sema &S, AnalysisDeclContext &AC) {
@@ -110,14 +115,15 @@ static void CheckUnreachable(Sema &S, AnalysisDeclContext &AC) {
   //
   // Note that this is also a performance optimization.  Analyzing
   // headers many times can be expensive.
-  if (!S.getSourceManager().isInMainFile(AC.getDecl()->getLocStart()))
+  if (!S.getSourceManager().isInMainFile(AC.getDecl()->getBeginLoc()))
     return;
 
   UnreachableCodeHandler UC(S);
   reachable_code::FindUnreachableCode(AC, S.getPreprocessor(), UC);
 }
 
-/// \brief Warn on logical operator errors in CFGBuilder
+namespace {
+/// Warn on logical operator errors in CFGBuilder
 class LogicalErrorHandler : public CFGCallback {
   Sema &S;
 
@@ -129,16 +135,15 @@ public:
       return true;
 
     // Recurse to children.
-    for (ConstStmtRange SubStmts = E->children(); SubStmts; ++SubStmts)
-      if (*SubStmts)
-        if (const Expr *SubExpr = dyn_cast<Expr>(*SubStmts))
-          if (HasMacroID(SubExpr))
-            return true;
+    for (const Stmt *SubStmt : E->children())
+      if (const Expr *SubExpr = dyn_cast_or_null<Expr>(SubStmt))
+        if (HasMacroID(SubExpr))
+          return true;
 
     return false;
   }
 
-  void compareAlwaysTrue(const BinaryOperator *B, bool isAlwaysTrue) {
+  void compareAlwaysTrue(const BinaryOperator *B, bool isAlwaysTrue) override {
     if (HasMacroID(B))
       return;
 
@@ -147,7 +152,8 @@ public:
         << DiagRange << isAlwaysTrue;
   }
 
-  void compareBitwiseEquality(const BinaryOperator *B, bool isAlwaysTrue) {
+  void compareBitwiseEquality(const BinaryOperator *B,
+                              bool isAlwaysTrue) override {
     if (HasMacroID(B))
       return;
 
@@ -155,83 +161,99 @@ public:
     S.Diag(B->getExprLoc(), diag::warn_comparison_bitwise_always)
         << DiagRange << isAlwaysTrue;
   }
-};
 
+  void compareBitwiseOr(const BinaryOperator *B) override {
+    if (HasMacroID(B))
+      return;
+
+    SourceRange DiagRange = B->getSourceRange();
+    S.Diag(B->getExprLoc(), diag::warn_comparison_bitwise_or) << DiagRange;
+  }
+
+  static bool hasActiveDiagnostics(DiagnosticsEngine &Diags,
+                                   SourceLocation Loc) {
+    return !Diags.isIgnored(diag::warn_tautological_overlap_comparison, Loc) ||
+           !Diags.isIgnored(diag::warn_comparison_bitwise_or, Loc);
+  }
+};
+} // anonymous namespace
 
 //===----------------------------------------------------------------------===//
 // Check for infinite self-recursion in functions
 //===----------------------------------------------------------------------===//
 
-// All blocks are in one of three states.  States are ordered so that blocks
-// can only move to higher states.
-enum RecursiveState {
-  FoundNoPath,
-  FoundPath,
-  FoundPathWithNoRecursiveCall
-};
+// Returns true if the function is called anywhere within the CFGBlock.
+// For member functions, the additional condition of being call from the
+// this pointer is required.
+static bool hasRecursiveCallInPath(const FunctionDecl *FD, CFGBlock &Block) {
+  // Process all the Stmt's in this block to find any calls to FD.
+  for (const auto &B : Block) {
+    if (B.getKind() != CFGElement::Statement)
+      continue;
 
-static void checkForFunctionCall(Sema &S, const FunctionDecl *FD,
-                                 CFGBlock &Block, unsigned ExitID,
-                                 llvm::SmallVectorImpl<RecursiveState> &States,
-                                 RecursiveState State) {
-  unsigned ID = Block.getBlockID();
+    const CallExpr *CE = dyn_cast<CallExpr>(B.getAs<CFGStmt>()->getStmt());
+    if (!CE || !CE->getCalleeDecl() ||
+        CE->getCalleeDecl()->getCanonicalDecl() != FD)
+      continue;
 
-  // A block's state can only move to a higher state.
-  if (States[ID] >= State)
-    return;
-
-  States[ID] = State;
-
-  // Found a path to the exit node without a recursive call.
-  if (ID == ExitID && State == FoundPathWithNoRecursiveCall)
-    return;
-
-  if (State == FoundPathWithNoRecursiveCall) {
-    // If the current state is FoundPathWithNoRecursiveCall, the successors
-    // will be either FoundPathWithNoRecursiveCall or FoundPath.  To determine
-    // which, process all the Stmt's in this block to find any recursive calls.
-    for (const auto &B : Block) {
-      if (B.getKind() != CFGElement::Statement)
-        continue;
-
-      const CallExpr *CE = dyn_cast<CallExpr>(B.getAs<CFGStmt>()->getStmt());
-      if (CE && CE->getCalleeDecl() &&
-          CE->getCalleeDecl()->getCanonicalDecl() == FD) {
-
-        // Skip function calls which are qualified with a templated class.
-        if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(
-                CE->getCallee()->IgnoreParenImpCasts())) {
-          if (NestedNameSpecifier *NNS = DRE->getQualifier()) {
-            if (NNS->getKind() == NestedNameSpecifier::TypeSpec &&
-                isa<TemplateSpecializationType>(NNS->getAsType())) {
-               continue;
-            }
-          }
-        }
-
-        if (const CXXMemberCallExpr *MCE = dyn_cast<CXXMemberCallExpr>(CE)) {
-          if (isa<CXXThisExpr>(MCE->getImplicitObjectArgument()) ||
-              !MCE->getMethodDecl()->isVirtual()) {
-            State = FoundPath;
-            break;
-          }
-        } else {
-          State = FoundPath;
-          break;
+    // Skip function calls which are qualified with a templated class.
+    if (const DeclRefExpr *DRE =
+            dyn_cast<DeclRefExpr>(CE->getCallee()->IgnoreParenImpCasts())) {
+      if (NestedNameSpecifier *NNS = DRE->getQualifier()) {
+        if (NNS->getKind() == NestedNameSpecifier::TypeSpec &&
+            isa<TemplateSpecializationType>(NNS->getAsType())) {
+          continue;
         }
       }
     }
-  }
 
-  for (CFGBlock::succ_iterator I = Block.succ_begin(), E = Block.succ_end();
-       I != E; ++I)
-    if (*I)
-      checkForFunctionCall(S, FD, **I, ExitID, States, State);
+    const CXXMemberCallExpr *MCE = dyn_cast<CXXMemberCallExpr>(CE);
+    if (!MCE || isa<CXXThisExpr>(MCE->getImplicitObjectArgument()) ||
+        !MCE->getMethodDecl()->isVirtual())
+      return true;
+  }
+  return false;
+}
+
+// Returns true if every path from the entry block passes through a call to FD.
+static bool checkForRecursiveFunctionCall(const FunctionDecl *FD, CFG *cfg) {
+  llvm::SmallPtrSet<CFGBlock *, 16> Visited;
+  llvm::SmallVector<CFGBlock *, 16> WorkList;
+  // Keep track of whether we found at least one recursive path.
+  bool foundRecursion = false;
+
+  const unsigned ExitID = cfg->getExit().getBlockID();
+
+  // Seed the work list with the entry block.
+  WorkList.push_back(&cfg->getEntry());
+
+  while (!WorkList.empty()) {
+    CFGBlock *Block = WorkList.pop_back_val();
+
+    for (auto I = Block->succ_begin(), E = Block->succ_end(); I != E; ++I) {
+      if (CFGBlock *SuccBlock = *I) {
+        if (!Visited.insert(SuccBlock).second)
+          continue;
+
+        // Found a path to the exit node without a recursive call.
+        if (ExitID == SuccBlock->getBlockID())
+          return false;
+
+        // If the successor block contains a recursive call, end analysis there.
+        if (hasRecursiveCallInPath(FD, *SuccBlock)) {
+          foundRecursion = true;
+          continue;
+        }
+
+        WorkList.push_back(SuccBlock);
+      }
+    }
+  }
+  return foundRecursion;
 }
 
 static void checkRecursiveFunction(Sema &S, const FunctionDecl *FD,
-                                   const Stmt *Body,
-                                   AnalysisDeclContext &AC) {
+                                   const Stmt *Body, AnalysisDeclContext &AC) {
   FD = FD->getCanonicalDecl();
 
   // Only run on non-templated functions and non-templated members of
@@ -247,16 +269,110 @@ static void checkRecursiveFunction(Sema &S, const FunctionDecl *FD,
   if (cfg->getExit().pred_empty())
     return;
 
-  // Mark all nodes as FoundNoPath, then begin processing the entry block.
-  llvm::SmallVector<RecursiveState, 16> states(cfg->getNumBlockIDs(),
-                                               FoundNoPath);
-  checkForFunctionCall(S, FD, cfg->getEntry(), cfg->getExit().getBlockID(),
-                       states, FoundPathWithNoRecursiveCall);
+  // Emit diagnostic if a recursive function call is detected for all paths.
+  if (checkForRecursiveFunctionCall(FD, cfg))
+    S.Diag(Body->getBeginLoc(), diag::warn_infinite_recursive_function);
+}
 
-  // Check that the exit block is reachable.  This prevents triggering the
-  // warning on functions that do not terminate.
-  if (states[cfg->getExit().getBlockID()] == FoundPath)
-    S.Diag(Body->getLocStart(), diag::warn_infinite_recursive_function);
+//===----------------------------------------------------------------------===//
+// Check for throw in a non-throwing function.
+//===----------------------------------------------------------------------===//
+
+/// Determine whether an exception thrown by E, unwinding from ThrowBlock,
+/// can reach ExitBlock.
+static bool throwEscapes(Sema &S, const CXXThrowExpr *E, CFGBlock &ThrowBlock,
+                         CFG *Body) {
+  SmallVector<CFGBlock *, 16> Stack;
+  llvm::BitVector Queued(Body->getNumBlockIDs());
+
+  Stack.push_back(&ThrowBlock);
+  Queued[ThrowBlock.getBlockID()] = true;
+
+  while (!Stack.empty()) {
+    CFGBlock &UnwindBlock = *Stack.back();
+    Stack.pop_back();
+
+    for (auto &Succ : UnwindBlock.succs()) {
+      if (!Succ.isReachable() || Queued[Succ->getBlockID()])
+        continue;
+
+      if (Succ->getBlockID() == Body->getExit().getBlockID())
+        return true;
+
+      if (auto *Catch =
+              dyn_cast_or_null<CXXCatchStmt>(Succ->getLabel())) {
+        QualType Caught = Catch->getCaughtType();
+        if (Caught.isNull() || // catch (...) catches everything
+            !E->getSubExpr() || // throw; is considered cuaght by any handler
+            S.handlerCanCatch(Caught, E->getSubExpr()->getType()))
+          // Exception doesn't escape via this path.
+          break;
+      } else {
+        Stack.push_back(Succ);
+        Queued[Succ->getBlockID()] = true;
+      }
+    }
+  }
+
+  return false;
+}
+
+static void visitReachableThrows(
+    CFG *BodyCFG,
+    llvm::function_ref<void(const CXXThrowExpr *, CFGBlock &)> Visit) {
+  llvm::BitVector Reachable(BodyCFG->getNumBlockIDs());
+  clang::reachable_code::ScanReachableFromBlock(&BodyCFG->getEntry(), Reachable);
+  for (CFGBlock *B : *BodyCFG) {
+    if (!Reachable[B->getBlockID()])
+      continue;
+    for (CFGElement &E : *B) {
+      Optional<CFGStmt> S = E.getAs<CFGStmt>();
+      if (!S)
+        continue;
+      if (auto *Throw = dyn_cast<CXXThrowExpr>(S->getStmt()))
+        Visit(Throw, *B);
+    }
+  }
+}
+
+static void EmitDiagForCXXThrowInNonThrowingFunc(Sema &S, SourceLocation OpLoc,
+                                                 const FunctionDecl *FD) {
+  if (!S.getSourceManager().isInSystemHeader(OpLoc) &&
+      FD->getTypeSourceInfo()) {
+    S.Diag(OpLoc, diag::warn_throw_in_noexcept_func) << FD;
+    if (S.getLangOpts().CPlusPlus11 &&
+        (isa<CXXDestructorDecl>(FD) ||
+         FD->getDeclName().getCXXOverloadedOperator() == OO_Delete ||
+         FD->getDeclName().getCXXOverloadedOperator() == OO_Array_Delete)) {
+      if (const auto *Ty = FD->getTypeSourceInfo()->getType()->
+                                         getAs<FunctionProtoType>())
+        S.Diag(FD->getLocation(), diag::note_throw_in_dtor)
+            << !isa<CXXDestructorDecl>(FD) << !Ty->hasExceptionSpec()
+            << FD->getExceptionSpecSourceRange();
+    } else
+      S.Diag(FD->getLocation(), diag::note_throw_in_function)
+          << FD->getExceptionSpecSourceRange();
+  }
+}
+
+static void checkThrowInNonThrowingFunc(Sema &S, const FunctionDecl *FD,
+                                        AnalysisDeclContext &AC) {
+  CFG *BodyCFG = AC.getCFG();
+  if (!BodyCFG)
+    return;
+  if (BodyCFG->getExit().pred_empty())
+    return;
+  visitReachableThrows(BodyCFG, [&](const CXXThrowExpr *Throw, CFGBlock &Block) {
+    if (throwEscapes(S, Throw, Block, BodyCFG))
+      EmitDiagForCXXThrowInNonThrowingFunc(S, Throw->getThrowLoc(), FD);
+  });
+}
+
+static bool isNoexcept(const FunctionDecl *FD) {
+  const auto *FPT = FD->getType()->castAs<FunctionProtoType>();
+  if (FPT->isNothrow() || FD->hasAttr<NoThrowAttr>())
+    return true;
+  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -298,7 +414,8 @@ static ControlFlowKind CheckFallThrough(AnalysisDeclContext &AC) {
     for (const auto *B : *cfg) {
       if (!live[B->getBlockID()]) {
         if (B->pred_begin() == B->pred_end()) {
-          if (B->getTerminator() && isa<CXXTryStmt>(B->getTerminator()))
+          const Stmt *Term = B->getTerminatorStmt();
+          if (Term && isa<CXXTryStmt>(Term))
             // When not adding EH edges from calls, catch clauses
             // can otherwise seem dead.  Avoid noting them as dead.
             count += reachable_code::ScanReachableFromBlock(B, live);
@@ -320,9 +437,10 @@ static ControlFlowKind CheckFallThrough(AnalysisDeclContext &AC) {
   CFGBlock::FilterOptions FO;
   FO.IgnoreDefaultsWithCoveredEnums = 1;
 
-  for (CFGBlock::filtered_pred_iterator
-	 I = cfg->getExit().filtered_pred_start_end(FO); I.hasMore(); ++I) {
-    const CFGBlock& B = **I;
+  for (CFGBlock::filtered_pred_iterator I =
+           cfg->getExit().filtered_pred_start_end(FO);
+       I.hasMore(); ++I) {
+    const CFGBlock &B = **I;
     if (!live[B.getBlockID()])
       continue;
 
@@ -345,7 +463,8 @@ static ControlFlowKind CheckFallThrough(AnalysisDeclContext &AC) {
 
     // No more CFGElements in the block?
     if (ri == re) {
-      if (B.getTerminator() && isa<CXXTryStmt>(B.getTerminator())) {
+      const Stmt *Term = B.getTerminatorStmt();
+      if (Term && isa<CXXTryStmt>(Term)) {
         HasAbnormalEdge = true;
         continue;
       }
@@ -356,7 +475,7 @@ static ControlFlowKind CheckFallThrough(AnalysisDeclContext &AC) {
 
     CFGStmt CS = ri->castAs<CFGStmt>();
     const Stmt *S = CS.getStmt();
-    if (isa<ReturnStmt>(S)) {
+    if (isa<ReturnStmt>(S) || isa<CoreturnStmt>(S)) {
       HasLiveReturn = true;
       continue;
     }
@@ -407,7 +526,7 @@ struct CheckFallThroughDiagnostics {
   unsigned diag_AlwaysFallThrough_HasNoReturn;
   unsigned diag_AlwaysFallThrough_ReturnsNonVoid;
   unsigned diag_NeverFallThroughOrReturn;
-  enum { Function, Block, Lambda } funMode;
+  enum { Function, Block, Lambda, Coroutine } funMode;
   SourceLocation FuncLoc;
 
   static CheckFallThroughDiagnostics MakeForFunction(const Decl *Func) {
@@ -427,19 +546,32 @@ struct CheckFallThroughDiagnostics {
     bool isVirtualMethod = false;
     if (const CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(Func))
       isVirtualMethod = Method->isVirtual();
-    
+
     // Don't suggest that template instantiations be marked "noreturn"
     bool isTemplateInstantiation = false;
     if (const FunctionDecl *Function = dyn_cast<FunctionDecl>(Func))
       isTemplateInstantiation = Function->isTemplateInstantiation();
-        
+
     if (!isVirtualMethod && !isTemplateInstantiation)
       D.diag_NeverFallThroughOrReturn =
         diag::warn_suggest_noreturn_function;
     else
       D.diag_NeverFallThroughOrReturn = 0;
-    
+
     D.funMode = Function;
+    return D;
+  }
+
+  static CheckFallThroughDiagnostics MakeForCoroutine(const Decl *Func) {
+    CheckFallThroughDiagnostics D;
+    D.FuncLoc = Func->getLocation();
+    D.diag_MaybeFallThrough_HasNoReturn = 0;
+    D.diag_MaybeFallThrough_ReturnsNonVoid =
+        diag::warn_maybe_falloff_nonvoid_coroutine;
+    D.diag_AlwaysFallThrough_HasNoReturn = 0;
+    D.diag_AlwaysFallThrough_ReturnsNonVoid =
+        diag::warn_falloff_nonvoid_coroutine;
+    D.funMode = Coroutine;
     return D;
   }
 
@@ -485,38 +617,48 @@ struct CheckFallThroughDiagnostics {
              (!ReturnsVoid ||
               D.isIgnored(diag::warn_suggest_noreturn_block, FuncLoc));
     }
-
+    if (funMode == Coroutine) {
+      return (ReturnsVoid ||
+              D.isIgnored(diag::warn_maybe_falloff_nonvoid_function, FuncLoc) ||
+              D.isIgnored(diag::warn_maybe_falloff_nonvoid_coroutine,
+                          FuncLoc)) &&
+             (!HasNoReturn);
+    }
     // For blocks / lambdas.
     return ReturnsVoid && !HasNoReturn;
   }
 };
 
-}
+} // anonymous namespace
 
-/// CheckFallThroughForFunctionDef - Check that we don't fall off the end of a
+/// CheckFallThroughForBody - Check that we don't fall off the end of a
 /// function that should return a value.  Check that we don't fall off the end
 /// of a noreturn function.  We assume that functions and blocks not marked
 /// noreturn will return.
 static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
-                                    const BlockExpr *blkExpr,
-                                    const CheckFallThroughDiagnostics& CD,
-                                    AnalysisDeclContext &AC) {
+                                    QualType BlockType,
+                                    const CheckFallThroughDiagnostics &CD,
+                                    AnalysisDeclContext &AC,
+                                    sema::FunctionScopeInfo *FSI) {
 
   bool ReturnsVoid = false;
   bool HasNoReturn = false;
+  bool IsCoroutine = FSI->isCoroutine();
 
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
-    ReturnsVoid = FD->getReturnType()->isVoidType();
+  if (const auto *FD = dyn_cast<FunctionDecl>(D)) {
+    if (const auto *CBody = dyn_cast<CoroutineBodyStmt>(Body))
+      ReturnsVoid = CBody->getFallthroughHandler() != nullptr;
+    else
+      ReturnsVoid = FD->getReturnType()->isVoidType();
     HasNoReturn = FD->isNoReturn();
   }
-  else if (const ObjCMethodDecl *MD = dyn_cast<ObjCMethodDecl>(D)) {
+  else if (const auto *MD = dyn_cast<ObjCMethodDecl>(D)) {
     ReturnsVoid = MD->getReturnType()->isVoidType();
     HasNoReturn = MD->hasAttr<NoReturnAttr>();
   }
   else if (isa<BlockDecl>(D)) {
-    QualType BlockTy = blkExpr->getType();
     if (const FunctionType *FT =
-          BlockTy->getPointeeType()->getAs<FunctionType>()) {
+          BlockType->getPointeeType()->getAs<FunctionType>()) {
       if (FT->getReturnType()->isVoidType())
         ReturnsVoid = true;
       if (FT->getNoReturnAttr())
@@ -529,8 +671,18 @@ static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
   // Short circuit for compilation speed.
   if (CD.checkDiagnostics(Diags, ReturnsVoid, HasNoReturn))
       return;
+  SourceLocation LBrace = Body->getBeginLoc(), RBrace = Body->getEndLoc();
+  auto EmitDiag = [&](SourceLocation Loc, unsigned DiagID) {
+    if (IsCoroutine)
+      S.Diag(Loc, DiagID) << FSI->CoroutinePromise->getType();
+    else
+      S.Diag(Loc, DiagID);
+  };
 
-  SourceLocation LBrace = Body->getLocStart(), RBrace = Body->getLocEnd();
+  // cpu_dispatch functions permit empty function bodies for ICC compatibility.
+  if (D->getAsFunction() && D->getAsFunction()->isCPUDispatchMultiVersion())
+    return;
+
   // Either in a function body compound statement, or a function-try-block.
   switch (CheckFallThrough(AC)) {
     case UnknownFallThrough:
@@ -538,15 +690,15 @@ static void CheckFallThroughForBody(Sema &S, const Decl *D, const Stmt *Body,
 
     case MaybeFallThrough:
       if (HasNoReturn)
-        S.Diag(RBrace, CD.diag_MaybeFallThrough_HasNoReturn);
+        EmitDiag(RBrace, CD.diag_MaybeFallThrough_HasNoReturn);
       else if (!ReturnsVoid)
-        S.Diag(RBrace, CD.diag_MaybeFallThrough_ReturnsNonVoid);
+        EmitDiag(RBrace, CD.diag_MaybeFallThrough_ReturnsNonVoid);
       break;
     case AlwaysFallThrough:
       if (HasNoReturn)
-        S.Diag(RBrace, CD.diag_AlwaysFallThrough_HasNoReturn);
+        EmitDiag(RBrace, CD.diag_AlwaysFallThrough_HasNoReturn);
       else if (!ReturnsVoid)
-        S.Diag(RBrace, CD.diag_AlwaysFallThrough_ReturnsNonVoid);
+        EmitDiag(RBrace, CD.diag_AlwaysFallThrough_ReturnsNonVoid);
       break;
     case NeverFallThroughOrReturn:
       if (ReturnsVoid && !HasNoReturn && CD.diag_NeverFallThroughOrReturn) {
@@ -572,33 +724,34 @@ namespace {
 /// ContainsReference - A visitor class to search for references to
 /// a particular declaration (the needle) within any evaluated component of an
 /// expression (recursively).
-class ContainsReference : public EvaluatedExprVisitor<ContainsReference> {
+class ContainsReference : public ConstEvaluatedExprVisitor<ContainsReference> {
   bool FoundReference;
   const DeclRefExpr *Needle;
 
 public:
-  ContainsReference(ASTContext &Context, const DeclRefExpr *Needle)
-    : EvaluatedExprVisitor<ContainsReference>(Context),
-      FoundReference(false), Needle(Needle) {}
+  typedef ConstEvaluatedExprVisitor<ContainsReference> Inherited;
 
-  void VisitExpr(Expr *E) {
+  ContainsReference(ASTContext &Context, const DeclRefExpr *Needle)
+    : Inherited(Context), FoundReference(false), Needle(Needle) {}
+
+  void VisitExpr(const Expr *E) {
     // Stop evaluating if we already have a reference.
     if (FoundReference)
       return;
 
-    EvaluatedExprVisitor<ContainsReference>::VisitExpr(E);
+    Inherited::VisitExpr(E);
   }
 
-  void VisitDeclRefExpr(DeclRefExpr *E) {
+  void VisitDeclRefExpr(const DeclRefExpr *E) {
     if (E == Needle)
       FoundReference = true;
     else
-      EvaluatedExprVisitor<ContainsReference>::VisitDeclRefExpr(E);
+      Inherited::VisitDeclRefExpr(E);
   }
 
   bool doesContainReference() const { return FoundReference; }
 };
-}
+} // anonymous namespace
 
 static bool SuggestInitializationFixit(Sema &S, const VarDecl *VD) {
   QualType VariableTy = VD->getType().getCanonicalType();
@@ -615,10 +768,10 @@ static bool SuggestInitializationFixit(Sema &S, const VarDecl *VD) {
     return false;
 
   // Don't suggest a fixit inside macros.
-  if (VD->getLocEnd().isMacroID())
+  if (VD->getEndLoc().isMacroID())
     return false;
 
-  SourceLocation Loc = S.getLocForEndOfToken(VD->getLocEnd());
+  SourceLocation Loc = S.getLocForEndOfToken(VD->getEndLoc());
 
   // Suggest possible initialization (if any).
   std::string Init = S.getFixItZeroInitializerForType(VariableTy, Loc);
@@ -638,20 +791,17 @@ static void CreateIfFixit(Sema &S, const Stmt *If, const Stmt *Then,
   if (CondVal) {
     // If condition is always true, remove all but the 'then'.
     Fixit1 = FixItHint::CreateRemoval(
-        CharSourceRange::getCharRange(If->getLocStart(),
-                                      Then->getLocStart()));
+        CharSourceRange::getCharRange(If->getBeginLoc(), Then->getBeginLoc()));
     if (Else) {
-      SourceLocation ElseKwLoc = Lexer::getLocForEndOfToken(
-          Then->getLocEnd(), 0, S.getSourceManager(), S.getLangOpts());
-      Fixit2 = FixItHint::CreateRemoval(
-          SourceRange(ElseKwLoc, Else->getLocEnd()));
+      SourceLocation ElseKwLoc = S.getLocForEndOfToken(Then->getEndLoc());
+      Fixit2 =
+          FixItHint::CreateRemoval(SourceRange(ElseKwLoc, Else->getEndLoc()));
     }
   } else {
     // If condition is always false, remove all but the 'else'.
     if (Else)
-      Fixit1 = FixItHint::CreateRemoval(
-          CharSourceRange::getCharRange(If->getLocStart(),
-                                        Else->getLocStart()));
+      Fixit1 = FixItHint::CreateRemoval(CharSourceRange::getCharRange(
+          If->getBeginLoc(), Else->getBeginLoc()));
     else
       Fixit1 = FixItHint::CreateRemoval(If->getSourceRange());
   }
@@ -665,7 +815,7 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
 
   switch (Use.getKind()) {
   case UninitUse::Always:
-    S.Diag(Use.getUser()->getLocStart(), diag::warn_uninit_var)
+    S.Diag(Use.getUser()->getBeginLoc(), diag::warn_uninit_var)
         << VD->getDeclName() << IsCapturedByBlock
         << Use.getUser()->getSourceRange();
     return;
@@ -677,8 +827,8 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
       << (Use.getKind() == UninitUse::AfterDecl ? 4 : 5)
       << const_cast<DeclContext*>(VD->getLexicalDeclContext())
       << VD->getSourceRange();
-    S.Diag(Use.getUser()->getLocStart(), diag::note_uninit_var_use)
-      << IsCapturedByBlock << Use.getUser()->getSourceRange();
+    S.Diag(Use.getUser()->getBeginLoc(), diag::note_uninit_var_use)
+        << IsCapturedByBlock << Use.getUser()->getSourceRange();
     return;
 
   case UninitUse::Maybe:
@@ -748,8 +898,8 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
       if ((BO->getOpcode() == BO_LAnd && I->Output) ||
           (BO->getOpcode() == BO_LOr && !I->Output))
         // true && y -> y, false || y -> y.
-        Fixit1 = FixItHint::CreateRemoval(SourceRange(BO->getLocStart(),
-                                                      BO->getOperatorLoc()));
+        Fixit1 = FixItHint::CreateRemoval(
+            SourceRange(BO->getBeginLoc(), BO->getOperatorLoc()));
       else
         // false && y -> false, true || y -> true.
         Fixit1 = FixItHint::CreateReplacement(BO->getSourceRange(), FixitStr);
@@ -811,8 +961,8 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
     S.Diag(Range.getBegin(), diag::warn_sometimes_uninit_var)
       << VD->getDeclName() << IsCapturedByBlock << DiagKind
       << Str << I->Output << Range;
-    S.Diag(User->getLocStart(), diag::note_uninit_var_use)
-      << IsCapturedByBlock << User->getSourceRange();
+    S.Diag(User->getBeginLoc(), diag::note_uninit_var_use)
+        << IsCapturedByBlock << User->getSourceRange();
     if (RemoveDiagKind != -1)
       S.Diag(Fixit1.RemoveRange.getBegin(), diag::note_uninit_fixit_remove_cond)
         << RemoveDiagKind << Str << I->Output << Fixit1 << Fixit2;
@@ -821,9 +971,17 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
   }
 
   if (!Diagnosed)
-    S.Diag(Use.getUser()->getLocStart(), diag::warn_maybe_uninit_var)
+    S.Diag(Use.getUser()->getBeginLoc(), diag::warn_maybe_uninit_var)
         << VD->getDeclName() << IsCapturedByBlock
         << Use.getUser()->getSourceRange();
+}
+
+/// Diagnose uninitialized const reference usages.
+static bool DiagnoseUninitializedConstRefUse(Sema &S, const VarDecl *VD,
+                                             const UninitUse &Use) {
+  S.Diag(Use.getUser()->getBeginLoc(), diag::warn_uninit_const_reference)
+      << VD->getDeclName() << Use.getUser()->getSourceRange();
+  return true;
 }
 
 /// DiagnoseUninitializedUse -- Helper function for diagnosing uses of an
@@ -834,7 +992,6 @@ static void DiagUninitUse(Sema &S, const VarDecl *VD, const UninitUse &Use,
 static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
                                      const UninitUse &Use,
                                      bool alwaysReportSelfInit = false) {
-
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Use.getUser())) {
     // Inspect the initializer of the variable declaration which is
     // being referenced prior to its initialization. We emit
@@ -852,11 +1009,10 @@ static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
         return false;
 
       ContainsReference CR(S.Context, DRE);
-      CR.Visit(const_cast<Expr*>(Initializer));
+      CR.Visit(Initializer);
       if (CR.doesContainReference()) {
-        S.Diag(DRE->getLocStart(),
-               diag::warn_uninit_self_reference_in_init)
-          << VD->getDeclName() << VD->getLocation() << DRE->getSourceRange();
+        S.Diag(DRE->getBeginLoc(), diag::warn_uninit_self_reference_in_init)
+            << VD->getDeclName() << VD->getLocation() << DRE->getSourceRange();
         return true;
       }
     }
@@ -865,9 +1021,10 @@ static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
   } else {
     const BlockExpr *BE = cast<BlockExpr>(Use.getUser());
     if (VD->getType()->isBlockPointerType() && !VD->hasAttr<BlocksAttr>())
-      S.Diag(BE->getLocStart(),
+      S.Diag(BE->getBeginLoc(),
              diag::warn_uninit_byref_blockvar_captured_by_block)
-        << VD->getDeclName();
+          << VD->getDeclName()
+          << VD->getType().getQualifiers().hasObjCLifetime();
     else
       DiagUninitUse(S, VD, Use, true);
   }
@@ -876,8 +1033,8 @@ static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
   // the initializer of that declaration & we didn't already suggest
   // an initialization fixit.
   if (!SuggestInitializationFixit(S, VD))
-    S.Diag(VD->getLocStart(), diag::note_uninit_var_def)
-      << VD->getDeclName();
+    S.Diag(VD->getBeginLoc(), diag::note_var_declared_here)
+        << VD->getDeclName();
 
   return true;
 }
@@ -932,7 +1089,8 @@ namespace {
       }
     }
 
-    bool checkFallThroughIntoBlock(const CFGBlock &B, int &AnnotatedCnt) {
+    bool checkFallThroughIntoBlock(const CFGBlock &B, int &AnnotatedCnt,
+                                   bool IsTemplateInstantiation) {
       assert(!ReachableBlocks.empty() && "ReachableBlocks empty");
 
       int UnannotatedCnt = 0;
@@ -944,7 +1102,7 @@ namespace {
         BlockQueue.pop_front();
         if (!P) continue;
 
-        const Stmt *Term = P->getTerminator();
+        const Stmt *Term = P->getTerminatorStmt();
         if (Term && isa<SwitchStmt>(Term))
           continue; // Switch statement, good.
 
@@ -962,8 +1120,12 @@ namespace {
                ElemIt != ElemEnd; ++ElemIt) {
             if (Optional<CFGStmt> CS = ElemIt->getAs<CFGStmt>()) {
               if (const AttributedStmt *AS = asFallThroughAttr(CS->getStmt())) {
-                S.Diag(AS->getLocStart(),
-                       diag::warn_fallthrough_attr_unreachable);
+                // Don't issue a warning for an unreachable fallthrough
+                // attribute in template instantiations as it may not be
+                // unreachable in all instantiations of the template.
+                if (!IsTemplateInstantiation)
+                  S.Diag(AS->getBeginLoc(),
+                         diag::warn_fallthrough_attr_unreachable);
                 markFallthroughVisited(AS);
                 ++AnnotatedCnt;
                 break;
@@ -1020,7 +1182,12 @@ namespace {
     bool TraverseDecl(Decl *D) { return true; }
 
     // We analyze lambda bodies separately. Skip them here.
-    bool TraverseLambdaBody(LambdaExpr *LE) { return true; }
+    bool TraverseLambdaExpr(LambdaExpr *LE) {
+      // Traverse the captures, but not the body.
+      for (const auto C : zip(LE->captures(), LE->capture_inits()))
+        TraverseLambdaCapture(LE, &std::get<0>(C), std::get<1>(C));
+      return true;
+    }
 
   private:
 
@@ -1033,7 +1200,7 @@ namespace {
     }
 
     static const Stmt *getLastStmt(const CFGBlock &B) {
-      if (const Stmt *Term = B.getTerminator())
+      if (const Stmt *Term = B.getTerminatorStmt())
         return Term;
       for (CFGBlock::const_reverse_iterator ElemIt = B.rbegin(),
                                             ElemEnd = B.rend();
@@ -1056,22 +1223,44 @@ namespace {
     Sema &S;
     llvm::SmallPtrSet<const CFGBlock *, 16> ReachableBlocks;
   };
+} // anonymous namespace
+
+static StringRef getFallthroughAttrSpelling(Preprocessor &PP,
+                                            SourceLocation Loc) {
+  TokenValue FallthroughTokens[] = {
+    tok::l_square, tok::l_square,
+    PP.getIdentifierInfo("fallthrough"),
+    tok::r_square, tok::r_square
+  };
+
+  TokenValue ClangFallthroughTokens[] = {
+    tok::l_square, tok::l_square, PP.getIdentifierInfo("clang"),
+    tok::coloncolon, PP.getIdentifierInfo("fallthrough"),
+    tok::r_square, tok::r_square
+  };
+
+  bool PreferClangAttr = !PP.getLangOpts().CPlusPlus17 && !PP.getLangOpts().C2x;
+
+  StringRef MacroName;
+  if (PreferClangAttr)
+    MacroName = PP.getLastMacroWithSpelling(Loc, ClangFallthroughTokens);
+  if (MacroName.empty())
+    MacroName = PP.getLastMacroWithSpelling(Loc, FallthroughTokens);
+  if (MacroName.empty() && !PreferClangAttr)
+    MacroName = PP.getLastMacroWithSpelling(Loc, ClangFallthroughTokens);
+  if (MacroName.empty()) {
+    if (!PreferClangAttr)
+      MacroName = "[[fallthrough]]";
+    else if (PP.getLangOpts().CPlusPlus)
+      MacroName = "[[clang::fallthrough]]";
+    else
+      MacroName = "__attribute__((fallthrough))";
+  }
+  return MacroName;
 }
 
 static void DiagnoseSwitchLabelsFallthrough(Sema &S, AnalysisDeclContext &AC,
                                             bool PerFunction) {
-  // Only perform this analysis when using C++11.  There is no good workflow
-  // for this warning when not using C++11.  There is no good way to silence
-  // the warning (no attribute is available) unless we are using C++11's support
-  // for generalized attributes.  Once could use pragmas to silence the warning,
-  // but as a general solution that is gross and not in the spirit of this
-  // warning.
-  //
-  // NOTE: This an intermediate solution.  There are on-going discussions on
-  // how to properly support this warning outside of C++11 with an annotation.
-  if (!AC.getASTContext().getLangOpts().CPlusPlus11)
-    return;
-
   FallthroughMapper FM(S);
   FM.TraverseStmt(AC.getBody());
 
@@ -1088,8 +1277,7 @@ static void DiagnoseSwitchLabelsFallthrough(Sema &S, AnalysisDeclContext &AC,
 
   FM.fillReachableBlocks(Cfg);
 
-  for (CFG::reverse_iterator I = Cfg->rbegin(), E = Cfg->rend(); I != E; ++I) {
-    const CFGBlock *B = *I;
+  for (const CFGBlock *B : llvm::reverse(*Cfg)) {
     const Stmt *Label = B->getLabel();
 
     if (!Label || !isa<SwitchCase>(Label))
@@ -1097,49 +1285,44 @@ static void DiagnoseSwitchLabelsFallthrough(Sema &S, AnalysisDeclContext &AC,
 
     int AnnotatedCnt;
 
-    if (!FM.checkFallThroughIntoBlock(*B, AnnotatedCnt))
+    bool IsTemplateInstantiation = false;
+    if (const FunctionDecl *Function = dyn_cast<FunctionDecl>(AC.getDecl()))
+      IsTemplateInstantiation = Function->isTemplateInstantiation();
+    if (!FM.checkFallThroughIntoBlock(*B, AnnotatedCnt,
+                                      IsTemplateInstantiation))
       continue;
 
-    S.Diag(Label->getLocStart(),
-        PerFunction ? diag::warn_unannotated_fallthrough_per_function
-                    : diag::warn_unannotated_fallthrough);
+    S.Diag(Label->getBeginLoc(),
+           PerFunction ? diag::warn_unannotated_fallthrough_per_function
+                       : diag::warn_unannotated_fallthrough);
 
     if (!AnnotatedCnt) {
-      SourceLocation L = Label->getLocStart();
+      SourceLocation L = Label->getBeginLoc();
       if (L.isMacroID())
         continue;
-      if (S.getLangOpts().CPlusPlus11) {
-        const Stmt *Term = B->getTerminator();
-        // Skip empty cases.
-        while (B->empty() && !Term && B->succ_size() == 1) {
-          B = *B->succ_begin();
-          Term = B->getTerminator();
-        }
-        if (!(B->empty() && Term && isa<BreakStmt>(Term))) {
-          Preprocessor &PP = S.getPreprocessor();
-          TokenValue Tokens[] = {
-            tok::l_square, tok::l_square, PP.getIdentifierInfo("clang"),
-            tok::coloncolon, PP.getIdentifierInfo("fallthrough"),
-            tok::r_square, tok::r_square
-          };
-          StringRef AnnotationSpelling = "[[clang::fallthrough]]";
-          StringRef MacroName = PP.getLastMacroWithSpelling(L, Tokens);
-          if (!MacroName.empty())
-            AnnotationSpelling = MacroName;
-          SmallString<64> TextToInsert(AnnotationSpelling);
-          TextToInsert += "; ";
-          S.Diag(L, diag::note_insert_fallthrough_fixit) <<
-              AnnotationSpelling <<
-              FixItHint::CreateInsertion(L, TextToInsert);
-        }
+
+      const Stmt *Term = B->getTerminatorStmt();
+      // Skip empty cases.
+      while (B->empty() && !Term && B->succ_size() == 1) {
+        B = *B->succ_begin();
+        Term = B->getTerminatorStmt();
       }
-      S.Diag(L, diag::note_insert_break_fixit) <<
-        FixItHint::CreateInsertion(L, "break; ");
+      if (!(B->empty() && Term && isa<BreakStmt>(Term))) {
+        Preprocessor &PP = S.getPreprocessor();
+        StringRef AnnotationSpelling = getFallthroughAttrSpelling(PP, L);
+        SmallString<64> TextToInsert(AnnotationSpelling);
+        TextToInsert += "; ";
+        S.Diag(L, diag::note_insert_fallthrough_fixit)
+            << AnnotationSpelling
+            << FixItHint::CreateInsertion(L, TextToInsert);
+      }
+      S.Diag(L, diag::note_insert_break_fixit)
+          << FixItHint::CreateInsertion(L, "break; ");
     }
   }
 
   for (const auto *F : FM.getFallthroughStmts())
-    S.Diag(F->getLocStart(), diag::warn_fallthrough_attr_invalid_placement);
+    S.Diag(F->getBeginLoc(), diag::err_fallthrough_attr_invalid_placement);
 }
 
 static bool isInLoop(const ASTContext &Ctx, const ParentMap &PM,
@@ -1154,11 +1337,10 @@ static bool isInLoop(const ASTContext &Ctx, const ParentMap &PM,
     case Stmt::ObjCForCollectionStmtClass:
       return true;
     case Stmt::DoStmtClass: {
-      const Expr *Cond = cast<DoStmt>(S)->getCond();
-      llvm::APSInt Val;
-      if (!Cond->EvaluateAsInt(Val, Ctx))
+      Expr::EvalResult Result;
+      if (!cast<DoStmt>(S)->getCond()->EvaluateAsInt(Result, Ctx))
         return true;
-      return Val.getBoolValue();
+      return Result.Val.getInt().getBoolValue();
     }
     default:
       break;
@@ -1167,7 +1349,6 @@ static bool isInLoop(const ASTContext &Ctx, const ParentMap &PM,
 
   return false;
 }
-
 
 static void diagnoseRepeatedUseOfWeak(Sema &S,
                                       const sema::FunctionScopeInfo *CurFn,
@@ -1237,11 +1418,11 @@ static void diagnoseRepeatedUseOfWeak(Sema &S,
 
   // Sort by first use so that we emit the warnings in a deterministic order.
   SourceManager &SM = S.getSourceManager();
-  std::sort(UsesByStmt.begin(), UsesByStmt.end(),
-            [&SM](const StmtUsesPair &LHS, const StmtUsesPair &RHS) {
-    return SM.isBeforeInTranslationUnit(LHS.first->getLocStart(),
-                                        RHS.first->getLocStart());
-  });
+  llvm::sort(UsesByStmt,
+             [&SM](const StmtUsesPair &LHS, const StmtUsesPair &RHS) {
+               return SM.isBeforeInTranslationUnit(LHS.first->getBeginLoc(),
+                                                   RHS.first->getBeginLoc());
+             });
 
   // Classify the current code body for better warning text.
   // This enum should stay in sync with the cases in
@@ -1291,128 +1472,38 @@ static void diagnoseRepeatedUseOfWeak(Sema &S,
       Ivar
     } ObjectKind;
 
-    const NamedDecl *D = Key.getProperty();
-    if (isa<VarDecl>(D))
+    const NamedDecl *KeyProp = Key.getProperty();
+    if (isa<VarDecl>(KeyProp))
       ObjectKind = Variable;
-    else if (isa<ObjCPropertyDecl>(D))
+    else if (isa<ObjCPropertyDecl>(KeyProp))
       ObjectKind = Property;
-    else if (isa<ObjCMethodDecl>(D))
+    else if (isa<ObjCMethodDecl>(KeyProp))
       ObjectKind = ImplicitProperty;
-    else if (isa<ObjCIvarDecl>(D))
+    else if (isa<ObjCIvarDecl>(KeyProp))
       ObjectKind = Ivar;
     else
       llvm_unreachable("Unexpected weak object kind!");
 
+    // Do not warn about IBOutlet weak property receivers being set to null
+    // since they are typically only used from the main thread.
+    if (const ObjCPropertyDecl *Prop = dyn_cast<ObjCPropertyDecl>(KeyProp))
+      if (Prop->hasAttr<IBOutletAttr>())
+        continue;
+
     // Show the first time the object was read.
-    S.Diag(FirstRead->getLocStart(), DiagKind)
-      << int(ObjectKind) << D << int(FunctionKind)
-      << FirstRead->getSourceRange();
+    S.Diag(FirstRead->getBeginLoc(), DiagKind)
+        << int(ObjectKind) << KeyProp << int(FunctionKind)
+        << FirstRead->getSourceRange();
 
     // Print all the other accesses as notes.
     for (const auto &Use : Uses) {
       if (Use.getUseExpr() == FirstRead)
         continue;
-      S.Diag(Use.getUseExpr()->getLocStart(),
+      S.Diag(Use.getUseExpr()->getBeginLoc(),
              diag::note_arc_weak_also_accessed_here)
           << Use.getUseExpr()->getSourceRange();
     }
   }
-}
-
-namespace {
-class UninitValsDiagReporter : public UninitVariablesHandler {
-  Sema &S;
-  typedef SmallVector<UninitUse, 2> UsesVec;
-  typedef llvm::PointerIntPair<UsesVec *, 1, bool> MappedType;
-  // Prefer using MapVector to DenseMap, so that iteration order will be
-  // the same as insertion order. This is needed to obtain a deterministic
-  // order of diagnostics when calling flushDiagnostics().
-  typedef llvm::MapVector<const VarDecl *, MappedType> UsesMap;
-  UsesMap *uses;
-  
-public:
-  UninitValsDiagReporter(Sema &S) : S(S), uses(nullptr) {}
-  ~UninitValsDiagReporter() { 
-    flushDiagnostics();
-  }
-
-  MappedType &getUses(const VarDecl *vd) {
-    if (!uses)
-      uses = new UsesMap();
-
-    MappedType &V = (*uses)[vd];
-    if (!V.getPointer())
-      V.setPointer(new UsesVec());
-    
-    return V;
-  }
-
-  void handleUseOfUninitVariable(const VarDecl *vd,
-                                 const UninitUse &use) override {
-    getUses(vd).getPointer()->push_back(use);
-  }
-  
-  void handleSelfInit(const VarDecl *vd) override {
-    getUses(vd).setInt(true);
-  }
-  
-  void flushDiagnostics() {
-    if (!uses)
-      return;
-
-    for (const auto &P : *uses) {
-      const VarDecl *vd = P.first;
-      const MappedType &V = P.second;
-
-      UsesVec *vec = V.getPointer();
-      bool hasSelfInit = V.getInt();
-
-      // Specially handle the case where we have uses of an uninitialized 
-      // variable, but the root cause is an idiomatic self-init.  We want
-      // to report the diagnostic at the self-init since that is the root cause.
-      if (!vec->empty() && hasSelfInit && hasAlwaysUninitializedUse(vec))
-        DiagnoseUninitializedUse(S, vd,
-                                 UninitUse(vd->getInit()->IgnoreParenCasts(),
-                                           /* isAlwaysUninit */ true),
-                                 /* alwaysReportSelfInit */ true);
-      else {
-        // Sort the uses by their SourceLocations.  While not strictly
-        // guaranteed to produce them in line/column order, this will provide
-        // a stable ordering.
-        std::sort(vec->begin(), vec->end(),
-                  [](const UninitUse &a, const UninitUse &b) {
-          // Prefer a more confident report over a less confident one.
-          if (a.getKind() != b.getKind())
-            return a.getKind() > b.getKind();
-          return a.getUser()->getLocStart() < b.getUser()->getLocStart();
-        });
-
-        for (const auto &U : *vec) {
-          // If we have self-init, downgrade all uses to 'may be uninitialized'.
-          UninitUse Use = hasSelfInit ? UninitUse(U.getUser(), false) : U;
-
-          if (DiagnoseUninitializedUse(S, vd, Use))
-            // Skip further diagnostics for this variable. We try to warn only
-            // on the first point at which a variable is used uninitialized.
-            break;
-        }
-      }
-      
-      // Release the uses vector.
-      delete vec;
-    }
-    delete uses;
-  }
-
-private:
-  static bool hasAlwaysUninitializedUse(const UsesVec* vec) {
-    return std::any_of(vec->begin(), vec->end(), [](const UninitUse &U) {
-      return U.getKind() == UninitUse::Always ||
-             U.getKind() == UninitUse::AfterCall ||
-             U.getKind() == UninitUse::AfterDecl;
-    });
-  }
-};
 }
 
 namespace clang {
@@ -1431,14 +1522,258 @@ struct SortDiagBySourceLocation {
     return SM.isBeforeInTranslationUnit(left.first.first, right.first.first);
   }
 };
-}}
+} // anonymous namespace
+} // namespace clang
+
+namespace {
+class UninitValsDiagReporter : public UninitVariablesHandler {
+  Sema &S;
+  typedef SmallVector<UninitUse, 2> UsesVec;
+  typedef llvm::PointerIntPair<UsesVec *, 1, bool> MappedType;
+  // Prefer using MapVector to DenseMap, so that iteration order will be
+  // the same as insertion order. This is needed to obtain a deterministic
+  // order of diagnostics when calling flushDiagnostics().
+  typedef llvm::MapVector<const VarDecl *, MappedType> UsesMap;
+  UsesMap uses;
+  UsesMap constRefUses;
+
+public:
+  UninitValsDiagReporter(Sema &S) : S(S) {}
+  ~UninitValsDiagReporter() override { flushDiagnostics(); }
+
+  MappedType &getUses(UsesMap &um, const VarDecl *vd) {
+    MappedType &V = um[vd];
+    if (!V.getPointer())
+      V.setPointer(new UsesVec());
+    return V;
+  }
+
+  void handleUseOfUninitVariable(const VarDecl *vd,
+                                 const UninitUse &use) override {
+    getUses(uses, vd).getPointer()->push_back(use);
+  }
+
+  void handleConstRefUseOfUninitVariable(const VarDecl *vd,
+                                         const UninitUse &use) override {
+    getUses(constRefUses, vd).getPointer()->push_back(use);
+  }
+
+  void handleSelfInit(const VarDecl *vd) override {
+    getUses(uses, vd).setInt(true);
+    getUses(constRefUses, vd).setInt(true);
+  }
+
+  void flushDiagnostics() {
+    for (const auto &P : uses) {
+      const VarDecl *vd = P.first;
+      const MappedType &V = P.second;
+
+      UsesVec *vec = V.getPointer();
+      bool hasSelfInit = V.getInt();
+
+      // Specially handle the case where we have uses of an uninitialized
+      // variable, but the root cause is an idiomatic self-init.  We want
+      // to report the diagnostic at the self-init since that is the root cause.
+      if (!vec->empty() && hasSelfInit && hasAlwaysUninitializedUse(vec))
+        DiagnoseUninitializedUse(S, vd,
+                                 UninitUse(vd->getInit()->IgnoreParenCasts(),
+                                           /* isAlwaysUninit */ true),
+                                 /* alwaysReportSelfInit */ true);
+      else {
+        // Sort the uses by their SourceLocations.  While not strictly
+        // guaranteed to produce them in line/column order, this will provide
+        // a stable ordering.
+        llvm::sort(vec->begin(), vec->end(),
+                   [](const UninitUse &a, const UninitUse &b) {
+          // Prefer a more confident report over a less confident one.
+          if (a.getKind() != b.getKind())
+            return a.getKind() > b.getKind();
+          return a.getUser()->getBeginLoc() < b.getUser()->getBeginLoc();
+        });
+
+        for (const auto &U : *vec) {
+          // If we have self-init, downgrade all uses to 'may be uninitialized'.
+          UninitUse Use = hasSelfInit ? UninitUse(U.getUser(), false) : U;
+
+          if (DiagnoseUninitializedUse(S, vd, Use))
+            // Skip further diagnostics for this variable. We try to warn only
+            // on the first point at which a variable is used uninitialized.
+            break;
+        }
+      }
+
+      // Release the uses vector.
+      delete vec;
+    }
+
+    uses.clear();
+
+    // Flush all const reference uses diags.
+    for (const auto &P : constRefUses) {
+      const VarDecl *vd = P.first;
+      const MappedType &V = P.second;
+
+      UsesVec *vec = V.getPointer();
+      bool hasSelfInit = V.getInt();
+
+      if (!vec->empty() && hasSelfInit && hasAlwaysUninitializedUse(vec))
+        DiagnoseUninitializedUse(S, vd,
+                                 UninitUse(vd->getInit()->IgnoreParenCasts(),
+                                           /* isAlwaysUninit */ true),
+                                 /* alwaysReportSelfInit */ true);
+      else {
+        for (const auto &U : *vec) {
+          if (DiagnoseUninitializedConstRefUse(S, vd, U))
+            break;
+        }
+      }
+
+      // Release the uses vector.
+      delete vec;
+    }
+
+    constRefUses.clear();
+  }
+
+private:
+  static bool hasAlwaysUninitializedUse(const UsesVec* vec) {
+    return std::any_of(vec->begin(), vec->end(), [](const UninitUse &U) {
+      return U.getKind() == UninitUse::Always ||
+             U.getKind() == UninitUse::AfterCall ||
+             U.getKind() == UninitUse::AfterDecl;
+    });
+  }
+};
+
+/// Inter-procedural data for the called-once checker.
+class CalledOnceInterProceduralData {
+public:
+  // Add the delayed warning for the given block.
+  void addDelayedWarning(const BlockDecl *Block,
+                         PartialDiagnosticAt &&Warning) {
+    DelayedBlockWarnings[Block].emplace_back(std::move(Warning));
+  }
+  // Report all of the warnings we've gathered for the given block.
+  void flushWarnings(const BlockDecl *Block, Sema &S) {
+    for (const PartialDiagnosticAt &Delayed : DelayedBlockWarnings[Block])
+      S.Diag(Delayed.first, Delayed.second);
+
+    discardWarnings(Block);
+  }
+  // Discard all of the warnings we've gathered for the given block.
+  void discardWarnings(const BlockDecl *Block) {
+    DelayedBlockWarnings.erase(Block);
+  }
+
+private:
+  using DelayedDiagnostics = SmallVector<PartialDiagnosticAt, 2>;
+  llvm::DenseMap<const BlockDecl *, DelayedDiagnostics> DelayedBlockWarnings;
+};
+
+class CalledOnceCheckReporter : public CalledOnceCheckHandler {
+public:
+  CalledOnceCheckReporter(Sema &S, CalledOnceInterProceduralData &Data)
+      : S(S), Data(Data) {}
+  void handleDoubleCall(const ParmVarDecl *Parameter, const Expr *Call,
+                        const Expr *PrevCall, bool IsCompletionHandler,
+                        bool Poised) override {
+    auto DiagToReport = IsCompletionHandler
+                            ? diag::warn_completion_handler_called_twice
+                            : diag::warn_called_once_gets_called_twice;
+    S.Diag(Call->getBeginLoc(), DiagToReport) << Parameter;
+    S.Diag(PrevCall->getBeginLoc(), diag::note_called_once_gets_called_twice)
+        << Poised;
+  }
+
+  void handleNeverCalled(const ParmVarDecl *Parameter,
+                         bool IsCompletionHandler) override {
+    auto DiagToReport = IsCompletionHandler
+                            ? diag::warn_completion_handler_never_called
+                            : diag::warn_called_once_never_called;
+    S.Diag(Parameter->getBeginLoc(), DiagToReport)
+        << Parameter << /* Captured */ false;
+  }
+
+  void handleNeverCalled(const ParmVarDecl *Parameter, const Decl *Function,
+                         const Stmt *Where, NeverCalledReason Reason,
+                         bool IsCalledDirectly,
+                         bool IsCompletionHandler) override {
+    auto DiagToReport = IsCompletionHandler
+                            ? diag::warn_completion_handler_never_called_when
+                            : diag::warn_called_once_never_called_when;
+    PartialDiagnosticAt Warning(Where->getBeginLoc(), S.PDiag(DiagToReport)
+                                                          << Parameter
+                                                          << IsCalledDirectly
+                                                          << (unsigned)Reason);
+
+    if (const auto *Block = dyn_cast<BlockDecl>(Function)) {
+      // We shouldn't report these warnings on blocks immediately
+      Data.addDelayedWarning(Block, std::move(Warning));
+    } else {
+      S.Diag(Warning.first, Warning.second);
+    }
+  }
+
+  void handleCapturedNeverCalled(const ParmVarDecl *Parameter,
+                                 const Decl *Where,
+                                 bool IsCompletionHandler) override {
+    auto DiagToReport = IsCompletionHandler
+                            ? diag::warn_completion_handler_never_called
+                            : diag::warn_called_once_never_called;
+    S.Diag(Where->getBeginLoc(), DiagToReport)
+        << Parameter << /* Captured */ true;
+  }
+
+  void
+  handleBlockThatIsGuaranteedToBeCalledOnce(const BlockDecl *Block) override {
+    Data.flushWarnings(Block, S);
+  }
+
+  void handleBlockWithNoGuarantees(const BlockDecl *Block) override {
+    Data.discardWarnings(Block);
+  }
+
+private:
+  Sema &S;
+  CalledOnceInterProceduralData &Data;
+};
+
+constexpr unsigned CalledOnceWarnings[] = {
+    diag::warn_called_once_never_called,
+    diag::warn_called_once_never_called_when,
+    diag::warn_called_once_gets_called_twice};
+
+constexpr unsigned CompletionHandlerWarnings[]{
+    diag::warn_completion_handler_never_called,
+    diag::warn_completion_handler_never_called_when,
+    diag::warn_completion_handler_called_twice};
+
+bool shouldAnalyzeCalledOnceImpl(llvm::ArrayRef<unsigned> DiagIDs,
+                                 const DiagnosticsEngine &Diags,
+                                 SourceLocation At) {
+  return llvm::any_of(DiagIDs, [&Diags, At](unsigned DiagID) {
+    return !Diags.isIgnored(DiagID, At);
+  });
+}
+
+bool shouldAnalyzeCalledOnceConventions(const DiagnosticsEngine &Diags,
+                                        SourceLocation At) {
+  return shouldAnalyzeCalledOnceImpl(CompletionHandlerWarnings, Diags, At);
+}
+
+bool shouldAnalyzeCalledOnceParameters(const DiagnosticsEngine &Diags,
+                                       SourceLocation At) {
+  return shouldAnalyzeCalledOnceImpl(CalledOnceWarnings, Diags, At) ||
+         shouldAnalyzeCalledOnceConventions(Diags, At);
+}
+} // anonymous namespace
 
 //===----------------------------------------------------------------------===//
 // -Wthread-safety
 //===----------------------------------------------------------------------===//
 namespace clang {
 namespace threadSafety {
-
+namespace {
 class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
   Sema &S;
   DiagList Warnings;
@@ -1449,9 +1784,9 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
 
   OptionalNotes getNotes() const {
     if (Verbose && CurrentFunction) {
-      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getLocStart(),
+      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getBeginLoc(),
                                 S.PDiag(diag::note_thread_warning_in_fun)
-                                    << CurrentFunction->getNameAsString());
+                                    << CurrentFunction);
       return OptionalNotes(1, FNote);
     }
     return OptionalNotes();
@@ -1460,10 +1795,10 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
   OptionalNotes getNotes(const PartialDiagnosticAt &Note) const {
     OptionalNotes ONS(1, Note);
     if (Verbose && CurrentFunction) {
-      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getLocStart(),
+      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getBeginLoc(),
                                 S.PDiag(diag::note_thread_warning_in_fun)
-                                    << CurrentFunction->getNameAsString());
-      ONS.push_back(FNote);
+                                    << CurrentFunction);
+      ONS.push_back(std::move(FNote));
     }
     return ONS;
   }
@@ -1474,23 +1809,27 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     ONS.push_back(Note1);
     ONS.push_back(Note2);
     if (Verbose && CurrentFunction) {
-      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getLocStart(),
+      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getBeginLoc(),
                                 S.PDiag(diag::note_thread_warning_in_fun)
-                                    << CurrentFunction->getNameAsString());
-      ONS.push_back(FNote);
+                                    << CurrentFunction);
+      ONS.push_back(std::move(FNote));
     }
     return ONS;
   }
 
-  // Helper functions
-  void warnLockMismatch(unsigned DiagID, StringRef Kind, Name LockName,
-                        SourceLocation Loc) {
-    // Gracefully handle rare cases when the analysis can't get a more
-    // precise source location.
-    if (!Loc.isValid())
-      Loc = FunLocation;
-    PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind << LockName);
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+  OptionalNotes makeLockedHereNote(SourceLocation LocLocked, StringRef Kind) {
+    return LocLocked.isValid()
+               ? getNotes(PartialDiagnosticAt(
+                     LocLocked, S.PDiag(diag::note_locked_here) << Kind))
+               : getNotes();
+  }
+
+  OptionalNotes makeUnlockedHereNote(SourceLocation LocUnlocked,
+                                     StringRef Kind) {
+    return LocUnlocked.isValid()
+               ? getNotes(PartialDiagnosticAt(
+                     LocUnlocked, S.PDiag(diag::note_unlocked_here) << Kind))
+               : getNotes();
   }
 
  public:
@@ -1500,7 +1839,7 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
 
   void setVerbose(bool b) { Verbose = b; }
 
-  /// \brief Emit all buffered diagnostics in order of sourcelocation.
+  /// Emit all buffered diagnostics in order of sourcelocation.
   /// We need to output diagnostics produced while iterating through
   /// the lockset in deterministic order, so this function orders diagnostics
   /// and outputs them.
@@ -1516,27 +1855,40 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
   void handleInvalidLockExp(StringRef Kind, SourceLocation Loc) override {
     PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_cannot_resolve_lock)
                                          << Loc);
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
-  void handleUnmatchedUnlock(StringRef Kind, Name LockName,
-                             SourceLocation Loc) override {
-    warnLockMismatch(diag::warn_unlock_but_no_lock, Kind, LockName, Loc);
+  void handleUnmatchedUnlock(StringRef Kind, Name LockName, SourceLocation Loc,
+                             SourceLocation LocPreviousUnlock) override {
+    if (Loc.isInvalid())
+      Loc = FunLocation;
+    PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_unlock_but_no_lock)
+                                         << Kind << LockName);
+    Warnings.emplace_back(std::move(Warning),
+                          makeUnlockedHereNote(LocPreviousUnlock, Kind));
   }
 
   void handleIncorrectUnlockKind(StringRef Kind, Name LockName,
                                  LockKind Expected, LockKind Received,
-                                 SourceLocation Loc) override {
-    if (Loc.isInvalid())
-      Loc = FunLocation;
-    PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_unlock_kind_mismatch)
-                                         << Kind << LockName << Received
-                                         << Expected);
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+                                 SourceLocation LocLocked,
+                                 SourceLocation LocUnlock) override {
+    if (LocUnlock.isInvalid())
+      LocUnlock = FunLocation;
+    PartialDiagnosticAt Warning(
+        LocUnlock, S.PDiag(diag::warn_unlock_kind_mismatch)
+                       << Kind << LockName << Received << Expected);
+    Warnings.emplace_back(std::move(Warning),
+                          makeLockedHereNote(LocLocked, Kind));
   }
 
-  void handleDoubleLock(StringRef Kind, Name LockName, SourceLocation Loc) override {
-    warnLockMismatch(diag::warn_double_lock, Kind, LockName, Loc);
+  void handleDoubleLock(StringRef Kind, Name LockName, SourceLocation LocLocked,
+                        SourceLocation LocDoubleLock) override {
+    if (LocDoubleLock.isInvalid())
+      LocDoubleLock = FunLocation;
+    PartialDiagnosticAt Warning(LocDoubleLock, S.PDiag(diag::warn_double_lock)
+                                                   << Kind << LockName);
+    Warnings.emplace_back(std::move(Warning),
+                          makeLockedHereNote(LocLocked, Kind));
   }
 
   void handleMutexHeldEndOfScope(StringRef Kind, Name LockName,
@@ -1563,13 +1915,8 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
 
     PartialDiagnosticAt Warning(LocEndOfScope, S.PDiag(DiagID) << Kind
                                                                << LockName);
-    if (LocLocked.isValid()) {
-      PartialDiagnosticAt Note(LocLocked, S.PDiag(diag::note_locked_here)
-                                              << Kind);
-      Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
-      return;
-    }
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+    Warnings.emplace_back(std::move(Warning),
+                          makeLockedHereNote(LocLocked, Kind));
   }
 
   void handleExclusiveAndShared(StringRef Kind, Name LockName,
@@ -1580,7 +1927,7 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
                                     << Kind << LockName);
     PartialDiagnosticAt Note(Loc2, S.PDiag(diag::note_lock_exclusive_and_shared)
                                        << Kind << LockName);
-    Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
+    Warnings.emplace_back(std::move(Warning), getNotes(Note));
   }
 
   void handleNoMutexHeld(StringRef Kind, const NamedDecl *D,
@@ -1592,8 +1939,8 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
                         diag::warn_variable_requires_any_lock:
                         diag::warn_var_deref_requires_any_lock;
     PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID)
-      << D->getNameAsString() << getLockKindFromAccessKind(AK));
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+      << D << getLockKindFromAccessKind(AK));
+    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
   void handleMutexNotHeld(StringRef Kind, const NamedDecl *D,
@@ -1620,17 +1967,17 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
           break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
-                                                       << D->getNameAsString()
+                                                       << D
                                                        << LockName << LK);
       PartialDiagnosticAt Note(Loc, S.PDiag(diag::note_found_mutex_near_match)
                                         << *PossibleMatch);
       if (Verbose && POK == POK_VarAccess) {
         PartialDiagnosticAt VNote(D->getLocation(),
-                                 S.PDiag(diag::note_guarded_by_declared_here)
-                                     << D->getNameAsString());
-        Warnings.push_back(DelayedDiag(Warning, getNotes(Note, VNote)));
+                                  S.PDiag(diag::note_guarded_by_declared_here)
+                                      << D->getDeclName());
+        Warnings.emplace_back(std::move(Warning), getNotes(Note, VNote));
       } else
-        Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
+        Warnings.emplace_back(std::move(Warning), getNotes(Note));
     } else {
       switch (POK) {
         case POK_VarAccess:
@@ -1650,33 +1997,50 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
           break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
-                                                       << D->getNameAsString()
+                                                       << D
                                                        << LockName << LK);
       if (Verbose && POK == POK_VarAccess) {
         PartialDiagnosticAt Note(D->getLocation(),
-                                 S.PDiag(diag::note_guarded_by_declared_here)
-                                     << D->getNameAsString());
-        Warnings.push_back(DelayedDiag(Warning, getNotes(Note)));
+                                 S.PDiag(diag::note_guarded_by_declared_here));
+        Warnings.emplace_back(std::move(Warning), getNotes(Note));
       } else
-        Warnings.push_back(DelayedDiag(Warning, getNotes()));
+        Warnings.emplace_back(std::move(Warning), getNotes());
     }
   }
 
-
-  virtual void handleNegativeNotHeld(StringRef Kind, Name LockName, Name Neg,
-                                     SourceLocation Loc) override {
+  void handleNegativeNotHeld(StringRef Kind, Name LockName, Name Neg,
+                             SourceLocation Loc) override {
     PartialDiagnosticAt Warning(Loc,
         S.PDiag(diag::warn_acquire_requires_negative_cap)
         << Kind << LockName << Neg);
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
+  void handleNegativeNotHeld(const NamedDecl *D, Name LockName,
+                             SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(
+        Loc, S.PDiag(diag::warn_fun_requires_negative_cap) << D << LockName);
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
 
   void handleFunExcludesLock(StringRef Kind, Name FunName, Name LockName,
                              SourceLocation Loc) override {
     PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_fun_excludes_mutex)
                                          << Kind << FunName << LockName);
-    Warnings.push_back(DelayedDiag(Warning, getNotes()));
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  void handleLockAcquiredBefore(StringRef Kind, Name L1Name, Name L2Name,
+                                SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(Loc,
+      S.PDiag(diag::warn_acquired_before) << Kind << L1Name << L2Name);
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  void handleBeforeAfterCycle(Name L1Name, SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(Loc,
+      S.PDiag(diag::warn_acquired_before_after_cycle) << L1Name);
+    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
   void enterFunction(const FunctionDecl* FD) override {
@@ -1684,12 +2048,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
   }
 
   void leaveFunction(const FunctionDecl* FD) override {
-    CurrentFunction = 0;
+    CurrentFunction = nullptr;
   }
 };
-
-}
-}
+} // anonymous namespace
+} // namespace threadSafety
+} // namespace clang
 
 //===----------------------------------------------------------------------===//
 // -Wconsumed
@@ -1699,12 +2063,12 @@ namespace clang {
 namespace consumed {
 namespace {
 class ConsumedWarningsHandler : public ConsumedWarningsHandlerBase {
-  
+
   Sema &S;
   DiagList Warnings;
-  
+
 public:
-  
+
   ConsumedWarningsHandler(Sema &S) : S(S) {}
 
   void emitDiagnostics() override {
@@ -1720,121 +2084,137 @@ public:
                              StringRef VariableName) override {
     PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_loop_state_mismatch) <<
       VariableName);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnParamReturnTypestateMismatch(SourceLocation Loc,
                                         StringRef VariableName,
                                         StringRef ExpectedState,
                                         StringRef ObservedState) override {
-    
+
     PartialDiagnosticAt Warning(Loc, S.PDiag(
       diag::warn_param_return_typestate_mismatch) << VariableName <<
         ExpectedState << ObservedState);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnParamTypestateMismatch(SourceLocation Loc, StringRef ExpectedState,
                                   StringRef ObservedState) override {
-    
+
     PartialDiagnosticAt Warning(Loc, S.PDiag(
       diag::warn_param_typestate_mismatch) << ExpectedState << ObservedState);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnReturnTypestateForUnconsumableType(SourceLocation Loc,
                                               StringRef TypeName) override {
     PartialDiagnosticAt Warning(Loc, S.PDiag(
       diag::warn_return_typestate_for_unconsumable_type) << TypeName);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnReturnTypestateMismatch(SourceLocation Loc, StringRef ExpectedState,
                                    StringRef ObservedState) override {
-                                    
+
     PartialDiagnosticAt Warning(Loc, S.PDiag(
       diag::warn_return_typestate_mismatch) << ExpectedState << ObservedState);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnUseOfTempInInvalidState(StringRef MethodName, StringRef State,
                                    SourceLocation Loc) override {
-                                                    
+
     PartialDiagnosticAt Warning(Loc, S.PDiag(
       diag::warn_use_of_temp_in_invalid_state) << MethodName << State);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
-  
+
   void warnUseInInvalidState(StringRef MethodName, StringRef VariableName,
                              StringRef State, SourceLocation Loc) override {
-  
+
     PartialDiagnosticAt Warning(Loc, S.PDiag(diag::warn_use_in_invalid_state) <<
                                 MethodName << VariableName << State);
-    
-    Warnings.push_back(DelayedDiag(Warning, OptionalNotes()));
+
+    Warnings.emplace_back(std::move(Warning), OptionalNotes());
   }
 };
-}}}
+} // anonymous namespace
+} // namespace consumed
+} // namespace clang
 
 //===----------------------------------------------------------------------===//
 // AnalysisBasedWarnings - Worker object used by Sema to execute analysis-based
 //  warnings on a function, method, or block.
 //===----------------------------------------------------------------------===//
 
-clang::sema::AnalysisBasedWarnings::Policy::Policy() {
+sema::AnalysisBasedWarnings::Policy::Policy() {
   enableCheckFallThrough = 1;
   enableCheckUnreachable = 0;
   enableThreadSafetyAnalysis = 0;
   enableConsumedAnalysis = 0;
 }
 
+/// InterProceduralData aims to be a storage of whatever data should be passed
+/// between analyses of different functions.
+///
+/// At the moment, its primary goal is to make the information gathered during
+/// the analysis of the blocks available during the analysis of the enclosing
+/// function.  This is important due to the fact that blocks are analyzed before
+/// the enclosed function is even parsed fully, so it is not viable to access
+/// anything in the outer scope while analyzing the block.  On the other hand,
+/// re-building CFG for blocks and re-analyzing them when we do have all the
+/// information (i.e. during the analysis of the enclosing function) seems to be
+/// ill-designed.
+class sema::AnalysisBasedWarnings::InterProceduralData {
+public:
+  // It is important to analyze blocks within functions because it's a very
+  // common pattern to capture completion handler parameters by blocks.
+  CalledOnceInterProceduralData CalledOnceData;
+};
+
 static unsigned isEnabled(DiagnosticsEngine &D, unsigned diag) {
   return (unsigned)!D.isIgnored(diag, SourceLocation());
 }
 
-clang::sema::AnalysisBasedWarnings::AnalysisBasedWarnings(Sema &s)
-  : S(s),
-    NumFunctionsAnalyzed(0),
-    NumFunctionsWithBadCFGs(0),
-    NumCFGBlocks(0),
-    MaxCFGBlocksPerFunction(0),
-    NumUninitAnalysisFunctions(0),
-    NumUninitAnalysisVariables(0),
-    MaxUninitAnalysisVariablesPerFunction(0),
-    NumUninitAnalysisBlockVisits(0),
-    MaxUninitAnalysisBlockVisitsPerFunction(0) {
+sema::AnalysisBasedWarnings::AnalysisBasedWarnings(Sema &s)
+    : S(s), IPData(std::make_unique<InterProceduralData>()),
+      NumFunctionsAnalyzed(0), NumFunctionsWithBadCFGs(0), NumCFGBlocks(0),
+      MaxCFGBlocksPerFunction(0), NumUninitAnalysisFunctions(0),
+      NumUninitAnalysisVariables(0), MaxUninitAnalysisVariablesPerFunction(0),
+      NumUninitAnalysisBlockVisits(0),
+      MaxUninitAnalysisBlockVisitsPerFunction(0) {
 
   using namespace diag;
   DiagnosticsEngine &D = S.getDiagnostics();
 
   DefaultPolicy.enableCheckUnreachable =
-    isEnabled(D, warn_unreachable) ||
-    isEnabled(D, warn_unreachable_break) ||
-    isEnabled(D, warn_unreachable_return) ||
-    isEnabled(D, warn_unreachable_loop_increment);
+      isEnabled(D, warn_unreachable) || isEnabled(D, warn_unreachable_break) ||
+      isEnabled(D, warn_unreachable_return) ||
+      isEnabled(D, warn_unreachable_loop_increment);
 
-  DefaultPolicy.enableThreadSafetyAnalysis =
-    isEnabled(D, warn_double_lock);
+  DefaultPolicy.enableThreadSafetyAnalysis = isEnabled(D, warn_double_lock);
 
   DefaultPolicy.enableConsumedAnalysis =
-    isEnabled(D, warn_use_in_invalid_state);
+      isEnabled(D, warn_use_in_invalid_state);
 }
+
+// We need this here for unique_ptr with forward declared class.
+sema::AnalysisBasedWarnings::~AnalysisBasedWarnings() = default;
 
 static void flushDiagnostics(Sema &S, const sema::FunctionScopeInfo *fscope) {
   for (const auto &D : fscope->PossiblyUnreachableDiags)
     S.Diag(D.Loc, D.PD);
 }
 
-void clang::sema::
-AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
-                                     sema::FunctionScopeInfo *fscope,
-                                     const Decl *D, const BlockExpr *blkExpr) {
+void clang::sema::AnalysisBasedWarnings::IssueWarnings(
+    sema::AnalysisBasedWarnings::Policy P, sema::FunctionScopeInfo *fscope,
+    const Decl *D, QualType BlockType) {
 
   // We avoid doing analysis-based warnings when there are errors for
   // two reasons:
@@ -1844,22 +2224,22 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   //     time.
   DiagnosticsEngine &Diags = S.getDiagnostics();
 
-  // Do not do any analysis for declarations in system headers if we are
-  // going to just ignore them.
-  if (Diags.getSuppressSystemWarnings() &&
-      S.SourceMgr.isInSystemHeader(D->getLocation()))
+  // Do not do any analysis if we are going to just ignore them.
+  if (Diags.getIgnoreAllWarnings() ||
+      (Diags.getSuppressSystemWarnings() &&
+       S.SourceMgr.isInSystemHeader(D->getLocation())))
     return;
 
   // For code in dependent contexts, we'll do this at instantiation time.
   if (cast<DeclContext>(D)->isDependentContext())
     return;
 
-  if (Diags.hasUncompilableErrorOccurred() || Diags.hasFatalErrorOccurred()) {
+  if (S.hasUncompilableErrorOccurred()) {
     // Flush out any possibly unreachable diagnostics.
     flushDiagnostics(S, fscope);
     return;
   }
-  
+
   const Stmt *Body = D->getBody();
   assert(Body);
 
@@ -1874,6 +2254,7 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   AC.getCFGBuildOptions().AddImplicitDtors = true;
   AC.getCFGBuildOptions().AddTemporaryDtors = true;
   AC.getCFGBuildOptions().AddCXXNewAllocator = false;
+  AC.getCFGBuildOptions().AddCXXDefaultInitExprInCtors = true;
 
   // Force that certain expressions appear as CFGElements in the CFG.  This
   // is used to speed up various analyses.
@@ -1898,12 +2279,11 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
       .setAlwaysAdd(Stmt::AttributedStmtClass);
   }
 
-  // Install the logical handler for -Wtautological-overlap-compare
-  std::unique_ptr<LogicalErrorHandler> LEH;
-  if (!Diags.isIgnored(diag::warn_tautological_overlap_comparison,
-                       D->getLocStart())) {
-    LEH.reset(new LogicalErrorHandler(S));
-    AC.getCFGBuildOptions().Observer = LEH.get();
+  // Install the logical handler.
+  llvm::Optional<LogicalErrorHandler> LEH;
+  if (LogicalErrorHandler::hasActiveDiagnostics(Diags, D->getBeginLoc())) {
+    LEH.emplace(S);
+    AC.getCFGBuildOptions().Observer = &*LEH;
   }
 
   // Emit delayed diagnostics.
@@ -1912,16 +2292,16 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
 
     // Register the expressions with the CFGBuilder.
     for (const auto &D : fscope->PossiblyUnreachableDiags) {
-      if (D.stmt)
-        AC.registerForcedBlockExpression(D.stmt);
+      for (const Stmt *S : D.Stmts)
+        AC.registerForcedBlockExpression(S);
     }
 
     if (AC.getCFG()) {
       analyzed = true;
       for (const auto &D : fscope->PossiblyUnreachableDiags) {
-        bool processed = false;
-        if (D.stmt) {
-          const CFGBlock *block = AC.getBlockForRegisteredExpression(D.stmt);
+        bool AllReachable = true;
+        for (const Stmt *S : D.Stmts) {
+          const CFGBlock *block = AC.getBlockForRegisteredExpression(S);
           CFGReverseBlockReachabilityAnalysis *cra =
               AC.getCFGReachablityAnalysis();
           // FIXME: We should be able to assert that block is non-null, but
@@ -1929,33 +2309,37 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
           // edge cases; see test/Sema/vla-2.c.
           if (block && cra) {
             // Can this block be reached from the entrance?
-            if (cra->isReachable(&AC.getCFG()->getEntry(), block))
-              S.Diag(D.Loc, D.PD);
-            processed = true;
+            if (!cra->isReachable(&AC.getCFG()->getEntry(), block)) {
+              AllReachable = false;
+              break;
+            }
           }
+          // If we cannot map to a basic block, assume the statement is
+          // reachable.
         }
-        if (!processed) {
-          // Emit the warning anyway if we cannot map to a basic block.
+
+        if (AllReachable)
           S.Diag(D.Loc, D.PD);
-        }
       }
     }
 
     if (!analyzed)
       flushDiagnostics(S, fscope);
   }
-  
-  
+
   // Warning: check missing 'return'
   if (P.enableCheckFallThrough) {
     const CheckFallThroughDiagnostics &CD =
-      (isa<BlockDecl>(D) ? CheckFallThroughDiagnostics::MakeForBlock()
-       : (isa<CXXMethodDecl>(D) &&
-          cast<CXXMethodDecl>(D)->getOverloadedOperator() == OO_Call &&
-          cast<CXXMethodDecl>(D)->getParent()->isLambda())
-            ? CheckFallThroughDiagnostics::MakeForLambda()
-            : CheckFallThroughDiagnostics::MakeForFunction(D));
-    CheckFallThroughForBody(S, D, Body, blkExpr, CD, AC);
+        (isa<BlockDecl>(D)
+             ? CheckFallThroughDiagnostics::MakeForBlock()
+             : (isa<CXXMethodDecl>(D) &&
+                cast<CXXMethodDecl>(D)->getOverloadedOperator() == OO_Call &&
+                cast<CXXMethodDecl>(D)->getParent()->isLambda())
+                   ? CheckFallThroughDiagnostics::MakeForLambda()
+                   : (fscope->isCoroutine()
+                          ? CheckFallThroughDiagnostics::MakeForCoroutine(D)
+                          : CheckFallThroughDiagnostics::MakeForFunction(D)));
+    CheckFallThroughForBody(S, D, Body, BlockType, CD, AC, fscope);
   }
 
   // Warning: check for unreachable code
@@ -1974,14 +2358,15 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   // Check for thread safety violations
   if (P.enableThreadSafetyAnalysis) {
     SourceLocation FL = AC.getDecl()->getLocation();
-    SourceLocation FEL = AC.getDecl()->getLocEnd();
+    SourceLocation FEL = AC.getDecl()->getEndLoc();
     threadSafety::ThreadSafetyReporter Reporter(S, FL, FEL);
-    if (!Diags.isIgnored(diag::warn_thread_safety_beta, D->getLocStart()))
+    if (!Diags.isIgnored(diag::warn_thread_safety_beta, D->getBeginLoc()))
       Reporter.setIssueBetaWarnings(true);
-    if (!Diags.isIgnored(diag::warn_thread_safety_verbose, D->getLocStart()))
+    if (!Diags.isIgnored(diag::warn_thread_safety_verbose, D->getBeginLoc()))
       Reporter.setVerbose(true);
 
-    threadSafety::runThreadSafetyAnalysis(AC, Reporter);
+    threadSafety::runThreadSafetyAnalysis(AC, Reporter,
+                                          &S.ThreadSafetyDeclCache);
     Reporter.emitDiagnostics();
   }
 
@@ -1992,9 +2377,10 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
     Analyzer.run(AC);
   }
 
-  if (!Diags.isIgnored(diag::warn_uninit_var, D->getLocStart()) ||
-      !Diags.isIgnored(diag::warn_sometimes_uninit_var, D->getLocStart()) ||
-      !Diags.isIgnored(diag::warn_maybe_uninit_var, D->getLocStart())) {
+  if (!Diags.isIgnored(diag::warn_uninit_var, D->getBeginLoc()) ||
+      !Diags.isIgnored(diag::warn_sometimes_uninit_var, D->getBeginLoc()) ||
+      !Diags.isIgnored(diag::warn_maybe_uninit_var, D->getBeginLoc()) ||
+      !Diags.isIgnored(diag::warn_uninit_const_reference, D->getBeginLoc())) {
     if (CFG *cfg = AC.getCFG()) {
       UninitValsDiagReporter reporter(S);
       UninitVariablesAnalysisStats stats;
@@ -2016,31 +2402,48 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
     }
   }
 
+  // Check for violations of "called once" parameter properties.
+  if (S.getLangOpts().ObjC && !S.getLangOpts().CPlusPlus &&
+      shouldAnalyzeCalledOnceParameters(Diags, D->getBeginLoc())) {
+    if (AC.getCFG()) {
+      CalledOnceCheckReporter Reporter(S, IPData->CalledOnceData);
+      checkCalledOnceParameters(
+          AC, Reporter,
+          shouldAnalyzeCalledOnceConventions(Diags, D->getBeginLoc()));
+    }
+  }
+
   bool FallThroughDiagFull =
-      !Diags.isIgnored(diag::warn_unannotated_fallthrough, D->getLocStart());
+      !Diags.isIgnored(diag::warn_unannotated_fallthrough, D->getBeginLoc());
   bool FallThroughDiagPerFunction = !Diags.isIgnored(
-      diag::warn_unannotated_fallthrough_per_function, D->getLocStart());
-  if (FallThroughDiagFull || FallThroughDiagPerFunction) {
+      diag::warn_unannotated_fallthrough_per_function, D->getBeginLoc());
+  if (FallThroughDiagFull || FallThroughDiagPerFunction ||
+      fscope->HasFallthroughStmt) {
     DiagnoseSwitchLabelsFallthrough(S, AC, !FallThroughDiagFull);
   }
 
-  if (S.getLangOpts().ObjCARCWeak &&
-      !Diags.isIgnored(diag::warn_arc_repeated_use_of_weak, D->getLocStart()))
+  if (S.getLangOpts().ObjCWeak &&
+      !Diags.isIgnored(diag::warn_arc_repeated_use_of_weak, D->getBeginLoc()))
     diagnoseRepeatedUseOfWeak(S, fscope, D, AC.getParentMap());
 
 
   // Check for infinite self-recursion in functions
   if (!Diags.isIgnored(diag::warn_infinite_recursive_function,
-                       D->getLocStart())) {
+                       D->getBeginLoc())) {
     if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
       checkRecursiveFunction(S, FD, Body, AC);
     }
   }
 
+  // Check for throw out of non-throwing function.
+  if (!Diags.isIgnored(diag::warn_throw_in_noexcept_func, D->getBeginLoc()))
+    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
+      if (S.getLangOpts().CPlusPlus && isNoexcept(FD))
+        checkThrowInNonThrowingFunc(S, FD, AC);
+
   // If none of the previous checks caused a CFG build, trigger one here
-  // for -Wtautological-overlap-compare
-  if (!Diags.isIgnored(diag::warn_tautological_overlap_comparison,
-                               D->getLocStart())) {
+  // for the logical error handler.
+  if (LogicalErrorHandler::hasActiveDiagnostics(Diags, D->getBeginLoc())) {
     AC.getCFG();
   }
 

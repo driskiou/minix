@@ -1,9 +1,8 @@
 //===- Binary.h - A generic binary file -------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,10 +13,14 @@
 #ifndef LLVM_OBJECT_BINARY_H
 #define LLVM_OBJECT_BINARY_H
 
+#include "llvm-c/Types.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Object/Error.h"
-#include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include <algorithm>
+#include <memory>
+#include <utility>
 
 namespace llvm {
 
@@ -28,9 +31,6 @@ namespace object {
 
 class Binary {
 private:
-  Binary() LLVM_DELETED_FUNCTION;
-  Binary(const Binary &other) LLVM_DELETED_FUNCTION;
-
   unsigned int TypeID;
 
 protected:
@@ -41,11 +41,21 @@ protected:
   enum {
     ID_Archive,
     ID_MachOUniversalBinary,
-    ID_IR, // LLVM IR
+    ID_COFFImportFile,
+    ID_IR,            // LLVM IR
+    ID_TapiUniversal, // Text-based Dynamic Library Stub file.
+    ID_TapiFile,      // Text-based Dynamic Library Stub file.
+
+    ID_Minidump,
+
+    ID_WinRes, // Windows resource (.res) file.
 
     // Object and children.
     ID_StartObjects,
     ID_COFF,
+
+    ID_XCOFF32, // AIX XCOFF 32-bit
+    ID_XCOFF64, // AIX XCOFF 64-bit
 
     ID_ELF32L, // ELF 32-bit, little endian
     ID_ELF32B, // ELF 32-bit, big endian
@@ -56,6 +66,8 @@ protected:
     ID_MachO32B, // MachO 32-bit, big endian
     ID_MachO64L, // MachO 64-bit, little endian
     ID_MachO64B, // MachO 64-bit, big endian
+
+    ID_Wasm,
 
     ID_EndObjects
   };
@@ -75,7 +87,11 @@ protected:
   }
 
 public:
+  Binary() = delete;
+  Binary(const Binary &other) = delete;
   virtual ~Binary();
+
+  virtual Error initContent() { return Error::success(); };
 
   StringRef getData() const;
   StringRef getFileName() const;
@@ -90,16 +106,16 @@ public:
   }
 
   bool isSymbolic() const {
-    return isIR() || isObject();
+    return isIR() || isObject() || isCOFFImportFile() || isTapiFile();
   }
 
-  bool isArchive() const {
-    return TypeID == ID_Archive;
-  }
+  bool isArchive() const { return TypeID == ID_Archive; }
 
   bool isMachOUniversalBinary() const {
     return TypeID == ID_MachOUniversalBinary;
   }
+
+  bool isTapiUniversal() const { return TypeID == ID_TapiUniversal; }
 
   bool isELF() const {
     return TypeID >= ID_ELF32L && TypeID <= ID_ELF64B;
@@ -113,21 +129,60 @@ public:
     return TypeID == ID_COFF;
   }
 
+  bool isXCOFF() const { return TypeID == ID_XCOFF32 || TypeID == ID_XCOFF64; }
+
+  bool isWasm() const { return TypeID == ID_Wasm; }
+
+  bool isCOFFImportFile() const {
+    return TypeID == ID_COFFImportFile;
+  }
+
   bool isIR() const {
     return TypeID == ID_IR;
   }
 
+  bool isMinidump() const { return TypeID == ID_Minidump; }
+
+  bool isTapiFile() const { return TypeID == ID_TapiFile; }
+
   bool isLittleEndian() const {
     return !(TypeID == ID_ELF32B || TypeID == ID_ELF64B ||
-             TypeID == ID_MachO32B || TypeID == ID_MachO64B);
+             TypeID == ID_MachO32B || TypeID == ID_MachO64B ||
+             TypeID == ID_XCOFF32 || TypeID == ID_XCOFF64);
+  }
+
+  bool isWinRes() const { return TypeID == ID_WinRes; }
+
+  Triple::ObjectFormatType getTripleObjectFormat() const {
+    if (isCOFF())
+      return Triple::COFF;
+    if (isMachO())
+      return Triple::MachO;
+    if (isELF())
+      return Triple::ELF;
+    return Triple::UnknownObjectFormat;
+  }
+
+  static Error checkOffset(MemoryBufferRef M, uintptr_t Addr,
+                           const uint64_t Size) {
+    if (Addr + Size < Addr || Addr + Size < Size ||
+        Addr + Size > reinterpret_cast<uintptr_t>(M.getBufferEnd()) ||
+        Addr < reinterpret_cast<uintptr_t>(M.getBufferStart())) {
+      return errorCodeToError(object_error::unexpected_eof);
+    }
+    return Error::success();
   }
 };
 
-/// @brief Create a Binary from Source, autodetecting the file type.
+// Create wrappers for C Binding types (see CBindingWrapping.h).
+DEFINE_ISA_CONVERSION_FUNCTIONS(Binary, LLVMBinaryRef)
+
+/// Create a Binary from Source, autodetecting the file type.
 ///
 /// @param Source The data to create the Binary from.
-ErrorOr<std::unique_ptr<Binary>> createBinary(MemoryBufferRef Source,
-                                              LLVMContext *Context = nullptr);
+Expected<std::unique_ptr<Binary>> createBinary(MemoryBufferRef Source,
+                                               LLVMContext *Context = nullptr,
+                                               bool InitContent = true);
 
 template <typename T> class OwningBinary {
   std::unique_ptr<T> Bin;
@@ -150,7 +205,7 @@ OwningBinary<T>::OwningBinary(std::unique_ptr<T> Bin,
                               std::unique_ptr<MemoryBuffer> Buf)
     : Bin(std::move(Bin)), Buf(std::move(Buf)) {}
 
-template <typename T> OwningBinary<T>::OwningBinary() {}
+template <typename T> OwningBinary<T>::OwningBinary() = default;
 
 template <typename T>
 OwningBinary<T>::OwningBinary(OwningBinary &&Other)
@@ -177,8 +232,12 @@ template <typename T> const T* OwningBinary<T>::getBinary() const {
   return Bin.get();
 }
 
-ErrorOr<OwningBinary<Binary>> createBinary(StringRef Path);
-}
-}
+Expected<OwningBinary<Binary>> createBinary(StringRef Path,
+                                            LLVMContext *Context = nullptr,
+                                            bool InitContent = true);
 
-#endif
+} // end namespace object
+
+} // end namespace llvm
+
+#endif // LLVM_OBJECT_BINARY_H

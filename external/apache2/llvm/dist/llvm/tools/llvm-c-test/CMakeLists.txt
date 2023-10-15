@@ -1,9 +1,14 @@
 set(LLVM_LINK_COMPONENTS
-  ${LLVM_TARGETS_TO_BUILD}
+  AllTargetsAsmParsers
+  AllTargetsCodeGens
+  AllTargetsDescs
+  AllTargetsDisassemblers
+  AllTargetsInfos
   BitReader
   Core
   MCDisassembler
   Object
+  Support
   Target
   )
 
@@ -35,8 +40,12 @@ if (LLVM_COMPILER_IS_GCC_COMPATIBLE)
 endif ()
 
 add_llvm_tool(llvm-c-test
+  attributes.c
   calc.c
+  debuginfo.c
+  diagnostic.c
   disassemble.c
+  echo.cpp
   helpers.c
   include-all.c
   main.c

@@ -1,9 +1,8 @@
 //===- AnalysisWrappers.cpp - Wrappers around non-pass analyses -----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,7 +17,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/CallGraph.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
@@ -41,11 +39,11 @@ namespace {
           Instruction *UI = dyn_cast<Instruction>(U);
           if (!UI) continue;
 
-          CallSite CS(cast<Value>(UI));
-          if (!CS) continue;
+          CallBase *CB = dyn_cast<CallBase>(UI);
+          if (!CB)
+            continue;
 
-          for (CallSite::arg_iterator AI = CS.arg_begin(),
-               E = CS.arg_end(); AI != E; ++AI) {
+          for (auto AI = CB->arg_begin(), E = CB->arg_end(); AI != E; ++AI) {
             if (!isa<Constant>(*AI)) continue;
 
             if (!PrintedFn) {
@@ -71,23 +69,3 @@ char ExternalFunctionsPassedConstants::ID = 0;
 static RegisterPass<ExternalFunctionsPassedConstants>
   P1("print-externalfnconstants",
      "Print external fn callsites passed constants");
-
-namespace {
-  struct CallGraphPrinter : public ModulePass {
-    static char ID; // Pass ID, replacement for typeid
-    CallGraphPrinter() : ModulePass(ID) {}
-
-    void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.setPreservesAll();
-      AU.addRequiredTransitive<CallGraphWrapperPass>();
-    }
-    bool runOnModule(Module &M) override {
-      getAnalysis<CallGraphWrapperPass>().print(errs(), &M);
-      return false;
-    }
-  };
-}
-
-char CallGraphPrinter::ID = 0;
-static RegisterPass<CallGraphPrinter>
-  P2("print-callgraph", "Print a call graph");

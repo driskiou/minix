@@ -1,9 +1,8 @@
 //===-- NVPTXBaseInfo.h - Top-level definitions for NVPTX -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -30,60 +29,6 @@ enum AddressSpace {
   ADDRESS_SPACE_PARAM = 101
 };
 
-enum PropertyAnnotation {
-  PROPERTY_MAXNTID_X = 0,
-  PROPERTY_MAXNTID_Y,
-  PROPERTY_MAXNTID_Z,
-  PROPERTY_REQNTID_X,
-  PROPERTY_REQNTID_Y,
-  PROPERTY_REQNTID_Z,
-  PROPERTY_MINNCTAPERSM,
-  PROPERTY_ISTEXTURE,
-  PROPERTY_ISSURFACE,
-  PROPERTY_ISSAMPLER,
-  PROPERTY_ISREADONLY_IMAGE_PARAM,
-  PROPERTY_ISWRITEONLY_IMAGE_PARAM,
-  PROPERTY_ISREADWRITE_IMAGE_PARAM,
-  PROPERTY_ISKERNEL_FUNCTION,
-  PROPERTY_ALIGN,
-  PROPERTY_MANAGED,
-
-  // last property
-  PROPERTY_LAST
-};
-
-const unsigned AnnotationNameLen = 9; // length of each annotation name
-const char PropertyAnnotationNames[PROPERTY_LAST + 1][AnnotationNameLen + 1] = {
-  "maxntidx",                         // PROPERTY_MAXNTID_X
-  "maxntidy",                         // PROPERTY_MAXNTID_Y
-  "maxntidz",                         // PROPERTY_MAXNTID_Z
-  "reqntidx",                         // PROPERTY_REQNTID_X
-  "reqntidy",                         // PROPERTY_REQNTID_Y
-  "reqntidz",                         // PROPERTY_REQNTID_Z
-  "minctasm",                         // PROPERTY_MINNCTAPERSM
-  "texture",                          // PROPERTY_ISTEXTURE
-  "surface",                          // PROPERTY_ISSURFACE
-  "sampler",                          // PROPERTY_ISSAMPLER
-  "rdoimage",                         // PROPERTY_ISREADONLY_IMAGE_PARAM
-  "wroimage",                         // PROPERTY_ISWRITEONLY_IMAGE_PARAM
-  "rdwrimage",                        // PROPERTY_ISREADWRITE_IMAGE_PARAM
-  "kernel",                           // PROPERTY_ISKERNEL_FUNCTION
-  "align",                            // PROPERTY_ALIGN
-  "managed",                          // PROPERTY_MANAGED
-
-              // last property
-  "proplast", // PROPERTY_LAST
-};
-
-// name of named metadata used for global annotations
-#if defined(__GNUC__)
-// As this is declared to be static but some of the .cpp files that
-// include NVVM.h do not use this array, gcc gives a warning when
-// compiling those .cpp files, hence __attribute__((unused)).
-__attribute__((unused))
-#endif
-    static const char *NamedMDForAnnotations = "nvvm.annotations";
-
 namespace NVPTXII {
 enum {
   // These must be kept in sync with TSFlags in NVPTXInstrFormats.td
@@ -94,7 +39,7 @@ enum {
   IsSurfTexQueryFlag = 0x800,
   IsTexModeUnifiedFlag = 0x1000
 };
-}
-}
+} // namespace NVPTXII
 
+} // namespace llvm
 #endif

@@ -1,9 +1,8 @@
 //===----- CGCUDARuntime.cpp - Interface to CUDA Runtimes -----------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -36,16 +35,7 @@ RValue CGCUDARuntime::EmitCUDAKernelCallExpr(CodeGenFunction &CGF,
 
   eval.begin(CGF);
   CGF.EmitBlock(ConfigOKBlock);
-
-  const Decl *TargetDecl = nullptr;
-  if (const ImplicitCastExpr *CE = dyn_cast<ImplicitCastExpr>(E->getCallee())) {
-    if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(CE->getSubExpr())) {
-      TargetDecl = DRE->getDecl();
-    }
-  }
-
-  llvm::Value *Callee = CGF.EmitScalarExpr(E->getCallee());
-  CGF.EmitCall(E->getCallee()->getType(), Callee, E, ReturnValue, TargetDecl);
+  CGF.EmitSimpleCallExpr(E, ReturnValue);
   CGF.EmitBranch(ContBlock);
 
   CGF.EmitBlock(ContBlock);

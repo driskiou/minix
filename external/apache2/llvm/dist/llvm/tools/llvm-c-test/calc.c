@@ -1,9 +1,9 @@
 /*===-- calc.c - tool for testing libLLVM and llvm-c API ------------------===*\
 |*                                                                            *|
-|*                     The LLVM Compiler Infrastructure                       *|
-|*                                                                            *|
-|* This file is distributed under the University of Illinois Open Source      *|
-|* License. See LICENSE.TXT for details.                                      *|
+|* Part of the LLVM Project, under the Apache License v2.0 with LLVM          *|
+|* Exceptions.                                                                *|
+|* See https://llvm.org/LICENSE.txt for license information.                  *|
+|* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    *|
 |*                                                                            *|
 |*===----------------------------------------------------------------------===*|
 |*                                                                            *|
@@ -14,7 +14,6 @@
 \*===----------------------------------------------------------------------===*/
 
 #include "llvm-c-test.h"
-#include "llvm-c/Core.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -140,9 +139,9 @@ static void handle_line(char **tokens, int ntokens) {
   LLVMDisposeModule(M);
 }
 
-int calc(void) {
+int llvm_calc(void) {
 
-  tokenize_stdin(handle_line);
+  llvm_tokenize_stdin(handle_line);
 
   return 0;
 }

@@ -1,4 +1,4 @@
-# $NetBSD: Makefile,v 1.42 2015/01/29 20:41:34 joerg Exp $
+# $NetBSD: Makefile,v 1.4 2021/05/30 01:56:50 joerg Exp $
 
 .include <bsd.own.mk>
 
@@ -6,15 +6,23 @@ SUBDIR=	\
 	libLLVMAnalysis \
 	libLLVMAsmParser \
 	libLLVMAsmPrinter \
+	libLLVMBinaryFormat \
 	libLLVMBitReader \
 	libLLVMBitWriter \
+	libLLVMBitstreamReader \
 	libLLVMCodeGen \
+	libLLVMDebugInfoCodeView \
+	libLLVMDebugInfoDWARF \
+	libLLVMDebugInfoMSF \
+	libLLVMDemangle \
+	libLLVMFrontendOpenMP \
+	libLLVMGlobalISel \
 	libLLVMIR \
 	libLLVMIRReader \
 	libLLVMInstCombine \
 	libLLVMInstrumentation \
-	libLLVMipa \
 	libLLVMipo \
+	libLLVMLTO \
 	libLLVMLinker \
 	libLLVMMC \
 	libLLVMMCDisassembler \
@@ -22,12 +30,19 @@ SUBDIR=	\
 	libLLVMObjCARC \
 	libLLVMObject \
 	libLLVMOption \
+	libLLVMPasses \
 	libLLVMProfileData \
+	libLLVMProfileDataCoverage \
+	libLLVMRemarks \
 	libLLVMScalarOpts \
 	libLLVMSelectionDAG \
 	libLLVMSupport \
 	libLLVMTableGen \
 	libLLVMTarget \
+	libLLVMTextAPI \
+	libLLVMTransformsAggressiveInstCombine \
+	libLLVMTransformsCFGuard \
+	libLLVMTransformsCoroutines \
 	libLLVMTransformsUtils \
 	libLLVMVectorize \
 	libLLVMAArch64CodeGen \
@@ -37,11 +52,24 @@ SUBDIR=	\
 	libLLVMSparcCodeGen \
 	libLLVMX86CodeGen
 
+.if !defined(HOSTLIB) && !defined(_BSD_HOSTINIT_MK_)
+SUBDIR+= \
+	libLLVMAMDGPUCodeGen
+.endif
+
 SUBDIR+= .WAIT
+
+.if !defined(HOSTLIB) && !defined(_BSD_HOSTINIT_MK_)
+SUBDIR+= \
+	libLLVMMIRParser \
+	libLLVMAMDGPUMCTargetDesc \
+	libLLVMAMDGPUTargetInfo \
+	libLLVMAMDGPUAsmParser \
+	libLLVMAMDGPUUtils
+.endif
 
 SUBDIR+= \
 	libLLVMAArch64AsmParser \
-	libLLVMAArch64AsmPrinter \
 	libLLVMAArch64Disassembler \
 	libLLVMAArch64MCTargetDesc \
 	libLLVMAArch64TargetInfo \
@@ -49,79 +77,81 @@ SUBDIR+= \
 
 SUBDIR+= \
 	libLLVMARMAsmParser \
-	libLLVMARMAsmPrinter \
 	libLLVMARMDisassembler \
 	libLLVMARMMCTargetDesc \
-	libLLVMARMTargetInfo
+	libLLVMARMTargetInfo \
+	libLLVMARMUtils
 
 SUBDIR+= \
 	libLLVMMipsAsmParser \
-	libLLVMMipsAsmPrinter \
 	libLLVMMipsDisassembler \
 	libLLVMMipsMCTargetDesc \
 	libLLVMMipsTargetInfo
 
 SUBDIR+= \
 	libLLVMPowerPCAsmParser \
-	libLLVMPowerPCAsmPrinter \
 	libLLVMPowerPCDisassembler \
 	libLLVMPowerPCMCTargetDesc \
 	libLLVMPowerPCTargetInfo
 
 SUBDIR+= \
 	libLLVMSparcAsmParser \
-	libLLVMSparcAsmPrinter \
 	libLLVMSparcDisassembler \
 	libLLVMSparcMCTargetDesc \
 	libLLVMSparcTargetInfo
 
 SUBDIR+= \
 	libLLVMX86AsmParser \
-	libLLVMX86AsmPrinter \
 	libLLVMX86Disassembler \
 	libLLVMX86MCTargetDesc \
-	libLLVMX86TargetInfo \
-	libLLVMX86Utils
+	libLLVMX86TargetInfo
 
-.if ${NO_LLVM_DEVELOPER:Uno} == "no" && (${LLVM_DEVELOPER:U} == "yes" || ${MKLLDB} == "yes")
+.if ${NO_LLVM_DEVELOPER:Uno} == "no" && ${LLVM_DEVELOPER:U} == "yes"
 SUBDIR+= \
+	libLLVMAMDGPUDisassembler \
 	libLLVMExecutionEngine \
+	libLLVMExecutionEngineJITLink \
+	libLLVMExecutionEngineOrcShared \
+	libLLVMExecutionEngineOrcTargetProcess \
+	libLLVMFileCheck \
+	libLLVMInterfaceStub \
 	libLLVMMCJIT \
+	libLLVMOrc \
 	libLLVMRuntimeDyld
 .endif
 
-.if (${NO_LLVM_DEVELOPER:Uno} == "no" && ${LLVM_DEVELOPER:U} == "yes") || ${MKLLD} == "yes"
+.if !defined(HOSTLIB) && !defined(_BSD_HOSTINIT_MK_)
 SUBDIR+= \
-	libLLVMDebugInfo
+	libLLVMDebugInfoPDB \
+	libLLVMDebugInfoSymbolize \
+	libLLVMObjectYAML
 .endif
 
 .if ${NO_LLVM_DEVELOPER:Uno} == "no" && ${LLVM_DEVELOPER:U} == "yes"
 SUBDIR+= \
-	libLLVMCppBackend \
-	libLLVMCppBackendInfo \
+	libLLVMDebugInfoGSYM \
 	libLLVMHello \
 	libLLVMInterpreter \
-	libLLVMLTO \
-	libLLVMLineEditor
+	libLLVMLineEditor \
+	libLLVMToolDrivers \
+	libLLVMToolDriversDlltool \
+	libLLVMXRay
 .endif
-
-.if defined(__MINIX)
-SUBDIR+= \
-	libLLVMLTO \
-	#libLLVMgold
-.endif # defined(__MINIX)
 
 SUBDIR+= \
 	libclangAnalysis \
 	libclangARCMigrate \
 	libclangAST \
+	libclangASTMatchers \
 	libclangBasic \
 	libclangCodeGen \
+	libclangCrossTU \
 	libclangDriver \
 	libclangEdit \
 	libclangFrontend \
 	libclangFrontendRewrite \
 	libclangFrontendTool \
+	libclangIndex \
 	libclangLex \
 	libclangParse \
 	libclangRewrite \
@@ -129,117 +159,23 @@ SUBDIR+= \
 	libclangSerialization \
 	libclangStaticAnalyzerCheckers \
 	libclangStaticAnalyzerCore \
+	libclangToolingCore \
 	.WAIT \
 	libclangStaticAnalyzerFrontend
 
 .if ${NO_LLVM_DEVELOPER:Uno} == "no" && ${LLVM_DEVELOPER:U} == "yes"
 SUBDIR+= \
-	libclangASTMatchers \
+	libclangAPINotes \
 	libclangASTMatchersDynamic \
 	libclangFormat \
-	libclangIndex \
+	libclangIndexSerialization \
+	libclangInterpreter \
+	libclangTesting \
 	libclangTooling \
-	libclangToolingCore
-.endif
-
-.if ${MKLLD} != "no"
-SUBDIR+= \
-	liblldConfig \
-	liblldCore \
-	liblldDriver \
-	liblldPasses \
-	liblldReaderWriter \
-	liblldReaderWriterELF \
-	liblldReaderWriterELFAArch64 \
-	liblldReaderWriterELFHexagon \
-	liblldReaderWriterELFMips \
-	liblldReaderWriterELFPPC \
-	liblldReaderWriterELFX86 \
-	liblldReaderWriterELFX86_64 \
-	liblldReaderWriterMachO \
-	liblldReaderWriterNative \
-	liblldReaderWriterPECOFF \
-	liblldReaderWriterYAML
-.endif
-
-.if ${MKMCLINKER} != "no"
-SUBDIR+= \
-	libMCLinkerADT \
-	libMCLinkerCodeGen \
-	libMCLinkerCore \
-	libMCLinkerFragment \
-	libMCLinkerLD \
-	libMCLinkerMC \
-	libMCLinkerObject \
-	libMCLinkerSupport \
-	libMCLinkerTarget
-
-SUBDIR+= \
-	libMCLinkerARMCodeGen libMCLinkerARMTargetInfo
-SUBDIR+= \
-	libMCLinkerMipsCodeGen libMCLinkerMipsTargetInfo
-SUBDIR+= \
-	libMCLinkerX86CodeGen libMCLinkerX86TargetInfo
-
-.endif
-
-.if ${NO_LLVM_DEVELOPER:Uno} == "no" && ${MKLLDB} == "yes"
-SUBDIR+= \
-	liblldbAPI \
-	liblldbBreakpoint \
-	liblldbCommands \
-	liblldbCore \
-	liblldbDataFormatters \
-	liblldbExpression \
-	liblldbHostCommon \
-	liblldbHostNetBSD \
-	liblldbInterpreter \
-	liblldbLog \
-	liblldbPluginABIMacOSX_arm \
-	liblldbPluginABIMacOSX_arm64 \
-	liblldbPluginABIMacOSX_i386 \
-	liblldbPluginABISysV_hexagon \
-	liblldbPluginABISysV_ppc \
-	liblldbPluginABISysV_ppc64 \
-	liblldbPluginABISysV_x86_64 \
-	liblldbPluginAppleObjCRuntime \
-	liblldbPluginCXXItaniumABI \
-	liblldbPluginDisassemblerLLVM \
-	liblldbPluginDynamicLoaderHexagonDYLD \
-	liblldbPluginDynamicLoaderMacOSXDYLD \
-	liblldbPluginDynamicLoaderPosixDYLD \
-	liblldbPluginDynamicLoaderStatic \
-	liblldbPluginInstructionARM \
-	liblldbPluginInstructionARM64 \
-	liblldbPluginJITLoaderGDB \
-	liblldbPluginObjectContainerBSDArchive \
-	liblldbPluginObjectContainerMachOArchive \
-	liblldbPluginObjectFileELF \
-	liblldbPluginObjectFileJIT \
-	liblldbPluginObjectFileMachO \
-	liblldbPluginObjectFilePECOFF \
-	liblldbPluginPlatformNetBSD \
-	liblldbPluginPlatformGDB \
-	liblldbPluginPlatformKalimba \
-	liblldbPluginPlatformLinux \
-	liblldbPluginPlatformMacOSX \
-	liblldbPluginPlatformPOSIX \
-	liblldbPluginPlatformWindows \
-	liblldbPluginProcessElfCore \
-	liblldbPluginProcessNetBSD \
-	liblldbPluginProcessGDBRemote \
-	liblldbPluginProcessMachCore \
-	liblldbPluginProcessPOSIX \
-	liblldbPluginProcessUtility \
-	liblldbPluginSymbolFileDWARF \
-	liblldbPluginSymbolFileSymtab \
-	liblldbPluginSymbolVendorELF \
-	liblldbPluginSystemRuntimeMacOSX \
-	liblldbPluginUnwindAssemblyInstEmulation \
-	liblldbPluginUnwindAssemblyX86 \
-	liblldbSymbol \
-	liblldbTarget \
-	liblldbUtility
+	libclangToolingDependencyScanning \
+	libclangToolingInclusions \
+	libclangToolingRefactoring \
+	libclangToolingSyntax
 .endif
 
 .include <bsd.subdir.mk>

@@ -1,14 +1,13 @@
-//===--- VariantValue.cpp - Polymorphic value type -*- C++ -*-===/
+//===--- VariantValue.cpp - Polymorphic value type --------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// \brief Polymorphic value type.
+/// Polymorphic value type.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -23,7 +22,13 @@ namespace dynamic {
 std::string ArgKind::asString() const {
   switch (getArgKind()) {
   case AK_Matcher:
-    return (Twine("Matcher<") + MatcherKind.asStringRef() + ">").str();
+    return (Twine("Matcher<") + NodeKind.asStringRef() + ">").str();
+  case AK_Node:
+    return NodeKind.asStringRef().str();
+  case AK_Boolean:
+    return "boolean";
+  case AK_Double:
+    return "double";
   case AK_Unsigned:
     return "unsigned";
   case AK_String:
@@ -35,13 +40,13 @@ std::string ArgKind::asString() const {
 bool ArgKind::isConvertibleTo(ArgKind To, unsigned *Specificity) const {
   if (K != To.K)
     return false;
-  if (K != AK_Matcher) {
+  if (K != AK_Matcher && K != AK_Node) {
     if (Specificity)
       *Specificity = 1;
     return true;
   }
   unsigned Distance;
-  if (!MatcherKind.isBaseOf(To.MatcherKind, &Distance))
+  if (!NodeKind.isBaseOf(To.NodeKind, &Distance))
     return false;
 
   if (Specificity)
@@ -54,6 +59,11 @@ VariantMatcher::MatcherOps::canConstructFrom(const DynTypedMatcher &Matcher,
                                              bool &IsExactMatch) const {
   IsExactMatch = Matcher.getSupportedKind().isSame(NodeKind);
   return Matcher.canConvertTo(NodeKind);
+}
+
+DynTypedMatcher VariantMatcher::MatcherOps::convertMatcher(
+    const DynTypedMatcher &Matcher) const {
+  return Matcher.dynCastTo(NodeKind);
 }
 
 llvm::Optional<DynTypedMatcher>
@@ -72,7 +82,7 @@ VariantMatcher::MatcherOps::constructVariadicOperator(
       return llvm::None;
     DynMatchers.push_back(*Inner);
   }
-  return DynTypedMatcher::constructVariadic(Op, DynMatchers);
+  return DynTypedMatcher::constructVariadic(Op, NodeKind, DynMatchers);
 }
 
 VariantMatcher::Payload::~Payload() {}
@@ -98,10 +108,9 @@ public:
     return llvm::None;
   }
 
-  bool isConvertibleTo(ast_type_traits::ASTNodeKind Kind,
-                       unsigned *Specificity) const override {
-    return ArgKind(Matcher.getSupportedKind())
-        .isConvertibleTo(Kind, Specificity);
+  bool isConvertibleTo(ASTNodeKind Kind, unsigned *Specificity) const override {
+    return ArgKind::MakeMatcherArg(Matcher.getSupportedKind())
+        .isConvertibleTo(ArgKind::MakeMatcherArg(Kind), Specificity);
   }
 
 private:
@@ -156,13 +165,13 @@ public:
     return llvm::None;
   }
 
-  bool isConvertibleTo(ast_type_traits::ASTNodeKind Kind,
-                       unsigned *Specificity) const override {
+  bool isConvertibleTo(ASTNodeKind Kind, unsigned *Specificity) const override {
     unsigned MaxSpecificity = 0;
     for (const DynTypedMatcher &Matcher : Matchers) {
       unsigned ThisSpecificity;
-      if (ArgKind(Matcher.getSupportedKind())
-              .isConvertibleTo(Kind, &ThisSpecificity)) {
+      if (ArgKind::MakeMatcherArg(Matcher.getSupportedKind())
+              .isConvertibleTo(ArgKind::MakeMatcherArg(Kind),
+                               &ThisSpecificity)) {
         MaxSpecificity = std::max(MaxSpecificity, ThisSpecificity);
       }
     }
@@ -199,8 +208,7 @@ public:
     return Ops.constructVariadicOperator(Op, Args);
   }
 
-  bool isConvertibleTo(ast_type_traits::ASTNodeKind Kind,
-                       unsigned *Specificity) const override {
+  bool isConvertibleTo(ASTNodeKind Kind, unsigned *Specificity) const override {
     for (const VariantMatcher &Matcher : Args) {
       if (!Matcher.isConvertibleTo(Kind, Specificity))
         return false;
@@ -216,18 +224,20 @@ private:
 VariantMatcher::VariantMatcher() {}
 
 VariantMatcher VariantMatcher::SingleMatcher(const DynTypedMatcher &Matcher) {
-  return VariantMatcher(new SinglePayload(Matcher));
+  return VariantMatcher(std::make_shared<SinglePayload>(Matcher));
 }
 
 VariantMatcher
 VariantMatcher::PolymorphicMatcher(std::vector<DynTypedMatcher> Matchers) {
-  return VariantMatcher(new PolymorphicPayload(std::move(Matchers)));
+  return VariantMatcher(
+      std::make_shared<PolymorphicPayload>(std::move(Matchers)));
 }
 
 VariantMatcher VariantMatcher::VariadicOperatorMatcher(
     DynTypedMatcher::VariadicOperator Op,
     std::vector<VariantMatcher> Args) {
-  return VariantMatcher(new VariadicOpPayload(Op, std::move(Args)));
+  return VariantMatcher(
+      std::make_shared<VariadicOpPayload>(Op, std::move(Args)));
 }
 
 llvm::Optional<DynTypedMatcher> VariantMatcher::getSingleMatcher() const {
@@ -245,12 +255,24 @@ VariantValue::VariantValue(const VariantValue &Other) : Type(VT_Nothing) {
   *this = Other;
 }
 
+VariantValue::VariantValue(bool Boolean) : Type(VT_Nothing) {
+  setBoolean(Boolean);
+}
+
+VariantValue::VariantValue(double Double) : Type(VT_Nothing) {
+  setDouble(Double);
+}
+
 VariantValue::VariantValue(unsigned Unsigned) : Type(VT_Nothing) {
   setUnsigned(Unsigned);
 }
 
-VariantValue::VariantValue(const std::string &String) : Type(VT_Nothing) {
+VariantValue::VariantValue(StringRef String) : Type(VT_Nothing) {
   setString(String);
+}
+
+VariantValue::VariantValue(ASTNodeKind NodeKind) : Type(VT_Nothing) {
+  setNodeKind(NodeKind);
 }
 
 VariantValue::VariantValue(const VariantMatcher &Matcher) : Type(VT_Nothing) {
@@ -263,11 +285,20 @@ VariantValue &VariantValue::operator=(const VariantValue &Other) {
   if (this == &Other) return *this;
   reset();
   switch (Other.Type) {
+  case VT_Boolean:
+    setBoolean(Other.getBoolean());
+    break;
+  case VT_Double:
+    setDouble(Other.getDouble());
+    break;
   case VT_Unsigned:
     setUnsigned(Other.getUnsigned());
     break;
   case VT_String:
     setString(Other.getString());
+    break;
+  case VT_NodeKind:
+    setNodeKind(Other.getNodeKind());
     break;
   case VT_Matcher:
     setMatcher(Other.getMatcher());
@@ -287,12 +318,47 @@ void VariantValue::reset() {
   case VT_Matcher:
     delete Value.Matcher;
     break;
+  case VT_NodeKind:
+    delete Value.NodeKind;
+    break;
   // Cases that do nothing.
+  case VT_Boolean:
+  case VT_Double:
   case VT_Unsigned:
   case VT_Nothing:
     break;
   }
   Type = VT_Nothing;
+}
+
+bool VariantValue::isBoolean() const {
+  return Type == VT_Boolean;
+}
+
+bool VariantValue::getBoolean() const {
+  assert(isBoolean());
+  return Value.Boolean;
+}
+
+void VariantValue::setBoolean(bool NewValue) {
+  reset();
+  Type = VT_Boolean;
+  Value.Boolean = NewValue;
+}
+
+bool VariantValue::isDouble() const {
+  return Type == VT_Double;
+}
+
+double VariantValue::getDouble() const {
+  assert(isDouble());
+  return Value.Double;
+}
+
+void VariantValue::setDouble(double NewValue) {
+  reset();
+  Type = VT_Double;
+  Value.Double = NewValue;
 }
 
 bool VariantValue::isUnsigned() const {
@@ -319,10 +385,23 @@ const std::string &VariantValue::getString() const {
   return *Value.String;
 }
 
-void VariantValue::setString(const std::string &NewValue) {
+void VariantValue::setString(StringRef NewValue) {
   reset();
   Type = VT_String;
   Value.String = new std::string(NewValue);
+}
+
+bool VariantValue::isNodeKind() const { return Type == VT_NodeKind; }
+
+const ASTNodeKind &VariantValue::getNodeKind() const {
+  assert(isNodeKind());
+  return *Value.NodeKind;
+}
+
+void VariantValue::setNodeKind(ASTNodeKind NewValue) {
+  reset();
+  Type = VT_NodeKind;
+  Value.NodeKind = new ASTNodeKind(NewValue);
 }
 
 bool VariantValue::isMatcher() const {
@@ -342,6 +421,18 @@ void VariantValue::setMatcher(const VariantMatcher &NewValue) {
 
 bool VariantValue::isConvertibleTo(ArgKind Kind, unsigned *Specificity) const {
   switch (Kind.getArgKind()) {
+  case ArgKind::AK_Boolean:
+    if (!isBoolean())
+      return false;
+    *Specificity = 1;
+    return true;
+
+  case ArgKind::AK_Double:
+    if (!isDouble())
+      return false;
+    *Specificity = 1;
+    return true;
+
   case ArgKind::AK_Unsigned:
     if (!isUnsigned())
       return false;
@@ -353,6 +444,11 @@ bool VariantValue::isConvertibleTo(ArgKind Kind, unsigned *Specificity) const {
       return false;
     *Specificity = 1;
     return true;
+
+  case ArgKind::AK_Node:
+    if (!isNodeKind())
+      return false;
+    return getMatcher().isConvertibleTo(Kind.getNodeKind(), Specificity);
 
   case ArgKind::AK_Matcher:
     if (!isMatcher())
@@ -381,7 +477,11 @@ std::string VariantValue::getTypeAsString() const {
   switch (Type) {
   case VT_String: return "String";
   case VT_Matcher: return getMatcher().getTypeAsString();
+  case VT_Boolean: return "Boolean";
+  case VT_Double: return "Double";
   case VT_Unsigned: return "Unsigned";
+  case VT_NodeKind:
+    return getNodeKind().asStringRef().str();
   case VT_Nothing: return "Nothing";
   }
   llvm_unreachable("Invalid Type");

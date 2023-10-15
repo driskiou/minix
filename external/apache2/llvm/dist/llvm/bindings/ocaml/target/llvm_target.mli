@@ -1,9 +1,8 @@
 (*===-- llvm_target.mli - LLVM OCaml Interface -----------------*- OCaml -*-===*
  *
- *                     The LLVM Compiler Infrastructure
- *
- * This file is distributed under the University of Illinois Open Source
- * License. See LICENSE.TXT for details.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===----------------------------------------------------------------------===*)
 
@@ -66,12 +65,6 @@ module DataLayout : sig
   (** [as_string dl] is the string representation of the data layout [dl].
       See the method [llvm::DataLayout::getStringRepresentation]. *)
   val as_string : t -> string
-
-  (** [add_to_pass_manager pm dl] adds the data layout [dl] to
-      the pass manager [pm].
-      See the method [llvm::PassManagerBase::add]. *)
-  val add_to_pass_manager : [<Llvm.PassManager.any] Llvm.PassManager.t ->
-                            t -> unit
 
   (** Returns the byte order of a target, either [Endian.Big] or
       [Endian.Little].
@@ -200,12 +193,12 @@ module TargetMachine : sig
       [llvm::TargetMachine::getCPU]. *)
   val cpu : t -> string
 
+  (** Returns the data layout of this target machine. *)
+  val data_layout : t -> DataLayout.t
+
   (** Returns the feature string used while creating this target machine. See
       [llvm::TargetMachine::getFeatureString]. *)
   val features : t -> string
-
-  (** Returns the data layout of this target machine. *)
-  val data_layout : t -> DataLayout.t
 
   (** Adds the target-specific analysis passes to the pass manager.
       See [llvm::TargetMachine::addAnalysisPasses]. *)

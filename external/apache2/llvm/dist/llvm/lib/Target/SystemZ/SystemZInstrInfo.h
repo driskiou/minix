@@ -1,9 +1,8 @@
 //===-- SystemZInstrInfo.h - SystemZ instruction information ----*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,16 +15,22 @@
 
 #include "SystemZ.h"
 #include "SystemZRegisterInfo.h"
-#include "llvm/Target/TargetInstrInfo.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include <cstdint>
 
 #define GET_INSTRINFO_HEADER
 #include "SystemZGenInstrInfo.inc"
 
 namespace llvm {
 
-class SystemZTargetMachine;
+class SystemZSubtarget;
 
 namespace SystemZII {
+
 enum {
   // See comments in SystemZInstrFormats.td.
   SimpleBDXLoad          = (1 << 0),
@@ -41,14 +46,18 @@ enum {
   CompareZeroCCMaskShift = 14,
   CCMaskFirst            = (1 << 18),
   CCMaskLast             = (1 << 19),
-  IsLogical              = (1 << 20)
+  IsLogical              = (1 << 20),
+  CCIfNoSignedWrap       = (1 << 21)
 };
+
 static inline unsigned getAccessSize(unsigned int Flags) {
   return (Flags & AccessSizeMask) >> AccessSizeShift;
 }
+
 static inline unsigned getCCValues(unsigned int Flags) {
   return (Flags & CCValuesMask) >> CCValuesShift;
 }
+
 static inline unsigned getCompareZeroCCMask(unsigned int Flags) {
   return (Flags & CompareZeroCCMaskMask) >> CompareZeroCCMaskShift;
 }
@@ -56,11 +65,15 @@ static inline unsigned getCompareZeroCCMask(unsigned int Flags) {
 // SystemZ MachineOperand target flags.
 enum {
   // Masks out the bits for the access model.
-  MO_SYMBOL_MODIFIER = (1 << 0),
+  MO_SYMBOL_MODIFIER = (3 << 0),
 
   // @GOT (aka @GOTENT)
-  MO_GOT = (1 << 0)
+  MO_GOT = (1 << 0),
+
+  // @INDNTPOFF
+  MO_INDNTPOFF = (2 << 0)
 };
+
 // Classifies a branch.
 enum BranchType {
   // An instruction that branches on the current value of CC.
@@ -88,10 +101,18 @@ enum BranchType {
 
   // An instruction that decrements a 64-bit register and branches if
   // the result is nonzero.
-  BranchCTG
+  BranchCTG,
+
+  // An instruction representing an asm goto statement.
+  AsmGoto
 };
+
 // Information about a branch instruction.
-struct Branch {
+class Branch {
+  // The target of the branch. In case of INLINEASM_BR, this is nullptr.
+  const MachineOperand *Target;
+
+public:
   // The type of the branch.
   BranchType Type;
 
@@ -101,109 +122,183 @@ struct Branch {
   // CCMASK_<N> is set if the branch should be taken when CC == N.
   unsigned CCMask;
 
-  // The target of the branch.
-  const MachineOperand *Target;
-
   Branch(BranchType type, unsigned ccValid, unsigned ccMask,
          const MachineOperand *target)
-    : Type(type), CCValid(ccValid), CCMask(ccMask), Target(target) {}
+    : Target(target), Type(type), CCValid(ccValid), CCMask(ccMask) {}
+
+  bool isIndirect() { return Target != nullptr && Target->isReg(); }
+  bool hasMBBTarget() { return Target != nullptr && Target->isMBB(); }
+  MachineBasicBlock *getMBBTarget() {
+    return hasMBBTarget() ? Target->getMBB() : nullptr;
+  }
 };
+
+// Kinds of fused compares in compare-and-* instructions.  Together with type
+// of the converted compare, this identifies the compare-and-*
+// instruction.
+enum FusedCompareType {
+  // Relative branch - CRJ etc.
+  CompareAndBranch,
+
+  // Indirect branch, used for return - CRBReturn etc.
+  CompareAndReturn,
+
+  // Indirect branch, used for sibcall - CRBCall etc.
+  CompareAndSibcall,
+
+  // Trap
+  CompareAndTrap
+};
+
 } // end namespace SystemZII
 
-class SystemZSubtarget;
+namespace SystemZ {
+int getTwoOperandOpcode(uint16_t Opcode);
+int getTargetMemOpcode(uint16_t Opcode);
+
+// Return a version of comparison CC mask CCMask in which the LT and GT
+// actions are swapped.
+unsigned reverseCCMask(unsigned CCMask);
+
+// Create a new basic block after MBB.
+MachineBasicBlock *emitBlockAfter(MachineBasicBlock *MBB);
+// Split MBB after MI and return the new block (the one that contains
+// instructions after MI).
+MachineBasicBlock *splitBlockAfter(MachineBasicBlock::iterator MI,
+                                   MachineBasicBlock *MBB);
+// Split MBB before MI and return the new block (the one that contains MI).
+MachineBasicBlock *splitBlockBefore(MachineBasicBlock::iterator MI,
+                                    MachineBasicBlock *MBB);
+}
+
 class SystemZInstrInfo : public SystemZGenInstrInfo {
   const SystemZRegisterInfo RI;
   SystemZSubtarget &STI;
 
   void splitMove(MachineBasicBlock::iterator MI, unsigned NewOpcode) const;
   void splitAdjDynAlloc(MachineBasicBlock::iterator MI) const;
-  void expandRIPseudo(MachineInstr *MI, unsigned LowOpcode,
-                      unsigned HighOpcode, bool ConvertHigh) const;
-  void expandRIEPseudo(MachineInstr *MI, unsigned LowOpcode,
+  void expandRIPseudo(MachineInstr &MI, unsigned LowOpcode, unsigned HighOpcode,
+                      bool ConvertHigh) const;
+  void expandRIEPseudo(MachineInstr &MI, unsigned LowOpcode,
                        unsigned LowOpcodeK, unsigned HighOpcode) const;
-  void expandRXYPseudo(MachineInstr *MI, unsigned LowOpcode,
+  void expandRXYPseudo(MachineInstr &MI, unsigned LowOpcode,
                        unsigned HighOpcode) const;
-  void expandZExtPseudo(MachineInstr *MI, unsigned LowOpcode,
+  void expandLOCPseudo(MachineInstr &MI, unsigned LowOpcode,
+                       unsigned HighOpcode) const;
+  void expandZExtPseudo(MachineInstr &MI, unsigned LowOpcode,
                         unsigned Size) const;
-  void emitGRX32Move(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-                     DebugLoc DL, unsigned DestReg, unsigned SrcReg,
-                     unsigned LowLowOpcode, unsigned Size, bool KillSrc) const;
+  void expandLoadStackGuard(MachineInstr *MI) const;
+
+  MachineInstrBuilder
+  emitGRX32Move(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
+                const DebugLoc &DL, unsigned DestReg, unsigned SrcReg,
+                unsigned LowLowOpcode, unsigned Size, bool KillSrc,
+                bool UndefSrc) const;
+
   virtual void anchor();
-  
+
+protected:
+  /// Commutes the operands in the given instruction by changing the operands
+  /// order and/or changing the instruction's opcode and/or the immediate value
+  /// operand.
+  ///
+  /// The arguments 'CommuteOpIdx1' and 'CommuteOpIdx2' specify the operands
+  /// to be commuted.
+  ///
+  /// Do not call this method for a non-commutable instruction or
+  /// non-commutable operands.
+  /// Even though the instruction is commutable, the method may still
+  /// fail to commute the operands, null pointer is returned in such cases.
+  MachineInstr *commuteInstructionImpl(MachineInstr &MI, bool NewMI,
+                                       unsigned CommuteOpIdx1,
+                                       unsigned CommuteOpIdx2) const override;
+
 public:
   explicit SystemZInstrInfo(SystemZSubtarget &STI);
 
   // Override TargetInstrInfo.
-  unsigned isLoadFromStackSlot(const MachineInstr *MI,
+  unsigned isLoadFromStackSlot(const MachineInstr &MI,
                                int &FrameIndex) const override;
-  unsigned isStoreToStackSlot(const MachineInstr *MI,
+  unsigned isStoreToStackSlot(const MachineInstr &MI,
                               int &FrameIndex) const override;
-  bool isStackSlotCopy(const MachineInstr *MI, int &DestFrameIndex,
+  bool isStackSlotCopy(const MachineInstr &MI, int &DestFrameIndex,
                        int &SrcFrameIndex) const override;
-  bool AnalyzeBranch(MachineBasicBlock &MBB, MachineBasicBlock *&TBB,
+  bool analyzeBranch(MachineBasicBlock &MBB, MachineBasicBlock *&TBB,
                      MachineBasicBlock *&FBB,
                      SmallVectorImpl<MachineOperand> &Cond,
                      bool AllowModify) const override;
-  unsigned RemoveBranch(MachineBasicBlock &MBB) const override;
-  unsigned InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
-                        MachineBasicBlock *FBB,
-                        const SmallVectorImpl<MachineOperand> &Cond,
-                        DebugLoc DL) const override;
-  bool analyzeCompare(const MachineInstr *MI, unsigned &SrcReg,
-                      unsigned &SrcReg2, int &Mask, int &Value) const override;
-  bool optimizeCompareInstr(MachineInstr *CmpInstr, unsigned SrcReg,
-                            unsigned SrcReg2, int Mask, int Value,
-                            const MachineRegisterInfo *MRI) const override;
-  bool isPredicable(MachineInstr *MI) const override;
+  unsigned removeBranch(MachineBasicBlock &MBB,
+                        int *BytesRemoved = nullptr) const override;
+  unsigned insertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
+                        MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
+                        const DebugLoc &DL,
+                        int *BytesAdded = nullptr) const override;
+  bool analyzeCompare(const MachineInstr &MI, Register &SrcReg,
+                      Register &SrcReg2, int &Mask, int &Value) const override;
+  bool canInsertSelect(const MachineBasicBlock &, ArrayRef<MachineOperand> Cond,
+                       Register, Register, Register, int &, int &,
+                       int &) const override;
+  void insertSelect(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                    const DebugLoc &DL, Register DstReg,
+                    ArrayRef<MachineOperand> Cond, Register TrueReg,
+                    Register FalseReg) const override;
+  bool FoldImmediate(MachineInstr &UseMI, MachineInstr &DefMI, Register Reg,
+                     MachineRegisterInfo *MRI) const override;
+  bool isPredicable(const MachineInstr &MI) const override;
   bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
                            unsigned ExtraPredCycles,
-                           const BranchProbability &Probability) const override;
+                           BranchProbability Probability) const override;
   bool isProfitableToIfCvt(MachineBasicBlock &TMBB,
                            unsigned NumCyclesT, unsigned ExtraPredCyclesT,
                            MachineBasicBlock &FMBB,
                            unsigned NumCyclesF, unsigned ExtraPredCyclesF,
-                           const BranchProbability &Probability) const override;
-  bool PredicateInstruction(MachineInstr *MI,
-                            const SmallVectorImpl<MachineOperand> &Pred) const
-    override;
+                           BranchProbability Probability) const override;
+  bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
+                            BranchProbability Probability) const override;
+  bool PredicateInstruction(MachineInstr &MI,
+                            ArrayRef<MachineOperand> Pred) const override;
   void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-                   DebugLoc DL, unsigned DestReg, unsigned SrcReg,
+                   const DebugLoc &DL, MCRegister DestReg, MCRegister SrcReg,
                    bool KillSrc) const override;
   void storeRegToStackSlot(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MBBI,
-                           unsigned SrcReg, bool isKill, int FrameIndex,
+                           Register SrcReg, bool isKill, int FrameIndex,
                            const TargetRegisterClass *RC,
                            const TargetRegisterInfo *TRI) const override;
   void loadRegFromStackSlot(MachineBasicBlock &MBB,
                             MachineBasicBlock::iterator MBBI,
-                            unsigned DestReg, int FrameIdx,
+                            Register DestReg, int FrameIdx,
                             const TargetRegisterClass *RC,
                             const TargetRegisterInfo *TRI) const override;
   MachineInstr *convertToThreeAddress(MachineFunction::iterator &MFI,
-                                      MachineBasicBlock::iterator &MBBI,
+                                      MachineInstr &MI,
                                       LiveVariables *LV) const override;
-  MachineInstr *foldMemoryOperandImpl(MachineFunction &MF, MachineInstr *MI,
-                                      const SmallVectorImpl<unsigned> &Ops,
-                                      int FrameIndex) const override;
-  MachineInstr *foldMemoryOperandImpl(MachineFunction &MF, MachineInstr* MI,
-                                      const SmallVectorImpl<unsigned> &Ops,
-                                      MachineInstr* LoadMI) const override;
-  bool expandPostRAPseudo(MachineBasicBlock::iterator MBBI) const override;
-  bool ReverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const
+  MachineInstr *
+  foldMemoryOperandImpl(MachineFunction &MF, MachineInstr &MI,
+                        ArrayRef<unsigned> Ops,
+                        MachineBasicBlock::iterator InsertPt, int FrameIndex,
+                        LiveIntervals *LIS = nullptr,
+                        VirtRegMap *VRM = nullptr) const override;
+  MachineInstr *foldMemoryOperandImpl(
+      MachineFunction &MF, MachineInstr &MI, ArrayRef<unsigned> Ops,
+      MachineBasicBlock::iterator InsertPt, MachineInstr &LoadMI,
+      LiveIntervals *LIS = nullptr) const override;
+  bool expandPostRAPseudo(MachineInstr &MBBI) const override;
+  bool reverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const
     override;
 
   // Return the SystemZRegisterInfo, which this class owns.
   const SystemZRegisterInfo &getRegisterInfo() const { return RI; }
 
   // Return the size in bytes of MI.
-  uint64_t getInstSizeInBytes(const MachineInstr *MI) const;
+  unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
 
   // Return true if MI is a conditional or unconditional branch.
   // When returning true, set Cond to the mask of condition-code
   // values on which the instruction will branch, and set Target
   // to the operand that contains the branch target.  This target
   // can be a register or a basic block.
-  SystemZII::Branch getBranchInfo(const MachineInstr *MI) const;
+  SystemZII::Branch getBranchInfo(const MachineInstr &MI) const;
 
   // Get the load and store opcodes for a given register class.
   void getLoadStoreOpcodes(const TargetRegisterClass *RC,
@@ -226,18 +321,42 @@ public:
   bool isRxSBGMask(uint64_t Mask, unsigned BitSize,
                    unsigned &Start, unsigned &End) const;
 
-  // If Opcode is a COMPARE opcode for which an associated COMPARE AND
-  // BRANCH exists, return the opcode for the latter, otherwise return 0.
+  // If Opcode is a COMPARE opcode for which an associated fused COMPARE AND *
+  // operation exists, return the opcode for the latter, otherwise return 0.
   // MI, if nonnull, is the compare instruction.
-  unsigned getCompareAndBranch(unsigned Opcode,
-                               const MachineInstr *MI = nullptr) const;
+  unsigned getFusedCompare(unsigned Opcode,
+                           SystemZII::FusedCompareType Type,
+                           const MachineInstr *MI = nullptr) const;
+
+  // Try to find all CC users of the compare instruction (MBBI) and update
+  // all of them to maintain equivalent behavior after swapping the compare
+  // operands. Return false if not all users can be conclusively found and
+  // handled. The compare instruction is *not* changed.
+  bool prepareCompareSwapOperands(MachineBasicBlock::iterator MBBI) const;
+
+  // If Opcode is a LOAD opcode for with an associated LOAD AND TRAP
+  // operation exists, returh the opcode for the latter, otherwise return 0.
+  unsigned getLoadAndTrap(unsigned Opcode) const;
 
   // Emit code before MBBI in MI to move immediate value Value into
   // physical register Reg.
   void loadImmediate(MachineBasicBlock &MBB,
                      MachineBasicBlock::iterator MBBI,
                      unsigned Reg, uint64_t Value) const;
+
+  // Perform target specific instruction verification.
+  bool verifyInstruction(const MachineInstr &MI,
+                         StringRef &ErrInfo) const override;
+
+  // Sometimes, it is possible for the target to tell, even without
+  // aliasing information, that two MIs access different memory
+  // addresses. This function returns true if two MIs access different
+  // memory addresses and false otherwise.
+  bool
+  areMemAccessesTriviallyDisjoint(const MachineInstr &MIa,
+                                  const MachineInstr &MIb) const override;
 };
+
 } // end namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_SYSTEMZ_SYSTEMZINSTRINFO_H

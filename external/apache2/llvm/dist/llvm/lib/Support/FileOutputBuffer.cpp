@@ -1,9 +1,8 @@
 //===- FileOutputBuffer.cpp - File Output Buffer ----------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,11 +10,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Support/Errc.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/FileOutputBuffer.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Errc.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Memory.h"
+#include "llvm/Support/Path.h"
 #include <system_error>
 
 #if !defined(_MSC_VER) && !defined(__MINGW32__)
@@ -24,83 +24,172 @@
 #include <io.h>
 #endif
 
-using llvm::sys::fs::mapped_file_region;
+using namespace llvm;
+using namespace llvm::sys;
 
-namespace llvm {
-FileOutputBuffer::FileOutputBuffer(std::unique_ptr<mapped_file_region> R,
-                                   StringRef Path, StringRef TmpPath)
-    : Region(std::move(R)), FinalPath(Path), TempPath(TmpPath) {}
+namespace {
+// A FileOutputBuffer which creates a temporary file in the same directory
+// as the final output file. The final output file is atomically replaced
+// with the temporary file on commit().
+class OnDiskBuffer : public FileOutputBuffer {
+public:
+  OnDiskBuffer(StringRef Path, fs::TempFile Temp, fs::mapped_file_region Buf)
+      : FileOutputBuffer(Path), Buffer(std::move(Buf)), Temp(std::move(Temp)) {}
 
-FileOutputBuffer::~FileOutputBuffer() {
-  sys::fs::remove(Twine(TempPath));
-}
+  uint8_t *getBufferStart() const override { return (uint8_t *)Buffer.data(); }
 
-std::error_code
-FileOutputBuffer::create(StringRef FilePath, size_t Size,
-                         std::unique_ptr<FileOutputBuffer> &Result,
-                         unsigned Flags) {
-  // If file already exists, it must be a regular file (to be mappable).
-  sys::fs::file_status Stat;
-  std::error_code EC = sys::fs::status(FilePath, Stat);
-  switch (Stat.type()) {
-    case sys::fs::file_type::file_not_found:
-      // If file does not exist, we'll create one.
-      break;
-    case sys::fs::file_type::regular_file: {
-        // If file is not currently writable, error out.
-        // FIXME: There is no sys::fs:: api for checking this.
-        // FIXME: In posix, you use the access() call to check this.
-      }
-      break;
-    default:
-      if (EC)
-        return EC;
-      else
-        return make_error_code(errc::operation_not_permitted);
+  uint8_t *getBufferEnd() const override {
+    return (uint8_t *)Buffer.data() + Buffer.size();
   }
 
-  // Delete target file.
-  EC = sys::fs::remove(FilePath);
-  if (EC)
-    return EC;
+  size_t getBufferSize() const override { return Buffer.size(); }
 
-  unsigned Mode = sys::fs::all_read | sys::fs::all_write;
-  // If requested, make the output file executable.
-  if (Flags & F_executable)
-    Mode |= sys::fs::all_exe;
+  Error commit() override {
+    // Unmap buffer, letting OS flush dirty pages to file on disk.
+    Buffer.unmap();
 
-  // Create new file in same directory but with random name.
-  SmallString<128> TempFilePath;
-  int FD;
-  EC = sys::fs::createUniqueFile(Twine(FilePath) + ".tmp%%%%%%%", FD,
-                                 TempFilePath, Mode);
-  if (EC)
-    return EC;
+    // Atomically replace the existing file with the new one.
+    return Temp.keep(FinalPath);
+  }
 
-  EC = sys::fs::resize_file(FD, Size);
-  if (EC)
-    return EC;
+  ~OnDiskBuffer() override {
+    // Close the mapping before deleting the temp file, so that the removal
+    // succeeds.
+    Buffer.unmap();
+    consumeError(Temp.discard());
+  }
 
-  auto MappedFile = llvm::make_unique<mapped_file_region>(
-      FD, mapped_file_region::readwrite, Size, 0, EC);
-  int Ret = close(FD);
-  if (EC)
-    return EC;
-  if (Ret)
-    return std::error_code(errno, std::generic_category());
+  void discard() override {
+    // Delete the temp file if it still was open, but keeping the mapping
+    // active.
+    consumeError(Temp.discard());
+  }
 
-  Result.reset(
-      new FileOutputBuffer(std::move(MappedFile), FilePath, TempFilePath));
+private:
+  fs::mapped_file_region Buffer;
+  fs::TempFile Temp;
+};
 
-  return std::error_code();
-}
+// A FileOutputBuffer which keeps data in memory and writes to the final
+// output file on commit(). This is used only when we cannot use OnDiskBuffer.
+class InMemoryBuffer : public FileOutputBuffer {
+public:
+  InMemoryBuffer(StringRef Path, MemoryBlock Buf, std::size_t BufSize,
+                 unsigned Mode)
+      : FileOutputBuffer(Path), Buffer(Buf), BufferSize(BufSize),
+        Mode(Mode) {}
 
-std::error_code FileOutputBuffer::commit() {
-  // Unmap buffer, letting OS flush dirty pages to file on disk.
-  Region.reset();
+  uint8_t *getBufferStart() const override { return (uint8_t *)Buffer.base(); }
 
+  uint8_t *getBufferEnd() const override {
+    return (uint8_t *)Buffer.base() + BufferSize;
+  }
 
-  // Rename file to final name.
-  return sys::fs::rename(Twine(TempPath), Twine(FinalPath));
-}
+  size_t getBufferSize() const override { return BufferSize; }
+
+  Error commit() override {
+    if (FinalPath == "-") {
+      llvm::outs() << StringRef((const char *)Buffer.base(), BufferSize);
+      llvm::outs().flush();
+      return Error::success();
+    }
+
+    using namespace sys::fs;
+    int FD;
+    std::error_code EC;
+    if (auto EC =
+            openFileForWrite(FinalPath, FD, CD_CreateAlways, OF_None, Mode))
+      return errorCodeToError(EC);
+    raw_fd_ostream OS(FD, /*shouldClose=*/true, /*unbuffered=*/true);
+    OS << StringRef((const char *)Buffer.base(), BufferSize);
+    return Error::success();
+  }
+
+private:
+  // Buffer may actually contain a larger memory block than BufferSize
+  OwningMemoryBlock Buffer;
+  size_t BufferSize;
+  unsigned Mode;
+};
 } // namespace
+
+static Expected<std::unique_ptr<InMemoryBuffer>>
+createInMemoryBuffer(StringRef Path, size_t Size, unsigned Mode) {
+  std::error_code EC;
+  MemoryBlock MB = Memory::allocateMappedMemory(
+      Size, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, EC);
+  if (EC)
+    return errorCodeToError(EC);
+  return std::make_unique<InMemoryBuffer>(Path, MB, Size, Mode);
+}
+
+static Expected<std::unique_ptr<FileOutputBuffer>>
+createOnDiskBuffer(StringRef Path, size_t Size, unsigned Mode) {
+  Expected<fs::TempFile> FileOrErr =
+      fs::TempFile::create(Path + ".tmp%%%%%%%", Mode);
+  if (!FileOrErr)
+    return FileOrErr.takeError();
+  fs::TempFile File = std::move(*FileOrErr);
+
+  if (auto EC = fs::resize_file_before_mapping_readwrite(File.FD, Size)) {
+    consumeError(File.discard());
+    return errorCodeToError(EC);
+  }
+
+  // Mmap it.
+  std::error_code EC;
+  fs::mapped_file_region MappedFile =
+      fs::mapped_file_region(fs::convertFDToNativeFile(File.FD),
+                             fs::mapped_file_region::readwrite, Size, 0, EC);
+
+  // mmap(2) can fail if the underlying filesystem does not support it.
+  // If that happens, we fall back to in-memory buffer as the last resort.
+  if (EC) {
+    consumeError(File.discard());
+    return createInMemoryBuffer(Path, Size, Mode);
+  }
+
+  return std::make_unique<OnDiskBuffer>(Path, std::move(File),
+                                         std::move(MappedFile));
+}
+
+// Create an instance of FileOutputBuffer.
+Expected<std::unique_ptr<FileOutputBuffer>>
+FileOutputBuffer::create(StringRef Path, size_t Size, unsigned Flags) {
+  // Handle "-" as stdout just like llvm::raw_ostream does.
+  if (Path == "-")
+    return createInMemoryBuffer("-", Size, /*Mode=*/0);
+
+  unsigned Mode = fs::all_read | fs::all_write;
+  if (Flags & F_executable)
+    Mode |= fs::all_exe;
+
+  // If Size is zero, don't use mmap which will fail with EINVAL.
+  if (Size == 0)
+    return createInMemoryBuffer(Path, Size, Mode);
+
+  fs::file_status Stat;
+  fs::status(Path, Stat);
+
+  // Usually, we want to create OnDiskBuffer to create a temporary file in
+  // the same directory as the destination file and atomically replaces it
+  // by rename(2).
+  //
+  // However, if the destination file is a special file, we don't want to
+  // use rename (e.g. we don't want to replace /dev/null with a regular
+  // file.) If that's the case, we create an in-memory buffer, open the
+  // destination file and write to it on commit().
+  switch (Stat.type()) {
+  case fs::file_type::directory_file:
+    return errorCodeToError(errc::is_a_directory);
+  case fs::file_type::regular_file:
+  case fs::file_type::file_not_found:
+  case fs::file_type::status_error:
+    if (Flags & F_no_mmap)
+      return createInMemoryBuffer(Path, Size, Mode);
+    else
+      return createOnDiskBuffer(Path, Size, Mode);
+  default:
+    return createInMemoryBuffer(Path, Size, Mode);
+  }
+}

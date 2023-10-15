@@ -1,9 +1,9 @@
 /*===-- llvm-c/ExecutionEngine.h - ExecutionEngine Lib C Iface --*- C++ -*-===*\
 |*                                                                            *|
-|*                     The LLVM Compiler Infrastructure                       *|
-|*                                                                            *|
-|* This file is distributed under the University of Illinois Open Source      *|
-|* License. See LICENSE.TXT for details.                                      *|
+|* Part of the LLVM Project, under the Apache License v2.0 with LLVM          *|
+|* Exceptions.                                                                *|
+|* See https://llvm.org/LICENSE.txt for license information.                  *|
+|* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    *|
 |*                                                                            *|
 |*===----------------------------------------------------------------------===*|
 |*                                                                            *|
@@ -19,13 +19,12 @@
 #ifndef LLVM_C_EXECUTIONENGINE_H
 #define LLVM_C_EXECUTIONENGINE_H
 
-#include "llvm-c/Core.h"
+#include "llvm-c/ExternC.h"
 #include "llvm-c/Target.h"
 #include "llvm-c/TargetMachine.h"
+#include "llvm-c/Types.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+LLVM_C_EXTERN_C_BEGIN
 
 /**
  * @defgroup LLVMCExecutionEngine Execution Engine
@@ -110,22 +109,6 @@ LLVMBool LLVMCreateMCJITCompilerForModule(
   struct LLVMMCJITCompilerOptions *Options, size_t SizeOfOptions,
   char **OutError);
 
-/** Deprecated: Use LLVMCreateExecutionEngineForModule instead. */
-LLVMBool LLVMCreateExecutionEngine(LLVMExecutionEngineRef *OutEE,
-                                   LLVMModuleProviderRef MP,
-                                   char **OutError);
-
-/** Deprecated: Use LLVMCreateInterpreterForModule instead. */
-LLVMBool LLVMCreateInterpreter(LLVMExecutionEngineRef *OutInterp,
-                               LLVMModuleProviderRef MP,
-                               char **OutError);
-
-/** Deprecated: Use LLVMCreateJITCompilerForModule instead. */
-LLVMBool LLVMCreateJITCompiler(LLVMExecutionEngineRef *OutJIT,
-                               LLVMModuleProviderRef MP,
-                               unsigned OptLevel,
-                               char **OutError);
-
 void LLVMDisposeExecutionEngine(LLVMExecutionEngineRef EE);
 
 void LLVMRunStaticConstructors(LLVMExecutionEngineRef EE);
@@ -144,16 +127,8 @@ void LLVMFreeMachineCodeForFunction(LLVMExecutionEngineRef EE, LLVMValueRef F);
 
 void LLVMAddModule(LLVMExecutionEngineRef EE, LLVMModuleRef M);
 
-/** Deprecated: Use LLVMAddModule instead. */
-void LLVMAddModuleProvider(LLVMExecutionEngineRef EE, LLVMModuleProviderRef MP);
-
 LLVMBool LLVMRemoveModule(LLVMExecutionEngineRef EE, LLVMModuleRef M,
                           LLVMModuleRef *OutMod, char **OutError);
-
-/** Deprecated: Use LLVMRemoveModule instead. */
-LLVMBool LLVMRemoveModuleProvider(LLVMExecutionEngineRef EE,
-                                  LLVMModuleProviderRef MP,
-                                  LLVMModuleRef *OutMod, char **OutError);
 
 LLVMBool LLVMFindFunction(LLVMExecutionEngineRef EE, const char *Name,
                           LLVMValueRef *OutFn);
@@ -173,6 +148,11 @@ void *LLVMGetPointerToGlobal(LLVMExecutionEngineRef EE, LLVMValueRef Global);
 uint64_t LLVMGetGlobalValueAddress(LLVMExecutionEngineRef EE, const char *Name);
 
 uint64_t LLVMGetFunctionAddress(LLVMExecutionEngineRef EE, const char *Name);
+
+/// Returns true on error, false on success. If true is returned then the error
+/// message is copied to OutStr and cleared in the ExecutionEngine instance.
+LLVMBool LLVMExecutionEngineGetErrMsg(LLVMExecutionEngineRef EE,
+                                      char **OutError);
 
 /*===-- Operations on memory managers -------------------------------------===*/
 
@@ -206,12 +186,17 @@ LLVMMCJITMemoryManagerRef LLVMCreateSimpleMCJITMemoryManager(
 
 void LLVMDisposeMCJITMemoryManager(LLVMMCJITMemoryManagerRef MM);
 
+/*===-- JIT Event Listener functions -------------------------------------===*/
+
+LLVMJITEventListenerRef LLVMCreateGDBRegistrationListener(void);
+LLVMJITEventListenerRef LLVMCreateIntelJITEventListener(void);
+LLVMJITEventListenerRef LLVMCreateOProfileJITEventListener(void);
+LLVMJITEventListenerRef LLVMCreatePerfJITEventListener(void);
+
 /**
  * @}
  */
 
-#ifdef __cplusplus
-}
-#endif /* defined(__cplusplus) */
+LLVM_C_EXTERN_C_END
 
 #endif

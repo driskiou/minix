@@ -1,9 +1,8 @@
 //===-- llvm/CodeGen/SelectionDAGISel.h - Common Base Class------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -17,25 +16,23 @@
 
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/Pass.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include <memory>
 
 namespace llvm {
-  class FastISel;
-  class SelectionDAGBuilder;
-  class SDValue;
-  class MachineRegisterInfo;
-  class MachineBasicBlock;
-  class MachineFunction;
-  class MachineInstr;
-  class TargetLowering;
-  class TargetLibraryInfo;
-  class FunctionLoweringInfo;
-  class ScheduleHazardRecognizer;
-  class GCFunctionInfo;
-  class ScheduleDAGSDNodes;
-  class LoadInst;
+class AAResults;
+class SelectionDAGBuilder;
+class SDValue;
+class MachineRegisterInfo;
+class MachineFunction;
+class OptimizationRemarkEmitter;
+class TargetLowering;
+class TargetLibraryInfo;
+class FunctionLoweringInfo;
+class SwiftErrorValueTracking;
+class GCFunctionInfo;
+class ScheduleDAGSDNodes;
 
 /// SelectionDAGISel - This is the common base class used for SelectionDAG-based
 /// pattern-matching instruction selectors.
@@ -43,22 +40,29 @@ class SelectionDAGISel : public MachineFunctionPass {
 public:
   TargetMachine &TM;
   const TargetLibraryInfo *LibInfo;
-  FunctionLoweringInfo *FuncInfo;
+  std::unique_ptr<FunctionLoweringInfo> FuncInfo;
+  SwiftErrorValueTracking *SwiftError;
   MachineFunction *MF;
   MachineRegisterInfo *RegInfo;
   SelectionDAG *CurDAG;
-  SelectionDAGBuilder *SDB;
-  AliasAnalysis *AA;
+  std::unique_ptr<SelectionDAGBuilder> SDB;
+  AAResults *AA;
   GCFunctionInfo *GFI;
   CodeGenOpt::Level OptLevel;
   const TargetInstrInfo *TII;
   const TargetLowering *TLI;
+  bool FastISelFailed;
+  SmallPtrSet<const Instruction *, 4> ElidedArgCopyInstrs;
+
+  /// Current optimization remark emitter.
+  /// Used to report things like combines and FastISel failures.
+  std::unique_ptr<OptimizationRemarkEmitter> ORE;
 
   static char ID;
 
   explicit SelectionDAGISel(TargetMachine &tm,
                             CodeGenOpt::Level OL = CodeGenOpt::Default);
-  virtual ~SelectionDAGISel();
+  ~SelectionDAGISel() override;
 
   const TargetLowering *getTargetLowering() const { return TLI; }
 
@@ -66,7 +70,7 @@ public:
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
-  virtual void EmitFunctionEntryCode() {}
+  virtual void emitFunctionEntryCode() {}
 
   /// PreprocessISelDAG - This hook allows targets to hack on the graph before
   /// instruction selection starts.
@@ -76,16 +80,16 @@ public:
   /// right after selection.
   virtual void PostprocessISelDAG() {}
 
-  /// Select - Main hook targets implement to select a node.
-  virtual SDNode *Select(SDNode *N) = 0;
+  /// Main hook for targets to transform nodes into machine nodes.
+  virtual void Select(SDNode *N) = 0;
 
   /// SelectInlineAsmMemoryOperand - Select the specified address as a target
-  /// addressing mode, according to the specified constraint code.  If this does
+  /// addressing mode, according to the specified constraint.  If this does
   /// not match or is not implemented, return true.  The resultant operands
   /// (which will appear in the machine instruction) should be added to the
   /// OutOps vector.
   virtual bool SelectInlineAsmMemoryOperand(const SDValue &Op,
-                                            char ConstraintCode,
+                                            unsigned ConstraintID,
                                             std::vector<SDValue> &OutOps) {
     return true;
   }
@@ -102,6 +106,11 @@ public:
                             CodeGenOpt::Level OptLevel,
                             bool IgnoreChains = false);
 
+  static void InvalidateNodeId(SDNode *N);
+  static int getUninvalidatedNodeId(SDNode *N);
+
+  static void EnforceNodeIdInvariant(SDNode *N);
+
   // Opcodes used by the DAG state machine:
   enum BuiltinOpcodes {
     OPC_Scope,
@@ -111,15 +120,19 @@ public:
     OPC_RecordMemRef,
     OPC_CaptureGlueInput,
     OPC_MoveChild,
+    OPC_MoveChild0, OPC_MoveChild1, OPC_MoveChild2, OPC_MoveChild3,
+    OPC_MoveChild4, OPC_MoveChild5, OPC_MoveChild6, OPC_MoveChild7,
     OPC_MoveParent,
     OPC_CheckSame,
     OPC_CheckChild0Same, OPC_CheckChild1Same,
     OPC_CheckChild2Same, OPC_CheckChild3Same,
     OPC_CheckPatternPredicate,
     OPC_CheckPredicate,
+    OPC_CheckPredicateWithOperands,
     OPC_CheckOpcode,
     OPC_SwitchOpcode,
     OPC_CheckType,
+    OPC_CheckTypeRes,
     OPC_SwitchType,
     OPC_CheckChild0Type, OPC_CheckChild1Type, OPC_CheckChild2Type,
     OPC_CheckChild3Type, OPC_CheckChild4Type, OPC_CheckChild5Type,
@@ -127,25 +140,35 @@ public:
     OPC_CheckInteger,
     OPC_CheckChild0Integer, OPC_CheckChild1Integer, OPC_CheckChild2Integer,
     OPC_CheckChild3Integer, OPC_CheckChild4Integer,
-    OPC_CheckCondCode,
+    OPC_CheckCondCode, OPC_CheckChild2CondCode,
     OPC_CheckValueType,
     OPC_CheckComplexPat,
     OPC_CheckAndImm, OPC_CheckOrImm,
+    OPC_CheckImmAllOnesV,
+    OPC_CheckImmAllZerosV,
     OPC_CheckFoldableChainNode,
 
     OPC_EmitInteger,
+    OPC_EmitStringInteger,
     OPC_EmitRegister,
     OPC_EmitRegister2,
     OPC_EmitConvertToTarget,
     OPC_EmitMergeInputChains,
     OPC_EmitMergeInputChains1_0,
     OPC_EmitMergeInputChains1_1,
+    OPC_EmitMergeInputChains1_2,
     OPC_EmitCopyToReg,
+    OPC_EmitCopyToReg2,
     OPC_EmitNodeXForm,
     OPC_EmitNode,
+    // Space-optimized forms that implicitly encode number of result VTs.
+    OPC_EmitNode0, OPC_EmitNode1, OPC_EmitNode2,
     OPC_MorphNodeTo,
-    OPC_MarkGlueResults,
-    OPC_CompleteMatch
+    // Space-optimized forms that implicitly encode number of result VTs.
+    OPC_MorphNodeTo0, OPC_MorphNodeTo1, OPC_MorphNodeTo2,
+    OPC_CompleteMatch,
+    // Contains offset in table for pattern being selected
+    OPC_Coverage
   };
 
   enum {
@@ -182,25 +205,49 @@ protected:
   /// of the new node T.
   void ReplaceUses(SDValue F, SDValue T) {
     CurDAG->ReplaceAllUsesOfValueWith(F, T);
+    EnforceNodeIdInvariant(T.getNode());
   }
 
   /// ReplaceUses - replace all uses of the old nodes F with the use
   /// of the new nodes T.
   void ReplaceUses(const SDValue *F, const SDValue *T, unsigned Num) {
     CurDAG->ReplaceAllUsesOfValuesWith(F, T, Num);
+    for (unsigned i = 0; i < Num; ++i)
+      EnforceNodeIdInvariant(T[i].getNode());
   }
 
   /// ReplaceUses - replace all uses of the old node F with the use
   /// of the new node T.
   void ReplaceUses(SDNode *F, SDNode *T) {
     CurDAG->ReplaceAllUsesWith(F, T);
+    EnforceNodeIdInvariant(T);
   }
 
+  /// Replace all uses of \c F with \c T, then remove \c F from the DAG.
+  void ReplaceNode(SDNode *F, SDNode *T) {
+    CurDAG->ReplaceAllUsesWith(F, T);
+    EnforceNodeIdInvariant(T);
+    CurDAG->RemoveDeadNode(F);
+  }
 
   /// SelectInlineAsmMemoryOperands - Calls to this are automatically generated
   /// by tblgen.  Others should not call it.
-  void SelectInlineAsmMemoryOperands(std::vector<SDValue> &Ops);
+  void SelectInlineAsmMemoryOperands(std::vector<SDValue> &Ops,
+                                     const SDLoc &DL);
 
+  /// getPatternForIndex - Patterns selected by tablegen during ISEL
+  virtual StringRef getPatternForIndex(unsigned index) {
+    llvm_unreachable("Tblgen should generate the implementation of this!");
+  }
+
+  /// getIncludePathForIndex - get the td source location of pattern instantiation
+  virtual StringRef getIncludePathForIndex(unsigned index) {
+    llvm_unreachable("Tblgen should generate the implementation of this!");
+  }
+
+  bool shouldOptForSize(const MachineFunction *MF) const {
+    return CurDAG->shouldOptForSize();
+  }
 
 public:
   // Calls to these predicates are generated by tblgen.
@@ -226,6 +273,17 @@ public:
     llvm_unreachable("Tblgen should generate the implementation of this!");
   }
 
+  /// CheckNodePredicateWithOperands - This function is generated by tblgen in
+  /// the target.
+  /// It runs node predicate number PredNo and returns true if it succeeds or
+  /// false if it fails.  The number is a private implementation detail to the
+  /// code tblgen produces.
+  virtual bool CheckNodePredicateWithOperands(
+      SDNode *N, unsigned PredNo,
+      const SmallVectorImpl<SDValue> &Operands) const {
+    llvm_unreachable("Tblgen should generate the implementation of this!");
+  }
+
   virtual bool CheckComplexPattern(SDNode *Root, SDNode *Parent, SDValue N,
                                    unsigned PatternNo,
                         SmallVectorImpl<std::pair<SDValue, SDNode*> > &Result) {
@@ -236,36 +294,45 @@ public:
     llvm_unreachable("Tblgen should generate this!");
   }
 
-  SDNode *SelectCodeCommon(SDNode *NodeToMatch,
-                           const unsigned char *MatcherTable,
-                           unsigned TableSize);
+  void SelectCodeCommon(SDNode *NodeToMatch, const unsigned char *MatcherTable,
+                        unsigned TableSize);
 
-  /// \brief Return true if complex patterns for this target can mutate the
+  /// Return true if complex patterns for this target can mutate the
   /// DAG.
   virtual bool ComplexPatternFuncMutatesDAG() const {
     return false;
   }
 
+  /// Return whether the node may raise an FP exception.
+  bool mayRaiseFPException(SDNode *Node) const;
+
+  bool isOrEquivalentToAdd(const SDNode *N) const;
+
 private:
 
   // Calls to these functions are generated by tblgen.
-  SDNode *Select_INLINEASM(SDNode *N);
-  SDNode *Select_READ_REGISTER(SDNode *N);
-  SDNode *Select_WRITE_REGISTER(SDNode *N);
-  SDNode *Select_UNDEF(SDNode *N);
+  void Select_INLINEASM(SDNode *N);
+  void Select_READ_REGISTER(SDNode *Op);
+  void Select_WRITE_REGISTER(SDNode *Op);
+  void Select_UNDEF(SDNode *N);
   void CannotYetSelect(SDNode *N);
+
+  void Select_FREEZE(SDNode *N);
 
 private:
   void DoInstructionSelection();
-  SDNode *MorphNode(SDNode *Node, unsigned TargetOpc, SDVTList VTs,
+  SDNode *MorphNode(SDNode *Node, unsigned TargetOpc, SDVTList VTList,
                     ArrayRef<SDValue> Ops, unsigned EmitNodeInfo);
 
-  void PrepareEHLandingPad();
+  /// Prepares the landing pad to take incoming values or do other EH
+  /// personality specific tasks. Returns true if the block should be
+  /// instruction selected, false if no code should be emitted for it.
+  bool PrepareEHLandingPad();
 
-  /// \brief Perform instruction selection on all basic blocks in the function.
+  /// Perform instruction selection on all basic blocks in the function.
   void SelectAllBasicBlocks(const Function &Fn);
 
-  /// \brief Perform instruction selection on a single basic block, for
+  /// Perform instruction selection on a single basic block, for
   /// instructions between \p Begin and \p End.  \p HadTailCall will be set
   /// to true if a call in the block was translated as a tail call.
   void SelectBasicBlock(BasicBlock::const_iterator Begin,
@@ -275,7 +342,7 @@ private:
 
   void CodeGenAndEmitDAG();
 
-  /// \brief Generate instructions for lowering the incoming arguments of the
+  /// Generate instructions for lowering the incoming arguments of the
   /// given function.
   void LowerArguments(const Function &F);
 
@@ -291,11 +358,9 @@ private:
   /// state machines that start with a OPC_SwitchOpcode node.
   std::vector<unsigned> OpcodeOffset;
 
-  void UpdateChainsAndGlue(SDNode *NodeToMatch, SDValue InputChain,
-                           const SmallVectorImpl<SDNode*> &ChainNodesMatched,
-                           SDValue InputGlue, const SmallVectorImpl<SDNode*> &F,
-                           bool isMorphNodeTo);
-
+  void UpdateChains(SDNode *NodeToMatch, SDValue InputChain,
+                    SmallVectorImpl<SDNode *> &ChainNodesMatched,
+                    bool isMorphNodeTo);
 };
 
 }

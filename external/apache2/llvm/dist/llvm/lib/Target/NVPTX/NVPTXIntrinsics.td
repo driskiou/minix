@@ -1,9 +1,8 @@
 //===- NVPTXIntrinsics.td - PTX Intrinsics Instructions -------*- tblgen -*-==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -27,43 +26,271 @@ def immDouble1 : PatLeaf<(fpimm), [{
     return (d==1.0);
 }]>;
 
+def AS_match {
+  code generic = [{
+   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_GENERIC);
+  }];
+  code shared = [{
+   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_SHARED);
+  }];
+  code global = [{
+   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_GLOBAL);
+  }];
+}
 
+// A node that will be replaced with the current PTX version.
+class PTX {
+  SDNodeXForm PTXVerXform = SDNodeXForm<imm, [{
+    return getI32Imm(Subtarget->getPTXVersion(), SDLoc(N));
+  }]>;
+  // (i32 0) will be XForm'ed to the currently used PTX version.
+  dag version = (PTXVerXform (i32 0));
+}
+def ptx : PTX;
+
+// Generates list of n sequential register names.
+// E.g. RegNames<3,"r">.ret -> ["r0", "r1", "r2" ]
+class RegSeq<int n, string prefix> {
+  list<string> ret = !if(n, !listconcat(RegSeq<!sub(n, 1), prefix>.ret,
+                                        [prefix # !sub(n, 1)]),
+                            []);
+}
+
+class THREADMASK_INFO<bit sync> {
+  list<bit> ret = !if(sync, [0, 1], [0]);
+}
 
 //-----------------------------------
-// Synchronization Functions
+// Synchronization and shuffle functions
 //-----------------------------------
-def INT_CUDA_SYNCTHREADS : NVPTXInst<(outs), (ins),
-                  "bar.sync \t0;",
-      [(int_cuda_syncthreads)]>;
+let isConvergent = true in {
 def INT_BARRIER0 : NVPTXInst<(outs), (ins),
                   "bar.sync \t0;",
       [(int_nvvm_barrier0)]>;
+def INT_BARRIERN : NVPTXInst<(outs), (ins Int32Regs:$src1),
+                  "bar.sync \t$src1;",
+      [(int_nvvm_barrier_n Int32Regs:$src1)]>;
+def INT_BARRIER : NVPTXInst<(outs), (ins Int32Regs:$src1, Int32Regs:$src2),
+                  "bar.sync \t$src1, $src2;",
+      [(int_nvvm_barrier Int32Regs:$src1, Int32Regs:$src2)]>;
 def INT_BARRIER0_POPC : NVPTXInst<(outs Int32Regs:$dst), (ins Int32Regs:$pred),
   !strconcat("{{ \n\t",
-      !strconcat(".reg .pred \t%p1; \n\t",
-      !strconcat("setp.ne.u32 \t%p1, $pred, 0; \n\t",
-      !strconcat("bar.red.popc.u32 \t$dst, 0, %p1; \n\t",
-        !strconcat("}}", ""))))),
+             ".reg .pred \t%p1; \n\t",
+             "setp.ne.u32 \t%p1, $pred, 0; \n\t",
+             "bar.red.popc.u32 \t$dst, 0, %p1; \n\t",
+             "}}"),
       [(set Int32Regs:$dst, (int_nvvm_barrier0_popc Int32Regs:$pred))]>;
 def INT_BARRIER0_AND : NVPTXInst<(outs Int32Regs:$dst), (ins Int32Regs:$pred),
   !strconcat("{{ \n\t",
-      !strconcat(".reg .pred \t%p1; \n\t",
-      !strconcat(".reg .pred \t%p2; \n\t",
-      !strconcat("setp.ne.u32 \t%p1, $pred, 0; \n\t",
-      !strconcat("bar.red.and.pred \t%p2, 0, %p1; \n\t",
-      !strconcat("selp.u32 \t$dst, 1, 0, %p2; \n\t",
-        !strconcat("}}", ""))))))),
+             ".reg .pred \t%p1; \n\t",
+             ".reg .pred \t%p2; \n\t",
+             "setp.ne.u32 \t%p1, $pred, 0; \n\t",
+             "bar.red.and.pred \t%p2, 0, %p1; \n\t",
+             "selp.u32 \t$dst, 1, 0, %p2; \n\t",
+             "}}"),
       [(set Int32Regs:$dst, (int_nvvm_barrier0_and Int32Regs:$pred))]>;
 def INT_BARRIER0_OR : NVPTXInst<(outs Int32Regs:$dst), (ins Int32Regs:$pred),
   !strconcat("{{ \n\t",
-      !strconcat(".reg .pred \t%p1; \n\t",
-      !strconcat(".reg .pred \t%p2; \n\t",
-      !strconcat("setp.ne.u32 \t%p1, $pred, 0; \n\t",
-      !strconcat("bar.red.or.pred \t%p2, 0, %p1; \n\t",
-      !strconcat("selp.u32 \t$dst, 1, 0, %p2; \n\t",
-        !strconcat("}}", ""))))))),
+             ".reg .pred \t%p1; \n\t",
+             ".reg .pred \t%p2; \n\t",
+             "setp.ne.u32 \t%p1, $pred, 0; \n\t",
+             "bar.red.or.pred \t%p2, 0, %p1; \n\t",
+             "selp.u32 \t$dst, 1, 0, %p2; \n\t",
+             "}}"),
       [(set Int32Regs:$dst, (int_nvvm_barrier0_or Int32Regs:$pred))]>;
 
+def INT_BAR_SYNC : NVPTXInst<(outs), (ins i32imm:$i), "bar.sync \t$i;",
+                             [(int_nvvm_bar_sync imm:$i)]>;
+
+def INT_BAR_WARP_SYNC_I : NVPTXInst<(outs), (ins i32imm:$i), "bar.warp.sync \t$i;",
+                             [(int_nvvm_bar_warp_sync imm:$i)]>,
+        Requires<[hasPTX60, hasSM30]>;
+def INT_BAR_WARP_SYNC_R : NVPTXInst<(outs), (ins Int32Regs:$i), "bar.warp.sync \t$i;",
+                             [(int_nvvm_bar_warp_sync Int32Regs:$i)]>,
+        Requires<[hasPTX60, hasSM30]>;
+
+def INT_BARRIER_SYNC_I : NVPTXInst<(outs), (ins i32imm:$i), "barrier.sync \t$i;",
+                                   [(int_nvvm_barrier_sync imm:$i)]>,
+        Requires<[hasPTX60, hasSM30]>;
+def INT_BARRIER_SYNC_R : NVPTXInst<(outs), (ins Int32Regs:$i), "barrier.sync \t$i;",
+                                   [(int_nvvm_barrier_sync Int32Regs:$i)]>,
+        Requires<[hasPTX60, hasSM30]>;
+
+def INT_BARRIER_SYNC_CNT_RR : NVPTXInst<(outs), (ins Int32Regs:$id, Int32Regs:$cnt),
+                 "barrier.sync \t$id, $cnt;",
+                 [(int_nvvm_barrier_sync_cnt Int32Regs:$id, Int32Regs:$cnt)]>,
+        Requires<[hasPTX60, hasSM30]>;
+def INT_BARRIER_SYNC_CNT_RI : NVPTXInst<(outs), (ins Int32Regs:$id, i32imm:$cnt),
+                 "barrier.sync \t$id, $cnt;",
+                 [(int_nvvm_barrier_sync_cnt Int32Regs:$id, imm:$cnt)]>,
+        Requires<[hasPTX60, hasSM30]>;
+def INT_BARRIER_SYNC_CNT_IR : NVPTXInst<(outs), (ins i32imm:$id, Int32Regs:$cnt),
+                 "barrier.sync \t$id, $cnt;",
+                 [(int_nvvm_barrier_sync_cnt imm:$id, Int32Regs:$cnt)]>,
+        Requires<[hasPTX60, hasSM30]>;
+def INT_BARRIER_SYNC_CNT_II : NVPTXInst<(outs), (ins i32imm:$id, i32imm:$cnt),
+                 "barrier.sync \t$id, $cnt;",
+                 [(int_nvvm_barrier_sync_cnt imm:$id, imm:$cnt)]>,
+        Requires<[hasPTX60, hasSM30]>;
+
+class SHFL_INSTR<bit sync, string mode, string reg, bit return_pred,
+                 bit offset_imm, bit mask_imm, bit threadmask_imm>
+      : NVPTXInst<(outs), (ins), "?", []> {
+  NVPTXRegClass rc = !cond(
+    !eq(reg, "i32"): Int32Regs,
+    !eq(reg, "f32"): Float32Regs);
+  string IntrName = "int_nvvm_shfl_"
+                    # !if(sync, "sync_", "")
+                    # mode
+                    # "_" # reg
+                    # !if(return_pred, "p", "");
+  Intrinsic Intr = !cast<Intrinsic>(IntrName);
+  let InOperandList = !con(
+    !if(sync,
+        !dag(ins, !if(threadmask_imm, [i32imm], [Int32Regs]), ["threadmask"]),
+        (ins)),
+    (ins rc:$src),
+    !dag(ins, !if(offset_imm, [i32imm], [Int32Regs]), ["offset"]),
+    !dag(ins, !if(mask_imm, [i32imm], [Int32Regs]), ["mask"])
+    );
+  let OutOperandList = !if(return_pred, (outs rc:$dst, Int1Regs:$pred), (outs rc:$dst));
+  let AsmString = "shfl."
+     # !if(sync, "sync.", "")
+     # mode # ".b32\t"
+     # "$dst"
+     # !if(return_pred, "|$pred", "") # ", "
+     # "$src, $offset, $mask"
+     # !if(sync, ", $threadmask", "")
+     # ";"
+     ;
+  let Pattern = [!con(
+      !foreach(tmp, OutOperandList,
+             !subst(outs, set,
+             !subst(i32imm, imm, tmp))),
+      (set !foreach(tmp, InOperandList,
+             !subst(ins, Intr,
+             !subst(i32imm, imm, tmp))))
+  )];
+}
+
+foreach sync = [false, true] in {
+  foreach mode = ["up", "down", "bfly", "idx"] in {
+    foreach regclass = ["i32", "f32"] in {
+      foreach return_pred = [false, true] in {
+        foreach offset_imm = [false, true] in {
+          foreach mask_imm = [false, true] in {
+            foreach threadmask_imm = THREADMASK_INFO<sync>.ret in {
+              def : SHFL_INSTR<sync, mode, regclass, return_pred,
+                               offset_imm, mask_imm, threadmask_imm>,
+                    Requires<!if(sync, [hasSM30], [hasSM30, hasSHFL])>;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// vote.{all,any,uni,ballot}
+multiclass VOTE<NVPTXRegClass regclass, string mode, Intrinsic IntOp> {
+  def : NVPTXInst<(outs regclass:$dest), (ins Int1Regs:$pred),
+              "vote." # mode # " \t$dest, $pred;",
+              [(set regclass:$dest, (IntOp Int1Regs:$pred))]>,
+        Requires<[hasPTX60, hasSM30]>;
+}
+
+defm VOTE_ALL : VOTE<Int1Regs, "all.pred", int_nvvm_vote_all>;
+defm VOTE_ANY : VOTE<Int1Regs, "any.pred", int_nvvm_vote_any>;
+defm VOTE_UNI : VOTE<Int1Regs, "uni.pred", int_nvvm_vote_uni>;
+defm VOTE_BALLOT : VOTE<Int32Regs, "ballot.b32", int_nvvm_vote_ballot>;
+
+// vote.sync.{all,any,uni,ballot}
+multiclass VOTE_SYNC<NVPTXRegClass regclass, string mode, Intrinsic IntOp> {
+  def i : NVPTXInst<(outs regclass:$dest), (ins i32imm:$mask, Int1Regs:$pred),
+              "vote.sync." # mode # " \t$dest, $pred, $mask;",
+              [(set regclass:$dest, (IntOp imm:$mask, Int1Regs:$pred))]>,
+          Requires<[hasPTX60, hasSM30]>;
+  def r : NVPTXInst<(outs regclass:$dest), (ins Int32Regs:$mask, Int1Regs:$pred),
+              "vote.sync." # mode #" \t$dest, $pred, $mask;",
+              [(set regclass:$dest, (IntOp Int32Regs:$mask, Int1Regs:$pred))]>,
+          Requires<[hasPTX60, hasSM30]>;
+}
+
+defm VOTE_SYNC_ALL : VOTE_SYNC<Int1Regs, "all.pred", int_nvvm_vote_all_sync>;
+defm VOTE_SYNC_ANY : VOTE_SYNC<Int1Regs, "any.pred", int_nvvm_vote_any_sync>;
+defm VOTE_SYNC_UNI : VOTE_SYNC<Int1Regs, "uni.pred", int_nvvm_vote_uni_sync>;
+defm VOTE_SYNC_BALLOT : VOTE_SYNC<Int32Regs, "ballot.b32", int_nvvm_vote_ballot_sync>;
+
+multiclass MATCH_ANY_SYNC<NVPTXRegClass regclass, string ptxtype, Intrinsic IntOp,
+                          Operand ImmOp> {
+  def ii : NVPTXInst<(outs regclass:$dest), (ins i32imm:$mask, ImmOp:$value),
+              "match.any.sync." # ptxtype # " \t$dest, $value, $mask;",
+              [(set regclass:$dest, (IntOp imm:$mask, imm:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def ir : NVPTXInst<(outs regclass:$dest), (ins Int32Regs:$mask, ImmOp:$value),
+              "match.any.sync." # ptxtype # " \t$dest, $value, $mask;",
+              [(set regclass:$dest, (IntOp Int32Regs:$mask, imm:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def ri : NVPTXInst<(outs regclass:$dest), (ins i32imm:$mask, regclass:$value),
+              "match.any.sync." # ptxtype # " \t$dest, $value, $mask;",
+              [(set regclass:$dest, (IntOp imm:$mask, regclass:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def rr : NVPTXInst<(outs regclass:$dest), (ins Int32Regs:$mask, regclass:$value),
+              "match.any.sync." # ptxtype # " \t$dest, $value, $mask;",
+              [(set regclass:$dest, (IntOp Int32Regs:$mask, regclass:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+}
+
+defm MATCH_ANY_SYNC_32 : MATCH_ANY_SYNC<Int32Regs, "b32", int_nvvm_match_any_sync_i32,
+                                        i32imm>;
+defm MATCH_ANY_SYNC_64 : MATCH_ANY_SYNC<Int64Regs, "b64", int_nvvm_match_any_sync_i64,
+                                        i64imm>;
+
+multiclass MATCH_ALLP_SYNC<NVPTXRegClass regclass, string ptxtype, Intrinsic IntOp,
+                          Operand ImmOp> {
+  def ii : NVPTXInst<(outs regclass:$dest, Int1Regs:$pred),
+                     (ins i32imm:$mask, ImmOp:$value),
+              "match.all.sync." # ptxtype # " \t$dest|$pred, $value, $mask;",
+              [(set regclass:$dest, Int1Regs:$pred, (IntOp imm:$mask, imm:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def ir : NVPTXInst<(outs regclass:$dest, Int1Regs:$pred),
+                     (ins Int32Regs:$mask, ImmOp:$value),
+              "match.all.sync." # ptxtype # " \t$dest|$pred, $value, $mask;",
+              [(set regclass:$dest, Int1Regs:$pred, (IntOp Int32Regs:$mask, imm:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def ri : NVPTXInst<(outs regclass:$dest, Int1Regs:$pred),
+                     (ins i32imm:$mask, regclass:$value),
+              "match.all.sync." # ptxtype # " \t$dest|$pred, $value, $mask;",
+              [(set regclass:$dest, Int1Regs:$pred, (IntOp imm:$mask, regclass:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+  def rr : NVPTXInst<(outs regclass:$dest, Int1Regs:$pred),
+                     (ins Int32Regs:$mask, regclass:$value),
+              "match.all.sync." # ptxtype # " \t$dest|$pred, $value, $mask;",
+              [(set regclass:$dest, Int1Regs:$pred, (IntOp Int32Regs:$mask, regclass:$value))]>,
+           Requires<[hasPTX60, hasSM70]>;
+}
+defm MATCH_ALLP_SYNC_32 : MATCH_ALLP_SYNC<Int32Regs, "b32", int_nvvm_match_all_sync_i32p,
+                                         i32imm>;
+defm MATCH_ALLP_SYNC_64 : MATCH_ALLP_SYNC<Int64Regs, "b64", int_nvvm_match_all_sync_i64p,
+                                         i64imm>;
+
+multiclass REDUX_SYNC<string BinOp, string PTXType, Intrinsic Intrin> {
+  def : NVPTXInst<(outs Int32Regs:$dst), (ins Int32Regs:$src, Int32Regs:$mask),
+          "redux.sync." # BinOp # "." # PTXType # " $dst, $src, $mask;",
+          [(set Int32Regs:$dst, (Intrin Int32Regs:$src, Int32Regs:$mask))]>,
+        Requires<[hasPTX70, hasSM80]>;
+}
+
+defm REDUX_SYNC_UMIN : REDUX_SYNC<"min", "u32", int_nvvm_redux_sync_umin>;
+defm REDUX_SYNC_UMAX : REDUX_SYNC<"max", "u32", int_nvvm_redux_sync_umax>;
+defm REDUX_SYNC_ADD : REDUX_SYNC<"add", "s32", int_nvvm_redux_sync_add>;
+defm REDUX_SYNC_MIN : REDUX_SYNC<"min", "s32", int_nvvm_redux_sync_min>;
+defm REDUX_SYNC_MAX : REDUX_SYNC<"max", "s32", int_nvvm_redux_sync_max>;
+defm REDUX_SYNC_AND : REDUX_SYNC<"and", "b32", int_nvvm_redux_sync_and>;
+defm REDUX_SYNC_XOR : REDUX_SYNC<"xor", "b32", int_nvvm_redux_sync_xor>;
+defm REDUX_SYNC_OR : REDUX_SYNC<"or", "b32", int_nvvm_redux_sync_or>;
+
+} // isConvergent = true
 
 //-----------------------------------
 // Explicit Memory Fence Functions
@@ -76,6 +303,211 @@ def INT_MEMBAR_CTA : MEMBAR<"membar.cta;", int_nvvm_membar_cta>;
 def INT_MEMBAR_GL  : MEMBAR<"membar.gl;",  int_nvvm_membar_gl>;
 def INT_MEMBAR_SYS : MEMBAR<"membar.sys;", int_nvvm_membar_sys>;
 
+
+//-----------------------------------
+// Async Copy Functions
+//-----------------------------------
+
+multiclass CP_ASYNC_MBARRIER_ARRIVE<string NoInc, string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs), (ins Int32Regs:$addr),
+            !strconcat("cp.async.mbarrier.arrive", NoInc, AddrSpace, ".b64 [$addr];"),
+            [(Intrin Int32Regs:$addr)]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs), (ins Int64Regs:$addr),
+            !strconcat("cp.async.mbarrier.arrive", NoInc, AddrSpace, ".b64 [$addr];"),
+            [(Intrin Int64Regs:$addr)]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm CP_ASYNC_MBARRIER_ARRIVE :
+  CP_ASYNC_MBARRIER_ARRIVE<"", "", int_nvvm_cp_async_mbarrier_arrive>;
+defm CP_ASYNC_MBARRIER_ARRIVE_SHARED :
+  CP_ASYNC_MBARRIER_ARRIVE<"", ".shared", int_nvvm_cp_async_mbarrier_arrive_shared>;
+defm CP_ASYNC_MBARRIER_ARRIVE_NOINC :
+  CP_ASYNC_MBARRIER_ARRIVE<".noinc", "", int_nvvm_cp_async_mbarrier_arrive_noinc>;
+defm CP_ASYNC_MBARRIER_ARRIVE_NOINC_SHARED :
+  CP_ASYNC_MBARRIER_ARRIVE<".noinc", ".shared", int_nvvm_cp_async_mbarrier_arrive_noinc_shared>;
+
+multiclass CP_ASYNC_CA_SHARED_GLOBAL_I<string cpsize, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs), (ins Int32Regs:$dst, Int32Regs:$src),
+            !strconcat("cp.async.ca.shared.global [$dst], [$src], ", cpsize, ";"),
+            [(Intrin Int32Regs:$dst, Int32Regs:$src)]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs), (ins Int64Regs:$dst, Int64Regs:$src),
+            !strconcat("cp.async.ca.shared.global [$dst], [$src], ", cpsize, ";"),
+            [(Intrin Int64Regs:$dst, Int64Regs:$src)]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm CP_ASYNC_CA_SHARED_GLOBAL_4 :
+  CP_ASYNC_CA_SHARED_GLOBAL_I<"4", int_nvvm_cp_async_ca_shared_global_4>;
+
+defm CP_ASYNC_CA_SHARED_GLOBAL_8 :
+  CP_ASYNC_CA_SHARED_GLOBAL_I<"8", int_nvvm_cp_async_ca_shared_global_8>;
+
+defm CP_ASYNC_CA_SHARED_GLOBAL_16 :
+  CP_ASYNC_CA_SHARED_GLOBAL_I<"16", int_nvvm_cp_async_ca_shared_global_16>;
+
+multiclass CP_ASYNC_CG_SHARED_GLOBAL<string cpsize, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs), (ins Int32Regs:$dst, Int32Regs:$src),
+            !strconcat("cp.async.cg.shared.global [$dst], [$src], ", cpsize, ";"),
+            [(Intrin Int32Regs:$dst, Int32Regs:$src)]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs), (ins Int64Regs:$dst, Int64Regs:$src),
+            !strconcat("cp.async.cg.shared.global [$dst], [$src], ", cpsize, ";"),
+            [(Intrin Int64Regs:$dst, Int64Regs:$src)]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm CP_ASYNC_CG_SHARED_GLOBAL_16 :
+  CP_ASYNC_CG_SHARED_GLOBAL<"16", int_nvvm_cp_async_cg_shared_global_16>;
+
+def CP_ASYNC_COMMIT_GROUP :
+  NVPTXInst<(outs), (ins), "cp.async.commit_group;", [(int_nvvm_cp_async_commit_group)]>,
+  Requires<[hasPTX70, hasSM80]>;
+
+def CP_ASYNC_WAIT_GROUP :
+  NVPTXInst<(outs), (ins i32imm:$n), "cp.async.wait_group $n;",
+  [(int_nvvm_cp_async_wait_group (i32 timm:$n))]>,
+  Requires<[hasPTX70, hasSM80]>;
+
+def CP_ASYNC_WAIT_ALL :
+  NVPTXInst<(outs), (ins), "cp.async.wait_all;",
+  [(int_nvvm_cp_async_wait_all)]>,
+  Requires<[hasPTX70, hasSM80]>;
+
+//-----------------------------------
+// MBarrier Functions
+//-----------------------------------
+
+multiclass MBARRIER_INIT<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs), (ins Int32Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.init", AddrSpace, ".b64 [$addr], $count;"),
+    [(Intrin Int32Regs:$addr, Int32Regs:$count)]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs), (ins Int64Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.init", AddrSpace, ".b64 [$addr], $count;"),
+    [(Intrin Int64Regs:$addr, Int32Regs:$count)]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_INIT : MBARRIER_INIT<"", int_nvvm_mbarrier_init>;
+defm MBARRIER_INIT_SHARED : MBARRIER_INIT<".shared",
+                                          int_nvvm_mbarrier_init_shared>;
+
+multiclass MBARRIER_INVAL<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs), (ins Int32Regs:$addr),
+           !strconcat("mbarrier.inval", AddrSpace, ".b64 [$addr];"),
+    [(Intrin Int32Regs:$addr)]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs), (ins Int64Regs:$addr),
+           !strconcat("mbarrier.inval", AddrSpace, ".b64 [$addr];"),
+    [(Intrin Int64Regs:$addr)]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_INVAL : MBARRIER_INVAL<"", int_nvvm_mbarrier_inval>;
+defm MBARRIER_INVAL_SHARED : MBARRIER_INVAL<".shared",
+                                            int_nvvm_mbarrier_inval_shared>;
+
+multiclass MBARRIER_ARRIVE<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs Int64Regs:$state), (ins Int32Regs:$addr),
+           !strconcat("mbarrier.arrive", AddrSpace, ".b64 $state, [$addr];"),
+    [(set Int64Regs:$state, (Intrin Int32Regs:$addr))]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs Int64Regs:$state), (ins Int64Regs:$addr),
+           !strconcat("mbarrier.arrive", AddrSpace, ".b64 $state, [$addr];"),
+    [(set Int64Regs:$state, (Intrin Int64Regs:$addr))]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_ARRIVE : MBARRIER_ARRIVE<"", int_nvvm_mbarrier_arrive>;
+defm MBARRIER_ARRIVE_SHARED :
+  MBARRIER_ARRIVE<".shared", int_nvvm_mbarrier_arrive_shared>;
+
+multiclass MBARRIER_ARRIVE_NOCOMPLETE<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs Int64Regs:$state),
+           (ins Int32Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.arrive.noComplete", AddrSpace,
+                      ".b64 $state, [$addr], $count;"),
+    [(set Int64Regs:$state, (Intrin Int32Regs:$addr, Int32Regs:$count))]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs Int64Regs:$state),
+           (ins Int64Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.arrive.noComplete", AddrSpace,
+                      ".b64 $state, [$addr], $count;"),
+    [(set Int64Regs:$state, (Intrin Int64Regs:$addr, Int32Regs:$count))]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_ARRIVE_NOCOMPLETE :
+  MBARRIER_ARRIVE_NOCOMPLETE<"", int_nvvm_mbarrier_arrive_noComplete>;
+defm MBARRIER_ARRIVE_NOCOMPLETE_SHARED :
+  MBARRIER_ARRIVE_NOCOMPLETE<".shared", int_nvvm_mbarrier_arrive_noComplete_shared>;
+
+multiclass MBARRIER_ARRIVE_DROP<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs Int64Regs:$state), (ins Int32Regs:$addr),
+           !strconcat("mbarrier.arrive_drop", AddrSpace,
+                      ".b64 $state, [$addr];"),
+           [(set Int64Regs:$state, (Intrin Int32Regs:$addr))]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs Int64Regs:$state), (ins Int64Regs:$addr),
+           !strconcat("mbarrier.arrive_drop", AddrSpace,
+                      ".b64 $state, [$addr];"),
+           [(set Int64Regs:$state, (Intrin Int64Regs:$addr))]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_ARRIVE_DROP :
+  MBARRIER_ARRIVE_DROP<"", int_nvvm_mbarrier_arrive_drop>;
+defm MBARRIER_ARRIVE_DROP_SHARED :
+  MBARRIER_ARRIVE_DROP<".shared", int_nvvm_mbarrier_arrive_drop_shared>;
+
+multiclass MBARRIER_ARRIVE_DROP_NOCOMPLETE<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs Int64Regs:$state),
+           (ins Int32Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.arrive_drop.noComplete", AddrSpace,
+                      ".b64 $state, [$addr], $count;"),
+           [(set Int64Regs:$state, (Intrin Int32Regs:$addr, Int32Regs:$count))]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs Int64Regs:$state),
+           (ins Int64Regs:$addr, Int32Regs:$count),
+           !strconcat("mbarrier.arrive_drop.noComplete", AddrSpace,
+                      ".b64 $state, [$addr], $count;"),
+           [(set Int64Regs:$state, (Intrin Int64Regs:$addr, Int32Regs:$count))]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_ARRIVE_DROP_NOCOMPLETE :
+  MBARRIER_ARRIVE_DROP_NOCOMPLETE<"", int_nvvm_mbarrier_arrive_drop_noComplete>;
+defm MBARRIER_ARRIVE_DROP_NOCOMPLETE_SHARED :
+  MBARRIER_ARRIVE_DROP_NOCOMPLETE<".shared",
+                       int_nvvm_mbarrier_arrive_drop_noComplete_shared>;
+
+multiclass MBARRIER_TEST_WAIT<string AddrSpace, Intrinsic Intrin> {
+  def _32 : NVPTXInst<(outs Int1Regs:$res), (ins Int32Regs:$addr, Int64Regs:$state),
+           !strconcat("mbarrier.test_wait", AddrSpace, ".b64 $res, [$addr], $state;"),
+           [(set Int1Regs:$res, (Intrin Int32Regs:$addr, Int64Regs:$state))]>,
+    Requires<[hasPTX70, hasSM80]>;
+  def _64 : NVPTXInst<(outs Int1Regs:$res), (ins Int64Regs:$addr, Int64Regs:$state),
+           !strconcat("mbarrier.test_wait", AddrSpace, ".b64 $res, [$addr], $state;"),
+           [(set Int1Regs:$res, (Intrin Int64Regs:$addr, Int64Regs:$state))]>,
+    Requires<[hasPTX70, hasSM80]>;
+}
+
+defm MBARRIER_TEST_WAIT :
+  MBARRIER_TEST_WAIT<"", int_nvvm_mbarrier_test_wait>;
+defm MBARRIER_TEST_WAIT_SHARED :
+  MBARRIER_TEST_WAIT<".shared", int_nvvm_mbarrier_test_wait_shared>;
+
+class MBARRIER_PENDING_COUNT<Intrinsic Intrin> :
+           NVPTXInst<(outs Int32Regs:$res), (ins Int64Regs:$state),
+           "mbarrier.pending_count.b64 $res, $state;",
+           [(set Int32Regs:$res, (Intrin Int64Regs:$state))]>,
+    Requires<[hasPTX70, hasSM80]>;
+
+def MBARRIER_PENDING_COUNT :
+  MBARRIER_PENDING_COUNT<int_nvvm_mbarrier_pending_count>;
 
 //-----------------------------------
 // Math Functions
@@ -144,42 +576,12 @@ class F_MATH_3<string OpcStr, NVPTXRegClass t_regclass,
 // MISC
 //
 
-def INT_NVVM_CLZ_I : F_MATH_1<"clz.b32 \t$dst, $src0;", Int32Regs, Int32Regs,
-  int_nvvm_clz_i>;
-def INT_NVVM_CLZ_LL : F_MATH_1<"clz.b64 \t$dst, $src0;", Int32Regs, Int64Regs,
-  int_nvvm_clz_ll>;
-
-def INT_NVVM_POPC_I : F_MATH_1<"popc.b32 \t$dst, $src0;", Int32Regs, Int32Regs,
-  int_nvvm_popc_i>;
-def INT_NVVM_POPC_LL : F_MATH_1<"popc.b64 \t$dst, $src0;", Int32Regs, Int64Regs,
-  int_nvvm_popc_ll>;
-
 def INT_NVVM_PRMT : F_MATH_3<"prmt.b32 \t$dst, $src0, $src1, $src2;", Int32Regs,
   Int32Regs, Int32Regs, Int32Regs, int_nvvm_prmt>;
 
 //
 // Min Max
 //
-
-def INT_NVVM_MIN_I : F_MATH_2<"min.s32 \t$dst, $src0, $src1;", Int32Regs,
-  Int32Regs, Int32Regs, int_nvvm_min_i>;
-def INT_NVVM_MIN_UI : F_MATH_2<"min.u32 \t$dst, $src0, $src1;", Int32Regs,
-  Int32Regs, Int32Regs, int_nvvm_min_ui>;
-
-def INT_NVVM_MIN_LL : F_MATH_2<"min.s64 \t$dst, $src0, $src1;", Int64Regs,
-  Int64Regs, Int64Regs, int_nvvm_min_ll>;
-def INT_NVVM_MIN_ULL : F_MATH_2<"min.u64 \t$dst, $src0, $src1;", Int64Regs,
-  Int64Regs, Int64Regs, int_nvvm_min_ull>;
-
-def INT_NVVM_MAX_I : F_MATH_2<"max.s32 \t$dst, $src0, $src1;", Int32Regs,
-  Int32Regs, Int32Regs, int_nvvm_max_i>;
-def INT_NVVM_MAX_UI : F_MATH_2<"max.u32 \t$dst, $src0, $src1;", Int32Regs,
-  Int32Regs, Int32Regs, int_nvvm_max_ui>;
-
-def INT_NVVM_MAX_LL : F_MATH_2<"max.s64 \t$dst, $src0, $src1;", Int64Regs,
-  Int64Regs, Int64Regs, int_nvvm_max_ll>;
-def INT_NVVM_MAX_ULL : F_MATH_2<"max.u64 \t$dst, $src0, $src1;", Int64Regs,
-  Int64Regs, Int64Regs, int_nvvm_max_ull>;
 
 def INT_NVVM_FMIN_F : F_MATH_2<"min.f32 \t$dst, $src0, $src1;", Float32Regs,
   Float32Regs, Float32Regs, int_nvvm_fmin_f>;
@@ -195,6 +597,7 @@ def INT_NVVM_FMIN_D : F_MATH_2<"min.f64 \t$dst, $src0, $src1;", Float64Regs,
   Float64Regs, Float64Regs, int_nvvm_fmin_d>;
 def INT_NVVM_FMAX_D : F_MATH_2<"max.f64 \t$dst, $src0, $src1;", Float64Regs,
   Float64Regs, Float64Regs, int_nvvm_fmax_d>;
+
 
 //
 // Multiplication
@@ -278,15 +681,6 @@ def INT_NVVM_DIV_RP_D : F_MATH_2<"div.rp.f64 \t$dst, $src0, $src1;",
   Float64Regs, Float64Regs, Float64Regs, int_nvvm_div_rp_d>;
 
 //
-// Brev
-//
-
-def INT_NVVM_BREV32 : F_MATH_1<"brev.b32 \t$dst, $src0;", Int32Regs, Int32Regs,
-  int_nvvm_brev32>;
-def INT_NVVM_BREV64 : F_MATH_1<"brev.b64 \t$dst, $src0;", Int64Regs, Int64Regs,
-  int_nvvm_brev64>;
-
-//
 // Sad
 //
 
@@ -316,11 +710,6 @@ def : Pat<(int_nvvm_ceil_d Float64Regs:$a),
 //
 // Abs
 //
-
-def INT_NVVM_ABS_I : F_MATH_1<"abs.s32 \t$dst, $src0;", Int32Regs, Int32Regs,
-  int_nvvm_abs_i>;
-def INT_NVVM_ABS_LL : F_MATH_1<"abs.s64 \t$dst, $src0;", Int64Regs, Int64Regs,
-  int_nvvm_abs_ll>;
 
 def INT_NVVM_FABS_FTZ_F : F_MATH_1<"abs.ftz.f32 \t$dst, $src0;", Float32Regs,
   Float32Regs, int_nvvm_fabs_ftz_f>;
@@ -660,16 +1049,18 @@ def : Pat<(int_nvvm_ui2f_rp Int32Regs:$a),
 def INT_NVVM_LOHI_I2D : F_MATH_2<"mov.b64 \t$dst, {{$src0, $src1}};",
   Float64Regs, Int32Regs, Int32Regs, int_nvvm_lohi_i2d>;
 
-def INT_NVVM_D2I_LO : F_MATH_1<!strconcat("{{\n\t",
-                       !strconcat(".reg .b32 %temp; \n\t",
-             !strconcat("mov.b64 \t{$dst, %temp}, $src0;\n\t",
-               "}}"))),
-             Int32Regs, Float64Regs, int_nvvm_d2i_lo>;
-def INT_NVVM_D2I_HI : F_MATH_1<!strconcat("{{\n\t",
-                       !strconcat(".reg .b32 %temp; \n\t",
-                         !strconcat("mov.b64 \t{%temp, $dst}, $src0;\n\t",
-                           "}}"))),
-             Int32Regs, Float64Regs, int_nvvm_d2i_hi>;
+def INT_NVVM_D2I_LO : F_MATH_1<
+  !strconcat("{{\n\t",
+             ".reg .b32 %temp; \n\t",
+             "mov.b64 \t{$dst, %temp}, $src0;\n\t",
+             "}}"),
+  Int32Regs, Float64Regs, int_nvvm_d2i_lo>;
+def INT_NVVM_D2I_HI : F_MATH_1<
+  !strconcat("{{\n\t",
+             ".reg .b32 %temp; \n\t",
+             "mov.b64 \t{%temp, $dst}, $src0;\n\t",
+             "}}"),
+  Int32Regs, Float64Regs, int_nvvm_d2i_hi>;
 
 def : Pat<(int_nvvm_f2ll_rn_ftz Float32Regs:$a),
           (CVT_s64_f32 Float32Regs:$a, CvtRNI_FTZ)>;
@@ -760,49 +1151,10 @@ def : Pat<(int_nvvm_ull2d_rp Int64Regs:$a),
           (CVT_f64_u64 Int64Regs:$a, CvtRP)>;
 
 
-// FIXME: Ideally, we could use these patterns instead of the scope-creating
-// patterns, but ptxas does not like these since .s16 is not compatible with
-// .f16.  The solution is to use .bXX for all integer register types, but we
-// are not there yet.
-//def : Pat<(int_nvvm_f2h_rn_ftz Float32Regs:$a),
-//          (CVT_f16_f32 Float32Regs:$a, CvtRN_FTZ)>;
-//def : Pat<(int_nvvm_f2h_rn Float32Regs:$a),
-//          (CVT_f16_f32 Float32Regs:$a, CvtRN)>;
-//
-//def : Pat<(int_nvvm_h2f Int16Regs:$a),
-//          (CVT_f32_f16 Int16Regs:$a, CvtNONE)>;
-
-def INT_NVVM_F2H_RN_FTZ : F_MATH_1<!strconcat("{{\n\t",
-                                   !strconcat(".reg .b16 %temp;\n\t",
-           !strconcat("cvt.rn.ftz.f16.f32 \t%temp, $src0;\n\t",
-           !strconcat("mov.b16 \t$dst, %temp;\n",
-             "}}")))),
-                                   Int16Regs, Float32Regs, int_nvvm_f2h_rn_ftz>;
-def INT_NVVM_F2H_RN : F_MATH_1<!strconcat("{{\n\t",
-                                   !strconcat(".reg .b16 %temp;\n\t",
-           !strconcat("cvt.rn.f16.f32 \t%temp, $src0;\n\t",
-           !strconcat("mov.b16 \t$dst, %temp;\n",
-             "}}")))),
-           Int16Regs, Float32Regs, int_nvvm_f2h_rn>;
-
-def INT_NVVM_H2F : F_MATH_1<!strconcat("{{\n\t",
-                            !strconcat(".reg .b16 %temp;\n\t",
-          !strconcat("mov.b16 \t%temp, $src0;\n\t",
-          !strconcat("cvt.f32.f16 \t$dst, %temp;\n\t",
-            "}}")))),
-          Float32Regs, Int16Regs, int_nvvm_h2f>;
-
-def : Pat<(f32 (f16_to_fp Int16Regs:$a)),
-          (CVT_f32_f16 Int16Regs:$a, CvtNONE)>;
-def : Pat<(i16 (fp_to_f16 Float32Regs:$a)),
-          (CVT_f16_f32 Float32Regs:$a, CvtRN_FTZ)>, Requires<[doF32FTZ]>;
-def : Pat<(i16 (fp_to_f16 Float32Regs:$a)),
-          (CVT_f16_f32 Float32Regs:$a, CvtRN)>;
-
-def : Pat<(f64 (f16_to_fp Int16Regs:$a)),
-          (CVT_f64_f16 Int16Regs:$a, CvtNONE)>;
-def : Pat<(i16 (fp_to_f16 Float64Regs:$a)),
-          (CVT_f16_f64 Float64Regs:$a, CvtRN)>;
+def : Pat<(int_nvvm_f2h_rn_ftz Float32Regs:$a),
+          (BITCONVERT_16_F2I (CVT_f16_f32 Float32Regs:$a, CvtRN_FTZ))>;
+def : Pat<(int_nvvm_f2h_rn Float32Regs:$a),
+          (BITCONVERT_16_F2I (CVT_f16_f32 Float32Regs:$a, CvtRN))>;
 
 //
 // Bitcast
@@ -818,45 +1170,59 @@ def INT_NVVM_BITCAST_LL2D : F_MATH_1<"mov.b64 \t$dst, $src0;", Float64Regs,
 def INT_NVVM_BITCAST_D2LL : F_MATH_1<"mov.b64 \t$dst, $src0;", Int64Regs,
   Float64Regs, int_nvvm_bitcast_d2ll>;
 
+//
+// FNS
+//
+
+class INT_FNS_MBO<dag ins, dag Operands>
+  : NVPTXInst<(outs Int32Regs:$dst), ins,
+               "fns.b32 \t$dst, $mask, $base, $offset;",
+               [(set Int32Regs:$dst, Operands )]>,
+    Requires<[hasPTX60, hasSM30]>;
+
+def INT_FNS_rrr : INT_FNS_MBO<(ins Int32Regs:$mask, Int32Regs:$base, Int32Regs:$offset),
+                     (int_nvvm_fns Int32Regs:$mask, Int32Regs:$base, Int32Regs:$offset)>;
+def INT_FNS_rri : INT_FNS_MBO<(ins Int32Regs:$mask, Int32Regs:$base,    i32imm:$offset),
+                     (int_nvvm_fns Int32Regs:$mask, Int32Regs:$base,       imm:$offset)>;
+def INT_FNS_rir : INT_FNS_MBO<(ins Int32Regs:$mask,    i32imm:$base, Int32Regs:$offset),
+                     (int_nvvm_fns Int32Regs:$mask,       imm:$base, Int32Regs:$offset)>;
+def INT_FNS_rii : INT_FNS_MBO<(ins Int32Regs:$mask,    i32imm:$base,    i32imm:$offset),
+                     (int_nvvm_fns Int32Regs:$mask,       imm:$base,       imm:$offset)>;
+def INT_FNS_irr : INT_FNS_MBO<(ins    i32imm:$mask, Int32Regs:$base, Int32Regs:$offset),
+                     (int_nvvm_fns       imm:$mask, Int32Regs:$base, Int32Regs:$offset)>;
+def INT_FNS_iri : INT_FNS_MBO<(ins    i32imm:$mask, Int32Regs:$base,    i32imm:$offset),
+                     (int_nvvm_fns       imm:$mask, Int32Regs:$base,       imm:$offset)>;
+def INT_FNS_iir : INT_FNS_MBO<(ins    i32imm:$mask,    i32imm:$base, Int32Regs:$offset),
+                     (int_nvvm_fns       imm:$mask,       imm:$base, Int32Regs:$offset)>;
+def INT_FNS_iii : INT_FNS_MBO<(ins    i32imm:$mask,    i32imm:$base,    i32imm:$offset),
+                     (int_nvvm_fns       imm:$mask,       imm:$base,       imm:$offset)>;
+
 //-----------------------------------
 // Atomic Functions
 //-----------------------------------
 
 class ATOMIC_GLOBAL_CHK <dag ops, dag frag>
- : PatFrag<ops, frag, [{
-   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_GLOBAL);
-}]>;
+ : PatFrag<ops, frag, AS_match.global>;
 class ATOMIC_SHARED_CHK <dag ops, dag frag>
- : PatFrag<ops, frag, [{
-   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_SHARED);
-}]>;
+ : PatFrag<ops, frag, AS_match.shared>;
 class ATOMIC_GENERIC_CHK <dag ops, dag frag>
- : PatFrag<ops, frag, [{
-   return ChkMemSDNodeAddressSpace(N, llvm::ADDRESS_SPACE_GENERIC);
-}]>;
+ : PatFrag<ops, frag, AS_match.generic>;
 
 multiclass F_ATOMIC_2_imp<NVPTXRegClass ptrclass, NVPTXRegClass regclass,
   string SpaceStr, string TypeStr, string OpcStr, PatFrag IntOp,
-  Operand IMMType, SDNode IMM, Predicate Pred> {
+  Operand IMMType, SDNode IMM, list<Predicate> Pred> {
   def reg : NVPTXInst<(outs regclass:$dst), (ins ptrclass:$addr, regclass:$b),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b;", ""))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b))]>,
-  Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b;"),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b))]>,
+  Requires<Pred>;
   def imm : NVPTXInst<(outs regclass:$dst), (ins ptrclass:$addr, IMMType:$b),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b;", ""))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, IMM:$b))]>,
-  Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b;", ""),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, IMM:$b))]>,
+  Requires<Pred>;
 }
 multiclass F_ATOMIC_2<NVPTXRegClass regclass, string SpaceStr, string TypeStr,
-  string OpcStr, PatFrag IntOp, Operand IMMType, SDNode IMM, Predicate Pred> {
+  string OpcStr, PatFrag IntOp, Operand IMMType, SDNode IMM,
+  list<Predicate> Pred = []> {
   defm p32 : F_ATOMIC_2_imp<Int32Regs, regclass, SpaceStr, TypeStr, OpcStr,
     IntOp, IMMType, IMM, Pred>;
   defm p64 : F_ATOMIC_2_imp<Int64Regs, regclass, SpaceStr, TypeStr, OpcStr,
@@ -866,28 +1232,20 @@ multiclass F_ATOMIC_2<NVPTXRegClass regclass, string SpaceStr, string TypeStr,
 // has 2 operands, neg the second one
 multiclass F_ATOMIC_2_NEG_imp<NVPTXRegClass ptrclass, NVPTXRegClass regclass,
   string SpaceStr, string TypeStr, string OpcStr, PatFrag IntOp,
-  Operand IMMType, Predicate Pred> {
+  Operand IMMType, list<Predicate> Pred> {
   def reg : NVPTXInst<(outs regclass:$dst), (ins ptrclass:$addr, regclass:$b),
-    !strconcat("{{ \n\t",
-         !strconcat(".reg \t.s",
-         !strconcat(TypeStr,
-         !strconcat(" temp; \n\t",
-         !strconcat("neg.s",
-         !strconcat(TypeStr,
-         !strconcat(" \ttemp, $b; \n\t",
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(".u",
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], temp; \n\t",
-           !strconcat("}}", "")))))))))))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b))]>,
-  Requires<[Pred]>;
+    !strconcat(
+      "{{ \n\t",
+      ".reg \t.s", TypeStr, " temp; \n\t",
+      "neg.s", TypeStr, " \ttemp, $b; \n\t",
+      "atom", SpaceStr, OpcStr, ".u", TypeStr, " \t$dst, [$addr], temp; \n\t",
+      "}}"),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b))]>,
+  Requires<Pred>;
 }
 multiclass F_ATOMIC_2_NEG<NVPTXRegClass regclass, string SpaceStr,
   string TypeStr, string OpcStr, PatFrag IntOp, Operand IMMType,
-  Predicate Pred> {
+  list<Predicate> Pred = []> {
  defm p32: F_ATOMIC_2_NEG_imp<Int32Regs, regclass, SpaceStr, TypeStr, OpcStr,
    IntOp, IMMType, Pred> ;
  defm p64: F_ATOMIC_2_NEG_imp<Int64Regs, regclass, SpaceStr, TypeStr, OpcStr,
@@ -897,47 +1255,33 @@ multiclass F_ATOMIC_2_NEG<NVPTXRegClass regclass, string SpaceStr,
 // has 3 operands
 multiclass F_ATOMIC_3_imp<NVPTXRegClass ptrclass, NVPTXRegClass regclass,
   string SpaceStr, string TypeStr, string OpcStr, PatFrag IntOp,
-  Operand IMMType, Predicate Pred> {
+  Operand IMMType, list<Predicate> Pred> {
   def reg : NVPTXInst<(outs regclass:$dst),
     (ins ptrclass:$addr, regclass:$b, regclass:$c),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b, $c;", ""))))),
-         [(set regclass:$dst,
-           (IntOp ptrclass:$addr, regclass:$b, regclass:$c))]>,
-         Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b, $c;"),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b, regclass:$c))]>,
+  Requires<Pred>;
+
   def imm1 : NVPTXInst<(outs regclass:$dst),
     (ins ptrclass:$addr, IMMType:$b, regclass:$c),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b, $c;", ""))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, imm:$b, regclass:$c))]>,
-  Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b, $c;"),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, imm:$b, regclass:$c))]>,
+  Requires<Pred>;
+
   def imm2 : NVPTXInst<(outs regclass:$dst),
     (ins ptrclass:$addr, regclass:$b, IMMType:$c),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b, $c;", ""))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b, imm:$c))]>,
-  Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b, $c;", ""),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, regclass:$b, imm:$c))]>,
+  Requires<Pred>;
+
   def imm3 : NVPTXInst<(outs regclass:$dst),
     (ins ptrclass:$addr, IMMType:$b, IMMType:$c),
-               !strconcat("atom",
-         !strconcat(SpaceStr,
-         !strconcat(OpcStr,
-         !strconcat(TypeStr,
-         !strconcat(" \t$dst, [$addr], $b, $c;", ""))))),
-         [(set regclass:$dst, (IntOp ptrclass:$addr, imm:$b, imm:$c))]>,
-  Requires<[Pred]>;
+    !strconcat("atom", SpaceStr, OpcStr, TypeStr, " \t$dst, [$addr], $b, $c;"),
+    [(set regclass:$dst, (IntOp ptrclass:$addr, imm:$b, imm:$c))]>,
+  Requires<Pred>;
 }
 multiclass F_ATOMIC_3<NVPTXRegClass regclass, string SpaceStr, string TypeStr,
-  string OpcStr, PatFrag IntOp, Operand IMMType, Predicate Pred> {
+  string OpcStr, PatFrag IntOp, Operand IMMType, list<Predicate> Pred = []> {
   defm p32 : F_ATOMIC_3_imp<Int32Regs, regclass, SpaceStr, TypeStr, OpcStr,
     IntOp, IMMType, Pred>;
   defm p64 : F_ATOMIC_3_imp<Int64Regs, regclass, SpaceStr, TypeStr, OpcStr,
@@ -958,37 +1302,44 @@ def atomic_load_add_64_s: ATOMIC_SHARED_CHK<(ops node:$a, node:$b),
   (atomic_load_add_64 node:$a, node:$b)>;
 def atomic_load_add_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_add_64 node:$a, node:$b)>;
-def atomic_load_add_f32_g: ATOMIC_GLOBAL_CHK<(ops node:$a, node:$b),
-  (int_nvvm_atomic_load_add_f32 node:$a, node:$b)>;
-def atomic_load_add_f32_s: ATOMIC_SHARED_CHK<(ops node:$a, node:$b),
-  (int_nvvm_atomic_load_add_f32 node:$a, node:$b)>;
-def atomic_load_add_f32_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
-  (int_nvvm_atomic_load_add_f32 node:$a, node:$b)>;
+def atomic_load_add_g: ATOMIC_GLOBAL_CHK<(ops node:$a, node:$b),
+  (atomic_load_fadd node:$a, node:$b)>;
+def atomic_load_add_s: ATOMIC_SHARED_CHK<(ops node:$a, node:$b),
+  (atomic_load_fadd node:$a, node:$b)>;
+def atomic_load_add_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
+  (atomic_load_fadd node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_ADD_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".u32", ".add",
-  atomic_load_add_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_add_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_ADD_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".u32", ".add",
-  atomic_load_add_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_add_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_ADD_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".u32", ".add",
-  atomic_load_add_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_add_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_ADD_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".u32",
-  ".add", atomic_load_add_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".add", atomic_load_add_32_gen, i32imm, imm>;
 
 defm INT_PTX_ATOM_ADD_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".u64", ".add",
-  atomic_load_add_64_g, i64imm, imm, hasAtomRedG64>;
+  atomic_load_add_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_ADD_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".u64", ".add",
-  atomic_load_add_64_s, i64imm, imm, hasAtomRedS64>;
+  atomic_load_add_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_ADD_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".u64", ".add",
-  atomic_load_add_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_add_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_ADD_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global", ".u64",
-  ".add", atomic_load_add_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".add", atomic_load_add_64_gen, i64imm, imm>;
 
 defm INT_PTX_ATOM_ADD_G_F32 : F_ATOMIC_2<Float32Regs, ".global", ".f32", ".add",
-  atomic_load_add_f32_g, f32imm, fpimm, hasAtomAddF32>;
+  atomic_load_add_g, f32imm, fpimm>;
 defm INT_PTX_ATOM_ADD_S_F32 : F_ATOMIC_2<Float32Regs, ".shared", ".f32", ".add",
-  atomic_load_add_f32_s, f32imm, fpimm, hasAtomAddF32>;
+  atomic_load_add_s, f32imm, fpimm>;
 defm INT_PTX_ATOM_ADD_GEN_F32 : F_ATOMIC_2<Float32Regs, "", ".f32", ".add",
-  atomic_load_add_f32_gen, f32imm, fpimm, hasAtomAddF32>;
+  atomic_load_add_gen, f32imm, fpimm>;
+
+defm INT_PTX_ATOM_ADD_G_F64 : F_ATOMIC_2<Float64Regs, ".global", ".f64", ".add",
+  atomic_load_add_g, f64imm, fpimm, [hasAtomAddF64]>;
+defm INT_PTX_ATOM_ADD_S_F64 : F_ATOMIC_2<Float64Regs, ".shared", ".f64", ".add",
+  atomic_load_add_s, f64imm, fpimm, [hasAtomAddF64]>;
+defm INT_PTX_ATOM_ADD_GEN_F64 : F_ATOMIC_2<Float64Regs, "", ".f64", ".add",
+  atomic_load_add_gen, f64imm, fpimm, [hasAtomAddF64]>;
 
 // atom_sub
 
@@ -1006,21 +1357,21 @@ def atomic_load_sub_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_sub_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_SUB_G_32 : F_ATOMIC_2_NEG<Int32Regs, ".global", "32", ".add",
-  atomic_load_sub_32_g, i32imm, hasAtomRedG32>;
+  atomic_load_sub_32_g, i32imm>;
 defm INT_PTX_ATOM_SUB_G_64 : F_ATOMIC_2_NEG<Int64Regs, ".global", "64", ".add",
-  atomic_load_sub_64_g, i64imm, hasAtomRedG64>;
+  atomic_load_sub_64_g, i64imm>;
 defm INT_PTX_ATOM_SUB_GEN_32 : F_ATOMIC_2_NEG<Int32Regs, "", "32", ".add",
-  atomic_load_sub_32_gen, i32imm, hasAtomRedGen32>;
+  atomic_load_sub_32_gen, i32imm>;
 defm INT_PTX_ATOM_SUB_GEN_32_USE_G : F_ATOMIC_2_NEG<Int32Regs, ".global", "32",
-  ".add", atomic_load_sub_32_gen, i32imm, useAtomRedG32forGen32>;
+  ".add", atomic_load_sub_32_gen, i32imm>;
 defm INT_PTX_ATOM_SUB_S_32 : F_ATOMIC_2_NEG<Int32Regs, ".shared", "32", ".add",
-  atomic_load_sub_32_s, i32imm, hasAtomRedS32>;
+  atomic_load_sub_32_s, i32imm>;
 defm INT_PTX_ATOM_SUB_S_64 : F_ATOMIC_2_NEG<Int64Regs, ".shared", "64", ".add",
-  atomic_load_sub_64_s, i64imm, hasAtomRedS64>;
+  atomic_load_sub_64_s, i64imm>;
 defm INT_PTX_ATOM_SUB_GEN_64 : F_ATOMIC_2_NEG<Int64Regs, "", "64", ".add",
-  atomic_load_sub_64_gen, i64imm, hasAtomRedGen64>;
+  atomic_load_sub_64_gen, i64imm>;
 defm INT_PTX_ATOM_SUB_GEN_64_USE_G : F_ATOMIC_2_NEG<Int64Regs, ".global", "64",
-  ".add", atomic_load_sub_64_gen, i64imm, useAtomRedG64forGen64>;
+  ".add", atomic_load_sub_64_gen, i64imm>;
 
 // atom_swap
 
@@ -1038,21 +1389,21 @@ def atomic_swap_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_swap_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_SWAP_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".b32", ".exch",
-  atomic_swap_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_swap_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_SWAP_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".b32", ".exch",
-  atomic_swap_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_swap_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_SWAP_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".b32", ".exch",
-  atomic_swap_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_swap_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_SWAP_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".b32",
-  ".exch", atomic_swap_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".exch", atomic_swap_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_SWAP_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".b64", ".exch",
-  atomic_swap_64_g, i64imm, imm, hasAtomRedG64>;
+  atomic_swap_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_SWAP_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".b64", ".exch",
-  atomic_swap_64_s, i64imm, imm, hasAtomRedS64>;
+  atomic_swap_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_SWAP_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".b64", ".exch",
-  atomic_swap_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_swap_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_SWAP_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global", ".b64",
-  ".exch", atomic_swap_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".exch", atomic_swap_64_gen, i64imm, imm>;
 
 // atom_max
 
@@ -1082,37 +1433,37 @@ def atomic_load_umax_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_umax_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_LOAD_MAX_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".s32",
-  ".max", atomic_load_max_32_g, i32imm, imm, hasAtomRedG32>;
+  ".max", atomic_load_max_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".s32",
-  ".max", atomic_load_max_32_s, i32imm, imm, hasAtomRedS32>;
+  ".max", atomic_load_max_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".s32", ".max",
-  atomic_load_max_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_max_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global",
-  ".s32", ".max", atomic_load_max_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".s32", ".max", atomic_load_max_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".s64",
-  ".max", atomic_load_max_64_g, i64imm, imm, hasAtomRedG64>;
+  ".max", atomic_load_max_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".s64",
-  ".max", atomic_load_max_64_s, i64imm, imm, hasAtomRedS64>;
+  ".max", atomic_load_max_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".s64", ".max",
-  atomic_load_max_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_max_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MAX_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global",
-  ".s64", ".max", atomic_load_max_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".s64", ".max", atomic_load_max_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".u32",
-  ".max", atomic_load_umax_32_g, i32imm, imm, hasAtomRedG32>;
+  ".max", atomic_load_umax_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".u32",
-  ".max", atomic_load_umax_32_s, i32imm, imm, hasAtomRedS32>;
+  ".max", atomic_load_umax_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".u32", ".max",
-  atomic_load_umax_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_umax_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global",
-  ".u32", ".max", atomic_load_umax_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".u32", ".max", atomic_load_umax_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".u64",
-  ".max", atomic_load_umax_64_g, i64imm, imm, hasAtomRedG64>;
+  ".max", atomic_load_umax_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".u64",
-  ".max", atomic_load_umax_64_s, i64imm, imm, hasAtomRedS64>;
+  ".max", atomic_load_umax_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".u64", ".max",
-  atomic_load_umax_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_umax_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMAX_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global",
-  ".u64", ".max", atomic_load_umax_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".u64", ".max", atomic_load_umax_64_gen, i64imm, imm>;
 
 // atom_min
 
@@ -1142,37 +1493,37 @@ def atomic_load_umin_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_umin_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_LOAD_MIN_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".s32",
-  ".min", atomic_load_min_32_g, i32imm, imm, hasAtomRedG32>;
+  ".min", atomic_load_min_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".s32",
-  ".min", atomic_load_min_32_s, i32imm, imm, hasAtomRedS32>;
+  ".min", atomic_load_min_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".s32", ".min",
-  atomic_load_min_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_min_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global",
-  ".s32", ".min", atomic_load_min_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".s32", ".min", atomic_load_min_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".s64",
-  ".min", atomic_load_min_64_g, i64imm, imm, hasAtomRedG64>;
+  ".min", atomic_load_min_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".s64",
-  ".min", atomic_load_min_64_s, i64imm, imm, hasAtomRedS64>;
+  ".min", atomic_load_min_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".s64", ".min",
-  atomic_load_min_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_min_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_MIN_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global",
-  ".s64", ".min", atomic_load_min_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".s64", ".min", atomic_load_min_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".u32",
-  ".min", atomic_load_umin_32_g, i32imm, imm, hasAtomRedG32>;
+  ".min", atomic_load_umin_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".u32",
-  ".min", atomic_load_umin_32_s, i32imm, imm, hasAtomRedS32>;
+  ".min", atomic_load_umin_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".u32", ".min",
-  atomic_load_umin_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_umin_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global",
-  ".u32", ".min", atomic_load_umin_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".u32", ".min", atomic_load_umin_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".u64",
-  ".min", atomic_load_umin_64_g, i64imm, imm, hasAtomRedG64>;
+  ".min", atomic_load_umin_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".u64",
-  ".min", atomic_load_umin_64_s, i64imm, imm, hasAtomRedS64>;
+  ".min", atomic_load_umin_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".u64", ".min",
-  atomic_load_umin_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_umin_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_LOAD_UMIN_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global",
-  ".u64", ".min", atomic_load_umin_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".u64", ".min", atomic_load_umin_64_gen, i64imm, imm>;
 
 // atom_inc  atom_dec
 
@@ -1190,21 +1541,21 @@ def atomic_load_dec_32_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (int_nvvm_atomic_load_dec_32 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_INC_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".u32", ".inc",
-  atomic_load_inc_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_inc_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_INC_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".u32", ".inc",
-  atomic_load_inc_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_inc_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_INC_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".u32", ".inc",
-  atomic_load_inc_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_inc_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_INC_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".u32",
-  ".inc", atomic_load_inc_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".inc", atomic_load_inc_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_DEC_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".u32", ".dec",
-  atomic_load_dec_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_dec_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_DEC_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".u32", ".dec",
-  atomic_load_dec_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_dec_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_DEC_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".u32", ".dec",
-  atomic_load_dec_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_dec_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_DEC_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".u32",
-  ".dec", atomic_load_dec_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".dec", atomic_load_dec_32_gen, i32imm, imm>;
 
 // atom_and
 
@@ -1222,21 +1573,21 @@ def atomic_load_and_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_and_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_AND_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".b32", ".and",
-  atomic_load_and_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_and_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_AND_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".b32", ".and",
-  atomic_load_and_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_and_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_AND_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".b32", ".and",
-  atomic_load_and_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_and_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_AND_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".b32",
-  ".and", atomic_load_and_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".and", atomic_load_and_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_AND_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".b64", ".and",
-  atomic_load_and_64_g, i64imm, imm, hasAtomRedG64>;
+  atomic_load_and_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_AND_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".b64", ".and",
-  atomic_load_and_64_s, i64imm, imm, hasAtomRedS64>;
+  atomic_load_and_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_AND_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".b64", ".and",
-  atomic_load_and_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_and_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_AND_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global", ".b64",
-  ".and", atomic_load_and_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".and", atomic_load_and_64_gen, i64imm, imm>;
 
 // atom_or
 
@@ -1254,21 +1605,21 @@ def atomic_load_or_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_or_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_OR_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".b32", ".or",
-  atomic_load_or_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_or_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_OR_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".b32", ".or",
-  atomic_load_or_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_or_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_OR_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".b32",
-  ".or", atomic_load_or_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".or", atomic_load_or_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_OR_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".b32", ".or",
-  atomic_load_or_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_or_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_OR_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".b64", ".or",
-  atomic_load_or_64_g, i64imm, imm, hasAtomRedG64>;
+  atomic_load_or_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_OR_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".b64", ".or",
-  atomic_load_or_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_or_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_OR_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global", ".b64",
-  ".or", atomic_load_or_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".or", atomic_load_or_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_OR_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".b64", ".or",
-  atomic_load_or_64_s, i64imm, imm, hasAtomRedS64>;
+  atomic_load_or_64_s, i64imm, imm>;
 
 // atom_xor
 
@@ -1286,21 +1637,21 @@ def atomic_load_xor_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b),
   (atomic_load_xor_64 node:$a, node:$b)>;
 
 defm INT_PTX_ATOM_XOR_G_32 : F_ATOMIC_2<Int32Regs, ".global", ".b32", ".xor",
-  atomic_load_xor_32_g, i32imm, imm, hasAtomRedG32>;
+  atomic_load_xor_32_g, i32imm, imm>;
 defm INT_PTX_ATOM_XOR_S_32 : F_ATOMIC_2<Int32Regs, ".shared", ".b32", ".xor",
-  atomic_load_xor_32_s, i32imm, imm, hasAtomRedS32>;
+  atomic_load_xor_32_s, i32imm, imm>;
 defm INT_PTX_ATOM_XOR_GEN_32 : F_ATOMIC_2<Int32Regs, "", ".b32", ".xor",
-  atomic_load_xor_32_gen, i32imm, imm, hasAtomRedGen32>;
+  atomic_load_xor_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_XOR_GEN_32_USE_G : F_ATOMIC_2<Int32Regs, ".global", ".b32",
-  ".xor", atomic_load_xor_32_gen, i32imm, imm, useAtomRedG32forGen32>;
+  ".xor", atomic_load_xor_32_gen, i32imm, imm>;
 defm INT_PTX_ATOM_XOR_G_64 : F_ATOMIC_2<Int64Regs, ".global", ".b64", ".xor",
-  atomic_load_xor_64_g, i64imm, imm, hasAtomRedG64>;
+  atomic_load_xor_64_g, i64imm, imm>;
 defm INT_PTX_ATOM_XOR_S_64 : F_ATOMIC_2<Int64Regs, ".shared", ".b64", ".xor",
-  atomic_load_xor_64_s, i64imm, imm, hasAtomRedS64>;
+  atomic_load_xor_64_s, i64imm, imm>;
 defm INT_PTX_ATOM_XOR_GEN_64 : F_ATOMIC_2<Int64Regs, "", ".b64", ".xor",
-  atomic_load_xor_64_gen, i64imm, imm, hasAtomRedGen64>;
+  atomic_load_xor_64_gen, i64imm, imm>;
 defm INT_PTX_ATOM_XOR_GEN_64_USE_G : F_ATOMIC_2<Int64Regs, ".global", ".b64",
-  ".xor", atomic_load_xor_64_gen, i64imm, imm, useAtomRedG64forGen64>;
+  ".xor", atomic_load_xor_64_gen, i64imm, imm>;
 
 // atom_cas
 
@@ -1318,68 +1669,230 @@ def atomic_cmp_swap_64_gen: ATOMIC_GENERIC_CHK<(ops node:$a, node:$b, node:$c),
   (atomic_cmp_swap_64 node:$a, node:$b, node:$c)>;
 
 defm INT_PTX_ATOM_CAS_G_32 : F_ATOMIC_3<Int32Regs, ".global", ".b32", ".cas",
-  atomic_cmp_swap_32_g, i32imm, hasAtomRedG32>;
+  atomic_cmp_swap_32_g, i32imm>;
 defm INT_PTX_ATOM_CAS_S_32 : F_ATOMIC_3<Int32Regs, ".shared", ".b32", ".cas",
-  atomic_cmp_swap_32_s, i32imm, hasAtomRedS32>;
+  atomic_cmp_swap_32_s, i32imm>;
 defm INT_PTX_ATOM_CAS_GEN_32 : F_ATOMIC_3<Int32Regs, "", ".b32", ".cas",
-  atomic_cmp_swap_32_gen, i32imm, hasAtomRedGen32>;
+  atomic_cmp_swap_32_gen, i32imm>;
 defm INT_PTX_ATOM_CAS_GEN_32_USE_G : F_ATOMIC_3<Int32Regs, ".global", ".b32",
-  ".cas", atomic_cmp_swap_32_gen, i32imm, useAtomRedG32forGen32>;
+  ".cas", atomic_cmp_swap_32_gen, i32imm>;
 defm INT_PTX_ATOM_CAS_G_64 : F_ATOMIC_3<Int64Regs, ".global", ".b64", ".cas",
-  atomic_cmp_swap_64_g, i64imm, hasAtomRedG64>;
+  atomic_cmp_swap_64_g, i64imm>;
 defm INT_PTX_ATOM_CAS_S_64 : F_ATOMIC_3<Int64Regs, ".shared", ".b64", ".cas",
-  atomic_cmp_swap_64_s, i64imm, hasAtomRedS64>;
+  atomic_cmp_swap_64_s, i64imm>;
 defm INT_PTX_ATOM_CAS_GEN_64 : F_ATOMIC_3<Int64Regs, "", ".b64", ".cas",
-  atomic_cmp_swap_64_gen, i64imm, hasAtomRedGen64>;
+  atomic_cmp_swap_64_gen, i64imm>;
 defm INT_PTX_ATOM_CAS_GEN_64_USE_G : F_ATOMIC_3<Int64Regs, ".global", ".b64",
-  ".cas", atomic_cmp_swap_64_gen, i64imm, useAtomRedG64forGen64>;
+  ".cas", atomic_cmp_swap_64_gen, i64imm>;
 
+// Support for scoped atomic operations.  Matches
+// int_nvvm_atomic_{op}_{space}_{type}_{scope}
+// and converts it into the appropriate instruction.
+// NOTE: not all possible combinations are implemented
+//  'space' is limited to generic as it's the only one needed to support CUDA.
+//  'scope' = 'gpu' is default and is handled by regular atomic instructions.
+class ATOM23_impl<string AsmStr, NVPTXRegClass regclass, list<Predicate> Preds,
+                  dag ins, dag Operands>
+      : NVPTXInst<(outs regclass:$result), ins,
+                  AsmStr,
+                  [(set regclass:$result, Operands)]>,
+        Requires<Preds>;
 
-//-----------------------------------
-// Read Special Registers
-//-----------------------------------
-class F_SREG<string OpStr, NVPTXRegClass regclassOut, Intrinsic IntOp> :
-      NVPTXInst<(outs regclassOut:$dst), (ins),
-               OpStr,
-         [(set regclassOut:$dst, (IntOp))]>;
+// Define instruction variants for all addressing modes.
+multiclass ATOM2P_impl<string AsmStr,  Intrinsic Intr,
+                       NVPTXRegClass regclass, Operand ImmType,
+                       SDNode Imm, ValueType ImmTy,
+                       list<Predicate> Preds> {
+  let AddedComplexity = 1 in {
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int32Regs:$src, regclass:$b),
+                      (Intr Int32Regs:$src, regclass:$b)>;
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int64Regs:$src, regclass:$b),
+                      (Intr Int64Regs:$src, regclass:$b)>;
+  }
+  // tablegen can't infer argument types from Intrinsic (though it can
+  // from Instruction) so we have to enforce specific type on
+  // immediates via explicit cast to ImmTy.
+  def : ATOM23_impl<AsmStr, regclass, Preds,
+                    (ins Int32Regs:$src, ImmType:$b),
+                    (Intr Int32Regs:$src, (ImmTy Imm:$b))>;
+  def : ATOM23_impl<AsmStr, regclass, Preds,
+                    (ins Int64Regs:$src, ImmType:$b),
+                    (Intr Int64Regs:$src, (ImmTy Imm:$b))>;
+}
 
-def INT_PTX_SREG_TID_X : F_SREG<"mov.u32 \t$dst, %tid.x;", Int32Regs,
-  int_nvvm_read_ptx_sreg_tid_x>;
-def INT_PTX_SREG_TID_Y : F_SREG<"mov.u32 \t$dst, %tid.y;", Int32Regs,
-  int_nvvm_read_ptx_sreg_tid_y>;
-def INT_PTX_SREG_TID_Z : F_SREG<"mov.u32 \t$dst, %tid.z;", Int32Regs,
-  int_nvvm_read_ptx_sreg_tid_z>;
+multiclass ATOM3P_impl<string AsmStr,  Intrinsic Intr,
+                       NVPTXRegClass regclass, Operand ImmType,
+                       SDNode Imm, ValueType ImmTy,
+                       list<Predicate> Preds> {
+  // Variants for register/immediate permutations of $b and $c
+  let AddedComplexity = 2 in {
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int32Regs:$src, regclass:$b, regclass:$c),
+                      (Intr Int32Regs:$src, regclass:$b, regclass:$c)>;
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int64Regs:$src, regclass:$b, regclass:$c),
+                      (Intr Int64Regs:$src, regclass:$b, regclass:$c)>;
+  }
+  let AddedComplexity = 1 in {
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int32Regs:$src, ImmType:$b, regclass:$c),
+                      (Intr Int32Regs:$src, (ImmTy Imm:$b), regclass:$c)>;
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int64Regs:$src, ImmType:$b, regclass:$c),
+                      (Intr Int64Regs:$src, (ImmTy Imm:$b), regclass:$c)>;
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int32Regs:$src, regclass:$b, ImmType:$c),
+                      (Intr Int32Regs:$src, regclass:$b, (ImmTy Imm:$c))>;
+    def : ATOM23_impl<AsmStr, regclass, Preds,
+                      (ins Int64Regs:$src, regclass:$b, ImmType:$c),
+                      (Intr Int64Regs:$src, regclass:$b, (ImmTy Imm:$c))>;
+  }
+  def : ATOM23_impl<AsmStr, regclass, Preds,
+                    (ins Int32Regs:$src, ImmType:$b, ImmType:$c),
+                    (Intr Int32Regs:$src, (ImmTy Imm:$b), (ImmTy Imm:$c))>;
+  def : ATOM23_impl<AsmStr, regclass, Preds,
+                    (ins Int64Regs:$src, ImmType:$b, ImmType:$c),
+                    (Intr Int64Regs:$src, (ImmTy Imm:$b), (ImmTy Imm:$c))>;
+}
 
-def INT_PTX_SREG_NTID_X : F_SREG<"mov.u32 \t$dst, %ntid.x;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ntid_x>;
-def INT_PTX_SREG_NTID_Y : F_SREG<"mov.u32 \t$dst, %ntid.y;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ntid_y>;
-def INT_PTX_SREG_NTID_Z : F_SREG<"mov.u32 \t$dst, %ntid.z;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ntid_z>;
+// Constructs instrinsic name and instruction asm strings.
+multiclass ATOM2N_impl<string OpStr, string IntTypeStr, string TypeStr,
+                       string ScopeStr, string SpaceStr,
+                       NVPTXRegClass regclass, Operand ImmType, SDNode Imm,
+                       ValueType ImmTy, list<Predicate> Preds> {
+  defm : ATOM2P_impl<"atom" # !if(!eq(SpaceStr, "gen"), "", "." # SpaceStr)
+                            # !if(!eq(ScopeStr, "gpu"), "", "." # ScopeStr)
+                            # "." # OpStr # "." # TypeStr
+                            # " \t$result, [$src], $b;",
+                     !cast<Intrinsic>(
+                            "int_nvvm_atomic_" # OpStr
+                            # "_" # SpaceStr # "_" # IntTypeStr
+                            # !if(!empty(ScopeStr), "", "_" # ScopeStr)),
+                     regclass, ImmType, Imm, ImmTy, Preds>;
+}
+multiclass ATOM3N_impl<string OpStr, string IntTypeStr, string TypeStr,
+                       string ScopeStr, string SpaceStr,
+                       NVPTXRegClass regclass, Operand ImmType, SDNode Imm,
+                       ValueType ImmTy, list<Predicate> Preds> {
+  defm : ATOM3P_impl<"atom" # !if(!eq(SpaceStr, "gen"), "", "." # SpaceStr)
+                            # !if(!eq(ScopeStr, "gpu"), "", "." # ScopeStr)
+                            # "." # OpStr # "." # TypeStr
+                            # " \t$result, [$src], $b, $c;",
+                     !cast<Intrinsic>(
+                            "int_nvvm_atomic_" # OpStr
+                            # "_" # SpaceStr # "_" # IntTypeStr
+                            # !if(!empty(ScopeStr), "", "_" # ScopeStr)),
+                     regclass, ImmType, Imm, ImmTy, Preds>;
+}
 
-def INT_PTX_SREG_CTAID_X : F_SREG<"mov.u32 \t$dst, %ctaid.x;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ctaid_x>;
-def INT_PTX_SREG_CTAID_Y : F_SREG<"mov.u32 \t$dst, %ctaid.y;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ctaid_y>;
-def INT_PTX_SREG_CTAID_Z : F_SREG<"mov.u32 \t$dst, %ctaid.z;", Int32Regs,
-  int_nvvm_read_ptx_sreg_ctaid_z>;
+// Constructs variants for different address spaces.
+// For now we only need variants for generic space pointers.
+multiclass ATOM2A_impl<string OpStr, string IntTypeStr, string TypeStr,
+                       string ScopeStr, NVPTXRegClass regclass, Operand ImmType,
+                       SDNode Imm, ValueType ImmTy, list<Predicate> Preds> {
+   defm _gen_ : ATOM2N_impl<OpStr, IntTypeStr, TypeStr, ScopeStr, "gen",
+                            regclass, ImmType, Imm, ImmTy, Preds>;
+}
+multiclass ATOM3A_impl<string OpStr, string IntTypeStr, string TypeStr,
+                       string ScopeStr, NVPTXRegClass regclass, Operand ImmType,
+                       SDNode Imm, ValueType ImmTy, list<Predicate> Preds> {
+   defm _gen_ : ATOM3N_impl<OpStr, IntTypeStr, TypeStr, ScopeStr, "gen",
+                            regclass, ImmType, Imm, ImmTy, Preds>;
+}
 
-def INT_PTX_SREG_NCTAID_X : F_SREG<"mov.u32 \t$dst, %nctaid.x;", Int32Regs,
-  int_nvvm_read_ptx_sreg_nctaid_x>;
-def INT_PTX_SREG_NCTAID_Y : F_SREG<"mov.u32 \t$dst, %nctaid.y;", Int32Regs,
-  int_nvvm_read_ptx_sreg_nctaid_y>;
-def INT_PTX_SREG_NCTAID_Z : F_SREG<"mov.u32 \t$dst, %nctaid.z;", Int32Regs,
-  int_nvvm_read_ptx_sreg_nctaid_z>;
+// Constructs variants for different scopes of atomic op.
+multiclass ATOM2S_impl<string OpStr, string IntTypeStr, string TypeStr,
+                       NVPTXRegClass regclass, Operand ImmType, SDNode Imm,
+                       ValueType ImmTy, list<Predicate> Preds> {
+   // .gpu scope is default and is currently covered by existing
+   // atomics w/o explicitly specified scope.
+   defm _cta : ATOM2A_impl<OpStr, IntTypeStr, TypeStr, "cta",
+                           regclass, ImmType, Imm, ImmTy,
+                           !listconcat(Preds,[hasAtomScope])>;
+   defm _sys : ATOM2A_impl<OpStr, IntTypeStr, TypeStr, "sys",
+                           regclass, ImmType, Imm, ImmTy,
+                           !listconcat(Preds,[hasAtomScope])>;
+}
+multiclass ATOM3S_impl<string OpStr, string IntTypeStr, string TypeStr,
+           NVPTXRegClass regclass, Operand ImmType, SDNode Imm, ValueType ImmTy,
+           list<Predicate> Preds> {
+   // No need to define ".gpu"-scoped atomics.  They do the same thing
+   // as the regular, non-scoped atomics defined elsewhere.
+   defm _cta : ATOM3A_impl<OpStr, IntTypeStr, TypeStr, "cta",
+                           regclass, ImmType, Imm, ImmTy,
+                           !listconcat(Preds,[hasAtomScope])>;
+   defm _sys : ATOM3A_impl<OpStr, IntTypeStr, TypeStr, "sys",
+                           regclass, ImmType, Imm, ImmTy,
+                           !listconcat(Preds,[hasAtomScope])>;
+}
 
-def INT_PTX_SREG_WARPSIZE : F_SREG<"mov.u32 \t$dst, WARP_SZ;", Int32Regs,
-  int_nvvm_read_ptx_sreg_warpsize>;
+// atom.add
+multiclass ATOM2_add_impl<string OpStr> {
+   defm _s32  : ATOM2S_impl<OpStr, "i", "s32", Int32Regs, i32imm, imm, i32, []>;
+   defm _u32  : ATOM2S_impl<OpStr, "i", "u32", Int32Regs, i32imm, imm, i32, []>;
+   defm _u64  : ATOM2S_impl<OpStr, "i", "u64", Int64Regs, i64imm, imm, i64, []>;
+   defm _f32  : ATOM2S_impl<OpStr, "f", "f32", Float32Regs, f32imm, fpimm, f32,
+                            []>;
+   defm _f64  : ATOM2S_impl<OpStr, "f", "f64", Float64Regs, f64imm, fpimm, f64,
+                            [hasAtomAddF64]>;
+}
 
+// atom.{and,or,xor}
+multiclass ATOM2_bitwise_impl<string OpStr> {
+   defm _b32  : ATOM2S_impl<OpStr, "i", "b32", Int32Regs, i32imm, imm, i32, []>;
+   defm _b64  : ATOM2S_impl<OpStr, "i", "b64", Int64Regs, i64imm, imm, i64,
+                            [hasAtomBitwise64]>;
+}
+
+// atom.exch
+multiclass ATOM2_exch_impl<string OpStr> {
+   defm _b32 : ATOM2S_impl<OpStr, "i", "b32", Int32Regs, i32imm, imm, i32, []>;
+   defm _b64 : ATOM2S_impl<OpStr, "i", "b64", Int64Regs, i64imm, imm, i64, []>;
+}
+
+// atom.{min,max}
+multiclass ATOM2_minmax_impl<string OpStr> {
+   defm _s32  : ATOM2S_impl<OpStr, "i", "s32", Int32Regs, i32imm, imm, i32, []>;
+   defm _u32  : ATOM2S_impl<OpStr, "i", "u32", Int32Regs, i32imm, imm, i32, []>;
+   defm _s64  : ATOM2S_impl<OpStr, "i", "s64", Int64Regs, i64imm, imm, i64,
+                            [hasAtomMinMax64]>;
+   defm _u64  : ATOM2S_impl<OpStr, "i", "u64", Int64Regs, i64imm, imm, i64,
+                            [hasAtomMinMax64]>;
+}
+
+// atom.{inc,dec}
+multiclass ATOM2_incdec_impl<string OpStr> {
+   defm _u32  : ATOM2S_impl<OpStr, "i", "u32", Int32Regs, i32imm, imm, i32, []>;
+}
+
+// atom.cas
+multiclass ATOM3_cas_impl<string OpStr> {
+   defm _b32  : ATOM3S_impl<OpStr, "i", "b32", Int32Regs, i32imm, imm, i32, []>;
+   defm _b64  : ATOM3S_impl<OpStr, "i", "b64", Int64Regs, i64imm, imm, i64, []>;
+}
+
+defm INT_PTX_SATOM_ADD : ATOM2_add_impl<"add">;
+defm INT_PTX_SATOM_AND : ATOM2_bitwise_impl<"and">;
+defm INT_PTX_SATOM_CAS : ATOM3_cas_impl<"cas">;
+defm INT_PTX_SATOM_DEC : ATOM2_incdec_impl<"dec">;
+defm INT_PTX_SATOM_EXCH: ATOM2_exch_impl<"exch">;
+defm INT_PTX_SATOM_INC : ATOM2_incdec_impl<"inc">;
+defm INT_PTX_SATOM_MAX : ATOM2_minmax_impl<"max">;
+defm INT_PTX_SATOM_MIN : ATOM2_minmax_impl<"min">;
+defm INT_PTX_SATOM_OR  : ATOM2_bitwise_impl<"or">;
+defm INT_PTX_SATOM_XOR : ATOM2_bitwise_impl<"xor">;
 
 //-----------------------------------
 // Support for ldu on sm_20 or later
 //-----------------------------------
 
+// Don't annotate ldu instructions as mayLoad, as they load from memory that is
+// read-only in a kernel.
+
 // Scalar
+
 multiclass LDU_G<string TyStr, NVPTXRegClass regclass> {
   def areg: NVPTXInst<(outs regclass:$result), (ins Int32Regs:$src),
                !strconcat("ldu.global.", TyStr),
@@ -1402,6 +1915,8 @@ defm INT_PTX_LDU_GLOBAL_i8  : LDU_G<"u8 \t$result, [$src];", Int16Regs>;
 defm INT_PTX_LDU_GLOBAL_i16 : LDU_G<"u16 \t$result, [$src];", Int16Regs>;
 defm INT_PTX_LDU_GLOBAL_i32 : LDU_G<"u32 \t$result, [$src];", Int32Regs>;
 defm INT_PTX_LDU_GLOBAL_i64 : LDU_G<"u64 \t$result, [$src];", Int64Regs>;
+defm INT_PTX_LDU_GLOBAL_f16 : LDU_G<"b16 \t$result, [$src];", Float16Regs>;
+defm INT_PTX_LDU_GLOBAL_f16x2 : LDU_G<"b32 \t$result, [$src];", Float16x2Regs>;
 defm INT_PTX_LDU_GLOBAL_f32 : LDU_G<"f32 \t$result, [$src];", Float32Regs>;
 defm INT_PTX_LDU_GLOBAL_f64 : LDU_G<"f64 \t$result, [$src];", Float64Regs>;
 defm INT_PTX_LDU_GLOBAL_p32 : LDU_G<"u32 \t$result, [$src];", Int32Regs>;
@@ -1452,6 +1967,10 @@ defm INT_PTX_LDU_G_v2i16_ELE
   : VLDU_G_ELE_V2<"v2.u16 \t{{$dst1, $dst2}}, [$src];", Int16Regs>;
 defm INT_PTX_LDU_G_v2i32_ELE
   : VLDU_G_ELE_V2<"v2.u32 \t{{$dst1, $dst2}}, [$src];", Int32Regs>;
+defm INT_PTX_LDU_G_v2f16_ELE
+  : VLDU_G_ELE_V2<"v2.b16 \t{{$dst1, $dst2}}, [$src];", Float16Regs>;
+defm INT_PTX_LDU_G_v2f16x2_ELE
+  : VLDU_G_ELE_V2<"v2.b32 \t{{$dst1, $dst2}}, [$src];", Float16x2Regs>;
 defm INT_PTX_LDU_G_v2f32_ELE
   : VLDU_G_ELE_V2<"v2.f32 \t{{$dst1, $dst2}}, [$src];", Float32Regs>;
 defm INT_PTX_LDU_G_v2i64_ELE
@@ -1466,6 +1985,12 @@ defm INT_PTX_LDU_G_v4i16_ELE
 defm INT_PTX_LDU_G_v4i32_ELE
   : VLDU_G_ELE_V4<"v4.u32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];",
     Int32Regs>;
+defm INT_PTX_LDU_G_v4f16_ELE
+  : VLDU_G_ELE_V4<"v4.b16 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];",
+    Float16Regs>;
+defm INT_PTX_LDU_G_v4f16x2_ELE
+  : VLDU_G_ELE_V4<"v4.b32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];",
+    Float16x2Regs>;
 defm INT_PTX_LDU_G_v4f32_ELE
   : VLDU_G_ELE_V4<"v4.f32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];",
     Float32Regs>;
@@ -1474,6 +1999,10 @@ defm INT_PTX_LDU_G_v4f32_ELE
 //-----------------------------------
 // Support for ldg on sm_35 or later 
 //-----------------------------------
+
+// Don't annotate ld.global.nc as mayLoad, because these loads go through the
+// non-coherent texture cache, and therefore the values read must be read-only
+// during the lifetime of the kernel.
 
 multiclass LDG_G<string TyStr, NVPTXRegClass regclass> {
   def areg: NVPTXInst<(outs regclass:$result), (ins Int32Regs:$src),
@@ -1501,6 +2030,10 @@ defm INT_PTX_LDG_GLOBAL_i32
   : LDG_G<"u32 \t$result, [$src];", Int32Regs>;
 defm INT_PTX_LDG_GLOBAL_i64
   : LDG_G<"u64 \t$result, [$src];", Int64Regs>;
+defm INT_PTX_LDG_GLOBAL_f16
+  : LDG_G<"b16 \t$result, [$src];", Float16Regs>;
+defm INT_PTX_LDG_GLOBAL_f16x2
+  : LDG_G<"b32 \t$result, [$src];", Float16x2Regs>;
 defm INT_PTX_LDG_GLOBAL_f32
   : LDG_G<"f32 \t$result, [$src];", Float32Regs>;
 defm INT_PTX_LDG_GLOBAL_f64
@@ -1556,6 +2089,10 @@ defm INT_PTX_LDG_G_v2i16_ELE
   : VLDG_G_ELE_V2<"v2.u16 \t{{$dst1, $dst2}}, [$src];", Int16Regs>;
 defm INT_PTX_LDG_G_v2i32_ELE
   : VLDG_G_ELE_V2<"v2.u32 \t{{$dst1, $dst2}}, [$src];", Int32Regs>;
+defm INT_PTX_LDG_G_v2f16_ELE
+  : VLDG_G_ELE_V2<"v2.b16 \t{{$dst1, $dst2}}, [$src];", Float16Regs>;
+defm INT_PTX_LDG_G_v2f16x2_ELE
+  : VLDG_G_ELE_V2<"v2.b32 \t{{$dst1, $dst2}}, [$src];", Float16x2Regs>;
 defm INT_PTX_LDG_G_v2f32_ELE
   : VLDG_G_ELE_V2<"v2.f32 \t{{$dst1, $dst2}}, [$src];", Float32Regs>;
 defm INT_PTX_LDG_G_v2i64_ELE
@@ -1568,63 +2105,42 @@ defm INT_PTX_LDG_G_v4i16_ELE
   : VLDG_G_ELE_V4<"v4.u16 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];", Int16Regs>;
 defm INT_PTX_LDG_G_v4i32_ELE
   : VLDG_G_ELE_V4<"v4.u32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];", Int32Regs>;
+defm INT_PTX_LDG_G_v4f16_ELE
+  : VLDG_G_ELE_V4<"v4.b16 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];", Float16Regs>;
+defm INT_PTX_LDG_G_v4f16x2_ELE
+  : VLDG_G_ELE_V4<"v4.b32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];", Float16x2Regs>;
 defm INT_PTX_LDG_G_v4f32_ELE
   : VLDG_G_ELE_V4<"v4.f32 \t{{$dst1, $dst2, $dst3, $dst4}}, [$src];", Float32Regs>;
 
 
 multiclass NG_TO_G<string Str, Intrinsic Intrin> {
    def _yes : NVPTXInst<(outs Int32Regs:$result), (ins Int32Regs:$src),
-          !strconcat("cvta.", !strconcat(Str, ".u32 \t$result, $src;")),
-      [(set Int32Regs:$result, (Intrin Int32Regs:$src))]>,
-   Requires<[hasGenericLdSt]>;
-   def _yes_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
-          !strconcat("cvta.", !strconcat(Str, ".u64 \t$result, $src;")),
-      [(set Int64Regs:$result, (Intrin Int64Regs:$src))]>,
-   Requires<[hasGenericLdSt]>;
-
-// @TODO: Are these actually needed?  I believe global addresses will be copied
-// to register values anyway.
-   /*def __addr_yes : NVPTXInst<(outs Int32Regs:$result), (ins imemAny:$src),
-          !strconcat("cvta.", !strconcat(Str, ".u32 \t$result, $src;")),
-      [(set Int32Regs:$result, (Intrin (Wrapper tglobaladdr:$src)))]>,
-      Requires<[hasGenericLdSt]>;
-   def __addr_yes_64 : NVPTXInst<(outs Int64Regs:$result), (ins imemAny:$src),
-          !strconcat("cvta.", !strconcat(Str, ".u64 \t$result, $src;")),
-      [(set Int64Regs:$result, (Intrin (Wrapper tglobaladdr:$src)))]>,
-      Requires<[hasGenericLdSt]>;*/
-
-   def _no : NVPTXInst<(outs Int32Regs:$result), (ins Int32Regs:$src),
-          "mov.u32 \t$result, $src;",
+          !strconcat("cvta.", Str, ".u32 \t$result, $src;"),
       [(set Int32Regs:$result, (Intrin Int32Regs:$src))]>;
-   def _no_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
-          "mov.u64 \t$result, $src;",
+   def _yes_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
+          !strconcat("cvta.", Str, ".u64 \t$result, $src;"),
       [(set Int64Regs:$result, (Intrin Int64Regs:$src))]>;
-
-// @TODO: Are these actually needed?  I believe global addresses will be copied
-// to register values anyway.
-   /*def _addr_no : NVPTXInst<(outs Int32Regs:$result), (ins imem:$src),
-          "mov.u32 \t$result, $src;",
-      [(set Int32Regs:$result, (Intrin (Wrapper tglobaladdr:$src)))]>;
-   def _addr_no_64 : NVPTXInst<(outs Int64Regs:$result), (ins imem:$src),
-          "mov.u64 \t$result, $src;",
-      [(set Int64Regs:$result, (Intrin (Wrapper tglobaladdr:$src)))]>;*/
+   def _yes_6432 : NVPTXInst<(outs Int64Regs:$result), (ins Int32Regs:$src),
+          "{{ .reg .b64 %tmp;\n\t"
+          #"  cvt.u64.u32 \t%tmp, $src;\n\t"
+          #"  cvta." # Str # ".u64 \t$result, %tmp; }}",
+      [(set Int64Regs:$result, (Intrin Int32Regs:$src))]>,
+      Requires<[useShortPtr]>;
 }
 
 multiclass G_TO_NG<string Str, Intrinsic Intrin> {
    def _yes : NVPTXInst<(outs Int32Regs:$result), (ins Int32Regs:$src),
-          !strconcat("cvta.to.", !strconcat(Str, ".u32 \t$result, $src;")),
-      [(set Int32Regs:$result, (Intrin Int32Regs:$src))]>,
-   Requires<[hasGenericLdSt]>;
-   def _yes_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
-          !strconcat("cvta.to.", !strconcat(Str, ".u64 \t$result, $src;")),
-      [(set Int64Regs:$result, (Intrin Int64Regs:$src))]>,
-   Requires<[hasGenericLdSt]>;
-   def _no : NVPTXInst<(outs Int32Regs:$result), (ins Int32Regs:$src),
-          "mov.u32 \t$result, $src;",
+          !strconcat("cvta.to.", Str, ".u32 \t$result, $src;"),
       [(set Int32Regs:$result, (Intrin Int32Regs:$src))]>;
-   def _no_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
-          "mov.u64 \t$result, $src;",
+   def _yes_64 : NVPTXInst<(outs Int64Regs:$result), (ins Int64Regs:$src),
+          !strconcat("cvta.to.", Str, ".u64 \t$result, $src;"),
       [(set Int64Regs:$result, (Intrin Int64Regs:$src))]>;
+   def _yes_3264 : NVPTXInst<(outs Int32Regs:$result), (ins Int64Regs:$src),
+          "{{ .reg .b64 %tmp;\n\t"
+          #"  cvta.to." # Str # ".u64 \t%tmp, $src;\n\t"
+          #"  cvt.u32.u64 \t$result, %tmp; }}",
+      [(set Int32Regs:$result, (Intrin Int64Regs:$src))]>,
+      Requires<[useShortPtr]>;
 }
 
 defm cvta_local  : NG_TO_G<"local", int_nvvm_ptr_local_to_gen>;
@@ -1774,7 +2290,7 @@ def ISSPACEP_SHARED_64
 // Special register reads
 def MOV_SPECIAL : NVPTXInst<(outs Int32Regs:$d),
                             (ins SpecialRegs:$r),
-                            "mov.b32\t$d, $r;", []>;
+                            "mov.b32 \t$d, $r;", []>;
 
 def : Pat<(int_nvvm_read_ptx_sreg_envreg0), (MOV_SPECIAL ENVREG0)>;
 def : Pat<(int_nvvm_read_ptx_sreg_envreg1), (MOV_SPECIAL ENVREG1)>;
@@ -1836,54 +2352,59 @@ def : Pat<(int_nvvm_rotate_b32 Int32Regs:$src, Int32Regs:$amt),
           (ROTL32reg_sw Int32Regs:$src, Int32Regs:$amt)>,
       Requires<[noHWROT32]> ;
 
-def GET_LO_INT64
-  : NVPTXInst<(outs Int32Regs:$dst), (ins Int64Regs:$src),
-              !strconcat("{{\n\t",
-              !strconcat(".reg .b32 %dummy;\n\t",
-              !strconcat("mov.b64 \t{$dst,%dummy}, $src;\n\t",
-        !strconcat("}}", "")))),
-        []> ;
+let hasSideEffects = false in {
+  def GET_LO_INT64 : NVPTXInst<(outs Int32Regs:$dst), (ins Int64Regs:$src),
+    !strconcat("{{\n\t",
+               ".reg .b32 %dummy;\n\t",
+               "mov.b64 \t{$dst,%dummy}, $src;\n\t",
+               "}}"),
+          []> ;
 
-def GET_HI_INT64
-  : NVPTXInst<(outs Int32Regs:$dst), (ins Int64Regs:$src),
-              !strconcat("{{\n\t",
-              !strconcat(".reg .b32 %dummy;\n\t",
-              !strconcat("mov.b64 \t{%dummy,$dst}, $src;\n\t",
-        !strconcat("}}", "")))),
-        []> ;
+  def GET_HI_INT64 : NVPTXInst<(outs Int32Regs:$dst), (ins Int64Regs:$src),
+    !strconcat("{{\n\t",
+               ".reg .b32 %dummy;\n\t",
+               "mov.b64 \t{%dummy,$dst}, $src;\n\t",
+               "}}"),
+          []> ;
+}
 
-def PACK_TWO_INT32
-  : NVPTXInst<(outs Int64Regs:$dst), (ins Int32Regs:$lo, Int32Regs:$hi),
-              "mov.b64 \t$dst, {{$lo, $hi}};", []> ;
+let hasSideEffects = false in {
+  def PACK_TWO_INT32
+    : NVPTXInst<(outs Int64Regs:$dst), (ins Int32Regs:$lo, Int32Regs:$hi),
+                "mov.b64 \t$dst, {{$lo, $hi}};", []> ;
+}
 
 def : Pat<(int_nvvm_swap_lo_hi_b64 Int64Regs:$src),
           (PACK_TWO_INT32 (GET_HI_INT64 Int64Regs:$src),
                           (GET_LO_INT64 Int64Regs:$src))> ;
 
-// funnel shift, requires >= sm_32
-def SHF_L_WRAP_B32_IMM
-  : NVPTXInst<(outs Int32Regs:$dst),
-              (ins  Int32Regs:$lo, Int32Regs:$hi, i32imm:$amt),
-              "shf.l.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
-    Requires<[hasHWROT32]>;
+// Funnel shift, requires >= sm_32.  Does not trap if amt is out of range, so
+// no side effects.
+let hasSideEffects = false in {
+  def SHF_L_WRAP_B32_IMM
+    : NVPTXInst<(outs Int32Regs:$dst),
+                (ins  Int32Regs:$lo, Int32Regs:$hi, i32imm:$amt),
+                "shf.l.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
+      Requires<[hasHWROT32]>;
 
-def SHF_L_WRAP_B32_REG
-  : NVPTXInst<(outs Int32Regs:$dst),
-              (ins  Int32Regs:$lo, Int32Regs:$hi, Int32Regs:$amt),
-              "shf.l.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
-    Requires<[hasHWROT32]>;
+  def SHF_L_WRAP_B32_REG
+    : NVPTXInst<(outs Int32Regs:$dst),
+                (ins  Int32Regs:$lo, Int32Regs:$hi, Int32Regs:$amt),
+                "shf.l.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
+      Requires<[hasHWROT32]>;
 
-def SHF_R_WRAP_B32_IMM
-  : NVPTXInst<(outs Int32Regs:$dst),
-              (ins  Int32Regs:$lo, Int32Regs:$hi, i32imm:$amt),
-              "shf.r.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
-    Requires<[hasHWROT32]>;
+  def SHF_R_WRAP_B32_IMM
+    : NVPTXInst<(outs Int32Regs:$dst),
+                (ins  Int32Regs:$lo, Int32Regs:$hi, i32imm:$amt),
+                "shf.r.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
+      Requires<[hasHWROT32]>;
 
-def SHF_R_WRAP_B32_REG
-  : NVPTXInst<(outs Int32Regs:$dst),
-              (ins  Int32Regs:$lo, Int32Regs:$hi, Int32Regs:$amt),
-              "shf.r.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
-    Requires<[hasHWROT32]>;
+  def SHF_R_WRAP_B32_REG
+    : NVPTXInst<(outs Int32Regs:$dst),
+                (ins  Int32Regs:$lo, Int32Regs:$hi, Int32Regs:$amt),
+                "shf.r.wrap.b32 \t$dst, $lo, $hi, $amt;",[]>,
+      Requires<[hasHWROT32]>;
+}
 
 // HW version of rotate 64
 def : Pat<(int_nvvm_rotate_b64 Int64Regs:$src, (i32 imm:$amt)),
@@ -1942,25 +2463,25 @@ def : Pat<(int_nvvm_rotate_right_b64 Int64Regs:$src, Int32Regs:$amt),
 // also defined in NVPTXReplaceImageHandles.cpp
 
 // texmode_independent
-let IsTex = 1, IsTexModeUnified = 0 in {
+let IsTex = true, IsTexModeUnified = false in {
 // Texture fetch instructions using handles
 def TEX_1D_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x),
-              "tex.1d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x),
-              "tex.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_F32_F32_LEVEL
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$lod),
-              "tex.level.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], $lod;",
               []>;
 def TEX_1D_F32_F32_GRAD
@@ -1968,27 +2489,27 @@ def TEX_1D_F32_F32_GRAD
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_1D_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x),
-              "tex.1d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x),
-              "tex.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_S32_F32_LEVEL
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], $lod;",
               []>;
 def TEX_1D_S32_F32_GRAD
@@ -1996,27 +2517,27 @@ def TEX_1D_S32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_1D_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x),
-              "tex.1d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x),
-              "tex.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
+              "tex.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, [$t, $s, \\{$x\\}];",
               []>;
 def TEX_1D_U32_F32_LEVEL
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], $lod;",
               []>;
 def TEX_1D_U32_F32_GRAD
@@ -2024,7 +2545,7 @@ def TEX_1D_U32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 
@@ -2032,14 +2553,14 @@ def TEX_1D_ARRAY_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_F32_F32_LEVEL
@@ -2047,7 +2568,7 @@ def TEX_1D_ARRAY_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_1D_ARRAY_F32_F32_GRAD
@@ -2055,21 +2576,21 @@ def TEX_1D_ARRAY_F32_F32_GRAD
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_1D_ARRAY_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_S32_F32_LEVEL
@@ -2077,7 +2598,7 @@ def TEX_1D_ARRAY_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_1D_ARRAY_S32_F32_GRAD
@@ -2085,21 +2606,21 @@ def TEX_1D_ARRAY_S32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_1D_ARRAY_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}];",
               []>;
 def TEX_1D_ARRAY_U32_F32_LEVEL
@@ -2107,7 +2628,7 @@ def TEX_1D_ARRAY_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_1D_ARRAY_U32_F32_GRAD
@@ -2115,7 +2636,7 @@ def TEX_1D_ARRAY_U32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 
@@ -2123,14 +2644,14 @@ def TEX_2D_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_F32_F32_LEVEL
@@ -2138,7 +2659,7 @@ def TEX_2D_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_2D_F32_F32_GRAD
@@ -2147,7 +2668,7 @@ def TEX_2D_F32_F32_GRAD
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2155,14 +2676,14 @@ def TEX_2D_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_S32_F32_LEVEL
@@ -2170,7 +2691,7 @@ def TEX_2D_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_2D_S32_F32_GRAD
@@ -2179,7 +2700,7 @@ def TEX_2D_S32_F32_GRAD
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2187,14 +2708,14 @@ def TEX_2D_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TEX_2D_U32_F32_LEVEL
@@ -2202,7 +2723,7 @@ def TEX_2D_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_2D_U32_F32_GRAD
@@ -2211,7 +2732,7 @@ def TEX_2D_U32_F32_GRAD
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2221,7 +2742,7 @@ def TEX_2D_ARRAY_F32_S32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_F32_F32
@@ -2229,7 +2750,7 @@ def TEX_2D_ARRAY_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_F32_F32_LEVEL
@@ -2237,7 +2758,7 @@ def TEX_2D_ARRAY_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_2D_ARRAY_F32_F32_GRAD
@@ -2246,7 +2767,7 @@ def TEX_2D_ARRAY_F32_F32_GRAD
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2255,7 +2776,7 @@ def TEX_2D_ARRAY_S32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_S32_F32
@@ -2263,7 +2784,7 @@ def TEX_2D_ARRAY_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_S32_F32_LEVEL
@@ -2271,7 +2792,7 @@ def TEX_2D_ARRAY_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_2D_ARRAY_S32_F32_GRAD
@@ -2281,7 +2802,7 @@ def TEX_2D_ARRAY_S32_F32_GRAD
                    Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2290,7 +2811,7 @@ def TEX_2D_ARRAY_U32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_U32_F32
@@ -2298,7 +2819,7 @@ def TEX_2D_ARRAY_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_2D_ARRAY_U32_F32_LEVEL
@@ -2306,7 +2827,7 @@ def TEX_2D_ARRAY_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_2D_ARRAY_U32_F32_GRAD
@@ -2316,7 +2837,7 @@ def TEX_2D_ARRAY_U32_F32_GRAD
                    Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2326,7 +2847,7 @@ def TEX_3D_F32_S32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_F32_F32
@@ -2334,7 +2855,7 @@ def TEX_3D_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_F32_F32_LEVEL
@@ -2342,7 +2863,7 @@ def TEX_3D_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_3D_F32_F32_GRAD
@@ -2353,7 +2874,7 @@ def TEX_3D_F32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -2363,7 +2884,7 @@ def TEX_3D_S32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_S32_F32
@@ -2371,7 +2892,7 @@ def TEX_3D_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_S32_F32_LEVEL
@@ -2379,7 +2900,7 @@ def TEX_3D_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_3D_S32_F32_GRAD
@@ -2390,7 +2911,7 @@ def TEX_3D_S32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -2400,7 +2921,7 @@ def TEX_3D_U32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_U32_F32
@@ -2408,7 +2929,7 @@ def TEX_3D_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_3D_U32_F32_LEVEL
@@ -2416,7 +2937,7 @@ def TEX_3D_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_3D_U32_F32_GRAD
@@ -2427,7 +2948,7 @@ def TEX_3D_U32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -2438,7 +2959,7 @@ def TEX_CUBE_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s,
                Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_CUBE_F32_F32_LEVEL
@@ -2447,7 +2968,7 @@ def TEX_CUBE_F32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_CUBE_S32_F32
@@ -2455,7 +2976,7 @@ def TEX_CUBE_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_CUBE_S32_F32_LEVEL
@@ -2464,7 +2985,7 @@ def TEX_CUBE_S32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_CUBE_U32_F32
@@ -2472,7 +2993,7 @@ def TEX_CUBE_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_CUBE_U32_F32_LEVEL
@@ -2481,7 +3002,7 @@ def TEX_CUBE_U32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 
@@ -2490,7 +3011,7 @@ def TEX_CUBE_ARRAY_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_CUBE_ARRAY_F32_F32_LEVEL
@@ -2499,7 +3020,7 @@ def TEX_CUBE_ARRAY_F32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 def TEX_CUBE_ARRAY_S32_F32
@@ -2507,7 +3028,7 @@ def TEX_CUBE_ARRAY_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_CUBE_ARRAY_S32_F32_LEVEL
@@ -2516,7 +3037,7 @@ def TEX_CUBE_ARRAY_S32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 def TEX_CUBE_ARRAY_U32_F32
@@ -2524,7 +3045,7 @@ def TEX_CUBE_ARRAY_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_CUBE_ARRAY_U32_F32_LEVEL
@@ -2533,7 +3054,7 @@ def TEX_CUBE_ARRAY_U32_F32_LEVEL
               (ins Int64Regs:$t, Int64Regs:$s, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, $s, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 
@@ -2541,109 +3062,109 @@ def TLD4_R_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_G_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_B_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_A_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_R_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_G_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_B_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_A_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_R_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_G_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_B_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 def TLD4_A_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Int64Regs:$s, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, $s, \\{$x, $y\\}];",
               []>;
 }
 
 
 // texmode_unified
-let IsTex = 1, IsTexModeUnified = 1 in {
+let IsTex = true, IsTexModeUnified = true in {
 // Texture fetch instructions using handles
 def TEX_UNIFIED_1D_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x),
-              "tex.1d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x),
-              "tex.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_F32_F32_LEVEL
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$lod),
-              "tex.level.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_F32_F32_GRAD
@@ -2651,27 +3172,27 @@ def TEX_UNIFIED_1D_F32_F32_GRAD
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_UNIFIED_1D_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x),
-              "tex.1d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x),
-              "tex.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_S32_F32_LEVEL
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_S32_F32_GRAD
@@ -2679,27 +3200,27 @@ def TEX_UNIFIED_1D_S32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_UNIFIED_1D_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x),
-              "tex.1d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x),
-              "tex.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
+              "tex.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, [$t, \\{$x\\}];",
               []>;
 def TEX_UNIFIED_1D_U32_F32_LEVEL
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_U32_F32_GRAD
@@ -2707,7 +3228,7 @@ def TEX_UNIFIED_1D_U32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 
@@ -2715,14 +3236,14 @@ def TEX_UNIFIED_1D_ARRAY_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_F32_F32_LEVEL
@@ -2730,7 +3251,7 @@ def TEX_UNIFIED_1D_ARRAY_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_ARRAY_F32_F32_GRAD
@@ -2738,21 +3259,21 @@ def TEX_UNIFIED_1D_ARRAY_F32_F32_GRAD
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_UNIFIED_1D_ARRAY_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_S32_F32_LEVEL
@@ -2760,7 +3281,7 @@ def TEX_UNIFIED_1D_ARRAY_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_ARRAY_S32_F32_GRAD
@@ -2768,21 +3289,21 @@ def TEX_UNIFIED_1D_ARRAY_S32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 def TEX_UNIFIED_1D_ARRAY_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x),
-              "tex.a1d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x),
-              "tex.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}];",
               []>;
 def TEX_UNIFIED_1D_ARRAY_U32_F32_LEVEL
@@ -2790,7 +3311,7 @@ def TEX_UNIFIED_1D_ARRAY_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$lod),
-              "tex.level.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], $lod;",
               []>;
 def TEX_UNIFIED_1D_ARRAY_U32_F32_GRAD
@@ -2798,7 +3319,7 @@ def TEX_UNIFIED_1D_ARRAY_U32_F32_GRAD
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$gradx, Float32Regs:$grady),
-              "tex.grad.a1d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a1d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x\\}], \\{$gradx\\}, \\{$grady\\};",
               []>;
 
@@ -2806,14 +3327,14 @@ def TEX_UNIFIED_2D_F32_S32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$r, Float32Regs:$g,
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_F32_F32_LEVEL
@@ -2821,7 +3342,7 @@ def TEX_UNIFIED_2D_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_F32_F32_GRAD
@@ -2830,7 +3351,7 @@ def TEX_UNIFIED_2D_F32_F32_GRAD
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2838,14 +3359,14 @@ def TEX_UNIFIED_2D_S32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_S32_F32_LEVEL
@@ -2853,7 +3374,7 @@ def TEX_UNIFIED_2D_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_S32_F32_GRAD
@@ -2862,7 +3383,7 @@ def TEX_UNIFIED_2D_S32_F32_GRAD
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2870,14 +3391,14 @@ def TEX_UNIFIED_2D_U32_S32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y),
-              "tex.2d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$r, Int32Regs:$g,
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tex.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_U32_F32_LEVEL
@@ -2885,7 +3406,7 @@ def TEX_UNIFIED_2D_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$lod),
-              "tex.level.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_U32_F32_GRAD
@@ -2894,7 +3415,7 @@ def TEX_UNIFIED_2D_U32_F32_GRAD
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2904,7 +3425,7 @@ def TEX_UNIFIED_2D_ARRAY_F32_S32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_F32_F32
@@ -2912,7 +3433,7 @@ def TEX_UNIFIED_2D_ARRAY_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_F32_F32_LEVEL
@@ -2920,7 +3441,7 @@ def TEX_UNIFIED_2D_ARRAY_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_ARRAY_F32_F32_GRAD
@@ -2929,7 +3450,7 @@ def TEX_UNIFIED_2D_ARRAY_F32_F32_GRAD
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2938,7 +3459,7 @@ def TEX_UNIFIED_2D_ARRAY_S32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_S32_F32
@@ -2946,7 +3467,7 @@ def TEX_UNIFIED_2D_ARRAY_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_S32_F32_LEVEL
@@ -2954,7 +3475,7 @@ def TEX_UNIFIED_2D_ARRAY_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_ARRAY_S32_F32_GRAD
@@ -2964,7 +3485,7 @@ def TEX_UNIFIED_2D_ARRAY_S32_F32_GRAD
                    Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -2973,7 +3494,7 @@ def TEX_UNIFIED_2D_ARRAY_U32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Int32Regs:$x,
                    Int32Regs:$y),
-              "tex.a2d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_U32_F32
@@ -2981,7 +3502,7 @@ def TEX_UNIFIED_2D_ARRAY_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y),
-              "tex.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}];",
               []>;
 def TEX_UNIFIED_2D_ARRAY_U32_F32_LEVEL
@@ -2989,7 +3510,7 @@ def TEX_UNIFIED_2D_ARRAY_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l, Float32Regs:$x,
                    Float32Regs:$y, Float32Regs:$lod),
-              "tex.level.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], $lod;",
               []>;
 def TEX_UNIFIED_2D_ARRAY_U32_F32_GRAD
@@ -2999,7 +3520,7 @@ def TEX_UNIFIED_2D_ARRAY_U32_F32_GRAD
                    Float32Regs:$y,
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$grady0, Float32Regs:$grady1),
-              "tex.grad.a2d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.a2d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $y\\}], \\{$gradx0, $gradx1\\}, "
               "\\{$grady0, $grady1\\};",
               []>;
@@ -3009,7 +3530,7 @@ def TEX_UNIFIED_3D_F32_S32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.f32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.f32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_F32_F32
@@ -3017,7 +3538,7 @@ def TEX_UNIFIED_3D_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_F32_F32_LEVEL
@@ -3025,7 +3546,7 @@ def TEX_UNIFIED_3D_F32_F32_LEVEL
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_3D_F32_F32_GRAD
@@ -3036,7 +3557,7 @@ def TEX_UNIFIED_3D_F32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -3046,7 +3567,7 @@ def TEX_UNIFIED_3D_S32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.s32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.s32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_S32_F32
@@ -3054,7 +3575,7 @@ def TEX_UNIFIED_3D_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_S32_F32_LEVEL
@@ -3062,7 +3583,7 @@ def TEX_UNIFIED_3D_S32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_3D_S32_F32_GRAD
@@ -3073,7 +3594,7 @@ def TEX_UNIFIED_3D_S32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -3083,7 +3604,7 @@ def TEX_UNIFIED_3D_U32_S32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$x, Int32Regs:$y,
                    Int32Regs:$z),
-              "tex.3d.v4.u32.s32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.u32.s32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_U32_F32
@@ -3091,7 +3612,7 @@ def TEX_UNIFIED_3D_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z),
-              "tex.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_3D_U32_F32_LEVEL
@@ -3099,7 +3620,7 @@ def TEX_UNIFIED_3D_U32_F32_LEVEL
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y,
                    Float32Regs:$z, Float32Regs:$lod),
-              "tex.level.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_3D_U32_F32_GRAD
@@ -3110,7 +3631,7 @@ def TEX_UNIFIED_3D_U32_F32_GRAD
                    Float32Regs:$gradx0, Float32Regs:$gradx1,
                    Float32Regs:$gradx2, Float32Regs:$grady0,
                    Float32Regs:$grady1, Float32Regs:$grady2),
-              "tex.grad.3d.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.grad.3d.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], "
               "\\{$gradx0, $gradx1, $gradx2, $gradx2\\}, "
               "\\{$grady0, $grady1, $grady2, $grady2\\};",
@@ -3121,7 +3642,7 @@ def TEX_UNIFIED_CUBE_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t,
                Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_F32_F32_LEVEL
@@ -3130,7 +3651,7 @@ def TEX_UNIFIED_CUBE_F32_F32_LEVEL
               (ins Int64Regs:$t,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_CUBE_S32_F32
@@ -3138,7 +3659,7 @@ def TEX_UNIFIED_CUBE_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_S32_F32_LEVEL
@@ -3147,7 +3668,7 @@ def TEX_UNIFIED_CUBE_S32_F32_LEVEL
               (ins Int64Regs:$t,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_CUBE_U32_F32
@@ -3155,7 +3676,7 @@ def TEX_UNIFIED_CUBE_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.cube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.cube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_U32_F32_LEVEL
@@ -3164,7 +3685,7 @@ def TEX_UNIFIED_CUBE_U32_F32_LEVEL
               (ins Int64Regs:$t,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.cube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.cube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$x, $y, $z, $z\\}], $lod;",
               []>;
 
@@ -3173,7 +3694,7 @@ def TEX_UNIFIED_CUBE_ARRAY_F32_F32
                     Float32Regs:$b, Float32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l,
                Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_ARRAY_F32_F32_LEVEL
@@ -3182,7 +3703,7 @@ def TEX_UNIFIED_CUBE_ARRAY_F32_F32_LEVEL
               (ins Int64Regs:$t, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.f32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.f32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_CUBE_ARRAY_S32_F32
@@ -3190,7 +3711,7 @@ def TEX_UNIFIED_CUBE_ARRAY_S32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_ARRAY_S32_F32_LEVEL
@@ -3199,7 +3720,7 @@ def TEX_UNIFIED_CUBE_ARRAY_S32_F32_LEVEL
               (ins Int64Regs:$t, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.s32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.s32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 def TEX_UNIFIED_CUBE_ARRAY_U32_F32
@@ -3207,7 +3728,7 @@ def TEX_UNIFIED_CUBE_ARRAY_U32_F32
                     Int32Regs:$b, Int32Regs:$a),
               (ins Int64Regs:$t, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z),
-              "tex.acube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.acube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}];",
               []>;
 def TEX_UNIFIED_CUBE_ARRAY_U32_F32_LEVEL
@@ -3216,7 +3737,7 @@ def TEX_UNIFIED_CUBE_ARRAY_U32_F32_LEVEL
               (ins Int64Regs:$t, Int32Regs:$l,
                    Float32Regs:$x, Float32Regs:$y, Float32Regs:$z,
                    Float32Regs:$lod),
-              "tex.level.acube.v4.u32.f32\t\\{$r, $g, $b, $a\\}, "
+              "tex.level.acube.v4.u32.f32 \t\\{$r, $g, $b, $a\\}, "
               "[$t, \\{$l, $x, $y, $z\\}], $lod;",
               []>;
 
@@ -3224,84 +3745,84 @@ def TLD4_UNIFIED_R_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_G_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_B_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_A_2D_F32_F32
   : NVPTXInst<(outs Float32Regs:$v0, Float32Regs:$v1,
                     Float32Regs:$v2, Float32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.f32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.f32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_R_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_G_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_B_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_A_2D_S32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.s32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.s32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_R_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.r.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.r.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_G_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.g.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.g.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_B_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.b.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.b.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 def TLD4_UNIFIED_A_2D_U32_F32
   : NVPTXInst<(outs Int32Regs:$v0, Int32Regs:$v1,
                     Int32Regs:$v2, Int32Regs:$v3),
               (ins Int64Regs:$t, Float32Regs:$x, Float32Regs:$y),
-              "tld4.a.2d.v4.u32.f32\t\\{$v0, $v1, $v2, $v3\\}, "
+              "tld4.a.2d.v4.u32.f32 \t\\{$v0, $v1, $v2, $v3\\}, "
               "[$t, \\{$x, $y\\}];",
               []>;
 }
@@ -3310,7 +3831,7 @@ def TLD4_UNIFIED_A_2D_U32_F32
 
 //=== Surface load instructions
 // .clamp variant
-let IsSuld = 1 in {
+let IsSuld = true in {
 def SULD_1D_I8_CLAMP
   : NVPTXInst<(outs Int16Regs:$r),
               (ins Int64Regs:$s, Int32Regs:$x),
@@ -3622,7 +4143,7 @@ def SULD_3D_V4I32_CLAMP
 
 
 // .trap variant
-let IsSuld = 1 in {
+let IsSuld = true in {
 def SULD_1D_I8_TRAP
   : NVPTXInst<(outs Int16Regs:$r),
               (ins Int64Regs:$s, Int32Regs:$x),
@@ -3933,7 +4454,7 @@ def SULD_3D_V4I32_TRAP
 }
 
 // .zero variant
-let IsSuld = 1 in {
+let IsSuld = true in {
 def SULD_1D_I8_ZERO
   : NVPTXInst<(outs Int16Regs:$r),
               (ins Int64Regs:$s, Int32Regs:$x),
@@ -4247,7 +4768,7 @@ def SULD_3D_V4I32_ZERO
 // Texture Query Intrinsics
 //-----------------------------------
 
-let IsSurfTexQuery = 1 in {
+let IsSurfTexQuery = true in {
 def TXQ_CHANNEL_ORDER
   : NVPTXInst<(outs Int32Regs:$d), (ins Int64Regs:$a),
               "txq.channel_order.b32 \t$d, [$a];",
@@ -4304,7 +4825,7 @@ def : Pat<(int_nvvm_txq_num_mipmap_levels Int64Regs:$a),
 // Surface Query Intrinsics
 //-----------------------------------
 
-let IsSurfTexQuery = 1 in {
+let IsSurfTexQuery = true in {
 def SUQ_CHANNEL_ORDER
   : NVPTXInst<(outs Int32Regs:$d), (ins Int64Regs:$a),
               "suq.channel_order.b32 \t$d, [$a];",
@@ -4363,7 +4884,7 @@ def ISTYPEP_TEXTURE
 
 //===- Surface Stores -----------------------------------------------------===//
 
-let IsSust = 1 in {
+let IsSust = true in {
 // Unformatted
 // .clamp variant
 def SUST_B_1D_B8_CLAMP
@@ -6950,98 +7471,363 @@ def : Pat<(int_nvvm_sust_p_3d_v4i32_trap
            Int32Regs:$x, Int32Regs:$y, Int32Regs:$z,
            Int32Regs:$r, Int32Regs:$g, Int32Regs:$b, Int32Regs:$a)>;
 
+//-----------------------------------
+// Read Special Registers
+//-----------------------------------
 
-
-//===-- Old PTX Back-end Intrinsics ---------------------------------------===//
-
-// These intrinsics are handled to retain compatibility with the old backend.
-
-// PTX Special Purpose Register Accessor Intrinsics
-
-class PTX_READ_SPECIAL_REGISTER_R64<string regname, Intrinsic intop>
+class PTX_READ_SREG_R64<string regname, Intrinsic intop>
   : NVPTXInst<(outs Int64Regs:$d), (ins),
-              !strconcat(!strconcat("mov.u64\t$d, %", regname), ";"),
+              !strconcat("mov.u64 \t$d, %", regname, ";"),
               [(set Int64Regs:$d, (intop))]>;
 
-class PTX_READ_SPECIAL_REGISTER_R32<string regname, Intrinsic intop>
+class PTX_READ_SREG_R32<string regname, Intrinsic intop>
   : NVPTXInst<(outs Int32Regs:$d), (ins),
-              !strconcat(!strconcat("mov.u32\t$d, %", regname), ";"),
+              !strconcat("mov.u32 \t$d, %", regname, ";"),
               [(set Int32Regs:$d, (intop))]>;
 
 // TODO Add read vector-version of special registers
 
-def PTX_READ_TID_X   : PTX_READ_SPECIAL_REGISTER_R32<"tid.x",
-                                                     int_ptx_read_tid_x>;
-def PTX_READ_TID_Y   : PTX_READ_SPECIAL_REGISTER_R32<"tid.y",
-                                                     int_ptx_read_tid_y>;
-def PTX_READ_TID_Z   : PTX_READ_SPECIAL_REGISTER_R32<"tid.z",
-                                                     int_ptx_read_tid_z>;
-def PTX_READ_TID_W   : PTX_READ_SPECIAL_REGISTER_R32<"tid.w",
-                                                     int_ptx_read_tid_w>;
+def INT_PTX_SREG_TID_X :
+    PTX_READ_SREG_R32<"tid.x", int_nvvm_read_ptx_sreg_tid_x>;
+def INT_PTX_SREG_TID_Y :
+    PTX_READ_SREG_R32<"tid.y", int_nvvm_read_ptx_sreg_tid_y>;
+def INT_PTX_SREG_TID_Z :
+    PTX_READ_SREG_R32<"tid.z", int_nvvm_read_ptx_sreg_tid_z>;
+def INT_PTX_SREG_TID_W :
+    PTX_READ_SREG_R32<"tid.w", int_nvvm_read_ptx_sreg_tid_w>;
 
-def PTX_READ_NTID_X   : PTX_READ_SPECIAL_REGISTER_R32<"ntid.x",
-                                                      int_ptx_read_ntid_x>;
-def PTX_READ_NTID_Y   : PTX_READ_SPECIAL_REGISTER_R32<"ntid.y",
-                                                      int_ptx_read_ntid_y>;
-def PTX_READ_NTID_Z   : PTX_READ_SPECIAL_REGISTER_R32<"ntid.z",
-                                                      int_ptx_read_ntid_z>;
-def PTX_READ_NTID_W   : PTX_READ_SPECIAL_REGISTER_R32<"ntid.w",
-                                                      int_ptx_read_ntid_w>;
+def INT_PTX_SREG_NTID_X :
+    PTX_READ_SREG_R32<"ntid.x", int_nvvm_read_ptx_sreg_ntid_x>;
+def INT_PTX_SREG_NTID_Y :
+    PTX_READ_SREG_R32<"ntid.y", int_nvvm_read_ptx_sreg_ntid_y>;
+def INT_PTX_SREG_NTID_Z :
+    PTX_READ_SREG_R32<"ntid.z", int_nvvm_read_ptx_sreg_ntid_z>;
+def INT_PTX_SREG_NTID_W :
+    PTX_READ_SREG_R32<"ntid.w", int_nvvm_read_ptx_sreg_ntid_w>;
 
-def PTX_READ_LANEID  : PTX_READ_SPECIAL_REGISTER_R32<"laneid",
-                                                     int_ptx_read_laneid>;
-def PTX_READ_WARPID  : PTX_READ_SPECIAL_REGISTER_R32<"warpid",
-                                                     int_ptx_read_warpid>;
-def PTX_READ_NWARPID : PTX_READ_SPECIAL_REGISTER_R32<"nwarpid",
-                                                     int_ptx_read_nwarpid>;
+def INT_PTX_SREG_LANEID :
+    PTX_READ_SREG_R32<"laneid", int_nvvm_read_ptx_sreg_laneid>;
+def INT_PTX_SREG_WARPID :
+    PTX_READ_SREG_R32<"warpid", int_nvvm_read_ptx_sreg_warpid>;
+def INT_PTX_SREG_NWARPID :
+    PTX_READ_SREG_R32<"nwarpid", int_nvvm_read_ptx_sreg_nwarpid>;
 
-def PTX_READ_CTAID_X   : PTX_READ_SPECIAL_REGISTER_R32<"ctaid.x",
-                                                       int_ptx_read_ctaid_x>;
-def PTX_READ_CTAID_Y   : PTX_READ_SPECIAL_REGISTER_R32<"ctaid.y",
-                                                       int_ptx_read_ctaid_y>;
-def PTX_READ_CTAID_Z   : PTX_READ_SPECIAL_REGISTER_R32<"ctaid.z",
-                                                       int_ptx_read_ctaid_z>;
-def PTX_READ_CTAID_W   : PTX_READ_SPECIAL_REGISTER_R32<"ctaid.w",
-                                                       int_ptx_read_ctaid_w>;
+def INT_PTX_SREG_CTAID_X :
+    PTX_READ_SREG_R32<"ctaid.x", int_nvvm_read_ptx_sreg_ctaid_x>;
+def INT_PTX_SREG_CTAID_Y :
+    PTX_READ_SREG_R32<"ctaid.y", int_nvvm_read_ptx_sreg_ctaid_y>;
+def INT_PTX_SREG_CTAID_Z :
+    PTX_READ_SREG_R32<"ctaid.z", int_nvvm_read_ptx_sreg_ctaid_z>;
+def INT_PTX_SREG_CTAID_W :
+    PTX_READ_SREG_R32<"ctaid.w", int_nvvm_read_ptx_sreg_ctaid_w>;
 
-def PTX_READ_NCTAID_X   : PTX_READ_SPECIAL_REGISTER_R32<"nctaid.x",
-                                                        int_ptx_read_nctaid_x>;
-def PTX_READ_NCTAID_Y   : PTX_READ_SPECIAL_REGISTER_R32<"nctaid.y",
-                                                        int_ptx_read_nctaid_y>;
-def PTX_READ_NCTAID_Z   : PTX_READ_SPECIAL_REGISTER_R32<"nctaid.z",
-                                                        int_ptx_read_nctaid_z>;
-def PTX_READ_NCTAID_W   : PTX_READ_SPECIAL_REGISTER_R32<"nctaid.w",
-                                                        int_ptx_read_nctaid_w>;
+def INT_PTX_SREG_NCTAID_X :
+    PTX_READ_SREG_R32<"nctaid.x", int_nvvm_read_ptx_sreg_nctaid_x>;
+def INT_PTX_SREG_NCTAID_Y :
+    PTX_READ_SREG_R32<"nctaid.y", int_nvvm_read_ptx_sreg_nctaid_y>;
+def INT_PTX_SREG_NCTAID_Z :
+    PTX_READ_SREG_R32<"nctaid.z", int_nvvm_read_ptx_sreg_nctaid_z>;
+def INT_PTX_SREG_NCTAID_W :
+    PTX_READ_SREG_R32<"nctaid.w", int_nvvm_read_ptx_sreg_nctaid_w>;
 
-def PTX_READ_SMID  : PTX_READ_SPECIAL_REGISTER_R32<"smid",
-                                                   int_ptx_read_smid>;
-def PTX_READ_NSMID  : PTX_READ_SPECIAL_REGISTER_R32<"nsmid",
-                                                    int_ptx_read_nsmid>;
-def PTX_READ_GRIDID  : PTX_READ_SPECIAL_REGISTER_R32<"gridid",
-                                                     int_ptx_read_gridid>;
+def INT_PTX_SREG_SMID :
+    PTX_READ_SREG_R32<"smid", int_nvvm_read_ptx_sreg_smid>;
+def INT_PTX_SREG_NSMID :
+    PTX_READ_SREG_R32<"nsmid", int_nvvm_read_ptx_sreg_nsmid>;
+def INT_PTX_SREG_GRIDID :
+    PTX_READ_SREG_R32<"gridid", int_nvvm_read_ptx_sreg_gridid>;
 
-def PTX_READ_LANEMASK_EQ
-  : PTX_READ_SPECIAL_REGISTER_R32<"lanemask_eq", int_ptx_read_lanemask_eq>;
-def PTX_READ_LANEMASK_LE
-  : PTX_READ_SPECIAL_REGISTER_R32<"lanemask_le", int_ptx_read_lanemask_le>;
-def PTX_READ_LANEMASK_LT
-  : PTX_READ_SPECIAL_REGISTER_R32<"lanemask_lt", int_ptx_read_lanemask_lt>;
-def PTX_READ_LANEMASK_GE
-  : PTX_READ_SPECIAL_REGISTER_R32<"lanemask_ge", int_ptx_read_lanemask_ge>;
-def PTX_READ_LANEMASK_GT
-  : PTX_READ_SPECIAL_REGISTER_R32<"lanemask_gt", int_ptx_read_lanemask_gt>;
+def INT_PTX_SREG_LANEMASK_EQ :
+    PTX_READ_SREG_R32<"lanemask_eq", int_nvvm_read_ptx_sreg_lanemask_eq>;
+def INT_PTX_SREG_LANEMASK_LE :
+    PTX_READ_SREG_R32<"lanemask_le", int_nvvm_read_ptx_sreg_lanemask_le>;
+def INT_PTX_SREG_LANEMASK_LT :
+    PTX_READ_SREG_R32<"lanemask_lt", int_nvvm_read_ptx_sreg_lanemask_lt>;
+def INT_PTX_SREG_LANEMASK_GE :
+    PTX_READ_SREG_R32<"lanemask_ge", int_nvvm_read_ptx_sreg_lanemask_ge>;
+def INT_PTX_SREG_LANEMASK_GT :
+    PTX_READ_SREG_R32<"lanemask_gt", int_nvvm_read_ptx_sreg_lanemask_gt>;
 
-def PTX_READ_CLOCK
-  : PTX_READ_SPECIAL_REGISTER_R32<"clock", int_ptx_read_clock>;
-def PTX_READ_CLOCK64
-  : PTX_READ_SPECIAL_REGISTER_R64<"clock64", int_ptx_read_clock64>;
+def INT_PTX_SREG_CLOCK :
+    PTX_READ_SREG_R32<"clock", int_nvvm_read_ptx_sreg_clock>;
+def INT_PTX_SREG_CLOCK64 :
+    PTX_READ_SREG_R64<"clock64", int_nvvm_read_ptx_sreg_clock64>;
 
-def PTX_READ_PM0 : PTX_READ_SPECIAL_REGISTER_R32<"pm0", int_ptx_read_pm0>;
-def PTX_READ_PM1 : PTX_READ_SPECIAL_REGISTER_R32<"pm1", int_ptx_read_pm1>;
-def PTX_READ_PM2 : PTX_READ_SPECIAL_REGISTER_R32<"pm2", int_ptx_read_pm2>;
-def PTX_READ_PM3 : PTX_READ_SPECIAL_REGISTER_R32<"pm3", int_ptx_read_pm3>;
+def INT_PTX_SREG_PM0 : PTX_READ_SREG_R32<"pm0", int_nvvm_read_ptx_sreg_pm0>;
+def INT_PTX_SREG_PM1 : PTX_READ_SREG_R32<"pm1", int_nvvm_read_ptx_sreg_pm1>;
+def INT_PTX_SREG_PM2 : PTX_READ_SREG_R32<"pm2", int_nvvm_read_ptx_sreg_pm2>;
+def INT_PTX_SREG_PM3 : PTX_READ_SREG_R32<"pm3", int_nvvm_read_ptx_sreg_pm3>;
 
-// PTX Parallel Synchronization and Communication Intrinsics
+// TODO: It would be nice to use PTX_READ_SREG here, but it doesn't
+// handle the constant.
+def INT_PTX_SREG_WARPSIZE :
+    NVPTXInst<(outs Int32Regs:$dst), (ins), "mov.u32 \t$dst, WARP_SZ;",
+              [(set Int32Regs:$dst, (int_nvvm_read_ptx_sreg_warpsize))]>;
 
-def PTX_BAR_SYNC : NVPTXInst<(outs), (ins i32imm:$i), "bar.sync\t$i;",
-                             [(int_ptx_bar_sync imm:$i)]>;
+// Helper class that represents a 'fragment' of an NVPTX *MMA instruction.
+// In addition to target-independent fields provided by WMMA_REGS, it adds
+// the fields commonly used to implement specific PTX instruction -- register
+// types and names, constraints, parts of assembly, etc.
+class WMMA_REGINFO<WMMA_REGS r>
+      : WMMA_REGS<r.geom, r.frag, r.ptx_elt_type> {
+  // NVPTX register types used to carry fragment data.
+  NVPTXRegClass regclass = !cond(
+    !eq(ptx_elt_type, "f16") : Float16x2Regs,
+    !eq(ptx_elt_type, "f32") : Float32Regs,
+    !eq(ptx_elt_type, "s32") : Int32Regs,
+    !eq(ptx_elt_type, "s8") : Int32Regs,
+    !eq(ptx_elt_type, "u8") : Int32Regs,
+    !eq(ptx_elt_type, "s4") : Int32Regs,
+    !eq(ptx_elt_type, "u4") : Int32Regs,
+    !eq(ptx_elt_type, "b1") : Int32Regs);
+
+  // Instruction input/output arguments for the fragment.
+  list<NVPTXRegClass> ptx_regs = !listsplat(regclass, !size(regs));
+
+  // List of register names for the fragment -- ["ra0", "ra1",...]
+  list<string> reg_names = RegSeq<!size(ptx_regs), "r"#frag>.ret;
+
+  // Generates "{{$r0, $r1,.... $rN-1}}" for use in asm string construction.
+  string regstring = "{{$" # !interleave(reg_names, ", $") # "}}";
+
+  // Predicates for particular fragment variant. Technically those are
+  // per-instruction predicates, but currently all fragments that can be used in
+  // a given instruction are subject to the same constraints, so an instruction
+  // can use predicates from any of its fragments. If/when this is no
+  // longer the case, we can concat all per-fragment predicates to enforce that
+  // all fragments of the instruction are viable.
+  list<Predicate> Predicates = !cond(
+    // fp16 -> fp16/fp32 @ m16n16k16
+    !and(!eq(geom, "m16n16k16"),
+         !or(!eq(ptx_elt_type, "f16"),
+             !eq(ptx_elt_type, "f32"))) : [hasSM70, hasPTX60],
+
+    // fp16 -> fp16/fp32 @ m8n32k16/m32n8k16
+    !and(!or(!eq(geom, "m8n32k16"),
+             !eq(geom, "m32n8k16")),
+         !or(!eq(ptx_elt_type, "f16"),
+             !eq(ptx_elt_type, "f32"))) : [hasSM70, hasPTX61],
+
+    // u8/s8 -> s32 @ m16n16k16/m8n32k16/m32n8k16
+    !and(!or(!eq(geom,"m16n16k16"),
+             !eq(geom,"m8n32k16"),
+             !eq(geom,"m32n8k16")),
+         !or(!eq(ptx_elt_type, "u8"),
+             !eq(ptx_elt_type, "s8"),
+             !eq(ptx_elt_type, "s32"))) : [hasSM72, hasPTX63],
+
+    // u4/s4/b1 -> s32 @ m8n8k32 (u4/s4), m8n8k128(b1)
+    !or(!eq(geom,"m8n8k128"),
+        !eq(geom,"m8n8k32")) : [hasSM75, hasPTX63],
+
+    !eq(geom, "m8n8k4") : [hasSM70, hasPTX64]);
+
+  // template DAGs for instruction inputs/output.
+  dag Outs = !dag(outs, ptx_regs, reg_names);
+  dag Ins = !dag(ins, ptx_regs, reg_names);
+}
+
+// Convert dag of arguments into a dag to match given intrinsic.
+class BuildPatternI<Intrinsic Intr, dag Ins> {
+  // Build a dag pattern that matches the intrinsic call.
+  dag ret = !foreach(tmp, Ins,
+                          !subst(imem, ADDRvar,
+                          !subst(MEMri64, ADDRri64,
+                          !subst(MEMri, ADDRri,
+                          !subst(ins, Intr, tmp)))));
+}
+
+// Same as above, but uses PatFrag instead of an Intrinsic.
+class BuildPatternPF<PatFrag Intr, dag Ins> {
+  // Build a dag pattern that matches the intrinsic call.
+  dag ret = !foreach(tmp, Ins,
+                          !subst(imem, ADDRvar,
+                          !subst(MEMri64, ADDRri64,
+                          !subst(MEMri, ADDRri,
+                          !subst(ins, Intr, tmp)))));
+}
+
+// Common WMMA-related fields used for building patterns for all MMA instructions.
+class WMMA_INSTR<string _Intr, list<dag> _Args>
+  : NVPTXInst<(outs), (ins), "?", []> {
+  Intrinsic Intr = !cast<Intrinsic>(_Intr);
+  // Concatenate all arguments into a single dag.
+  dag Args = !foldl((ins), _Args, a, b, !con(a,b));
+  // Pre-build the pattern to match (intrinsic arg0, arg1, ...).
+  dag IntrinsicPattern = BuildPatternI<!cast<Intrinsic>(Intr), Args>.ret;
+}
+
+//
+// wmma.load.[a|b|c].sync.[row|col].m16n16k16[|.global|.shared].[f16|f32]
+//
+
+class WMMA_LOAD<WMMA_REGINFO Frag, string Layout, string Space, bit WithStride,
+                DAGOperand SrcOp>
+  : WMMA_INSTR<WMMA_NAME_LDST<"load", Frag, Layout, WithStride>.record,
+                              [!con((ins SrcOp:$src),
+                                    !if(WithStride, (ins Int32Regs:$ldm), (ins)))]>,
+    Requires<Frag.Predicates> {
+  // Load/store intrinsics are overloaded on pointer's address space.
+  // To match the right intrinsic, we need to build AS-constrained PatFrag.
+  // Operands is a dag equivalent in shape to Args, but using (ops node:$name, .....).
+  dag PFOperands = !if(WithStride, (ops node:$src, node:$ldm), (ops node:$src));
+  dag PFOperandsIntr = !if(WithStride, (Intr node:$src, node:$ldm), (Intr node:$src));
+  // Build PatFrag that only matches particular address space.
+  PatFrag IntrFrag = PatFrag<PFOperands,
+                             PFOperandsIntr,
+                             !cond(!eq(Space, ".shared"): AS_match.shared,
+                                   !eq(Space, ".global"): AS_match.global,
+                                   true: AS_match.generic)>;
+  // Build AS-constrained pattern.
+  let IntrinsicPattern = BuildPatternPF<IntrFrag, Args>.ret;
+
+  let OutOperandList = Frag.Outs;
+  let InOperandList = !con(Args, (ins MmaCode:$ptx));
+  let AsmString = "wmma.load."
+                  # Frag.frag
+                  # ".sync"
+                  # "${ptx:aligned}"
+                  # "." # Layout
+                  # "." # Frag.geom
+                  # Space
+                  # "." # Frag.ptx_elt_type # " \t"
+                  # Frag.regstring
+                  # ", [$src]"
+                  # !if(WithStride, ", $ldm", "")
+                  # ";";
+}
+
+//
+// wmma.store.d.sync.[row|col].m16n16k16[|.global|.shared].[f16|f32]
+//
+class WMMA_STORE_D<WMMA_REGINFO Frag, string Layout, string Space,
+                   bit WithStride, DAGOperand DstOp>
+  : WMMA_INSTR<WMMA_NAME_LDST<"store", Frag, Layout, WithStride>.record,
+               [!con((ins DstOp:$dst),
+                     Frag.Ins,
+                     !if(WithStride, (ins Int32Regs:$ldm), (ins)))]>,
+    Requires<Frag.Predicates> {
+
+  // Load/store intrinsics are overloaded on pointer's address space.
+  // To match the right intrinsic, we need to build AS-constrained PatFrag.
+  // Operands is a dag equivalent in shape to Args, but using (ops node:$name, .....).
+  dag PFOperands = !con((ops node:$dst),
+                        !dag(ops, !listsplat(node, !size(Frag.regs)), Frag.reg_names),
+                        !if(WithStride, (ops node:$ldm), (ops)));
+  // Build PatFrag that only matches particular address space.
+  PatFrag IntrFrag = PatFrag<PFOperands,
+                             !foreach(tmp, PFOperands, !subst(ops, Intr, tmp)),
+                             !cond(!eq(Space, ".shared"): AS_match.shared,
+                                   !eq(Space, ".global"): AS_match.global,
+                                   true: AS_match.generic)>;
+  // Build AS-constrained pattern.
+  let IntrinsicPattern = BuildPatternPF<IntrFrag, Args>.ret;
+
+  let InOperandList  = !con(Args, (ins MmaCode:$ptx));
+  let OutOperandList = (outs);
+  let AsmString = "wmma.store.d.sync"
+                  # "${ptx:aligned}"
+                  # "." # Layout
+                  # "." # Frag.geom
+                  # Space
+                  # "." # Frag.ptx_elt_type
+                  # " \t[$dst],"
+                  # Frag.regstring
+                  # !if(WithStride, ", $ldm", "")
+                  # ";";
+}
+
+// Create all load/store variants
+defset list<WMMA_INSTR> MMA_LDSTs  = {
+  foreach layout = ["row", "col"] in {
+    foreach stride = [false, true] in {
+      foreach space = [".global", ".shared", ""] in {
+        foreach addr = [imem, Int32Regs, Int64Regs, MEMri, MEMri64] in {
+          foreach frag = NVVM_MMA_OPS.all_ld_ops in
+            if NVVM_MMA_SUPPORTED<[frag], layout>.ret then
+              def : WMMA_LOAD<WMMA_REGINFO<frag>, layout, space, stride, addr>;
+          foreach frag = NVVM_MMA_OPS.all_st_ops in
+            if NVVM_MMA_SUPPORTED<[frag], layout>.ret then
+              def : WMMA_STORE_D<WMMA_REGINFO<frag>, layout, space, stride, addr>;
+        } // addr
+      } // space
+    } // stride
+  } // layout
+} // defset
+
+// WMMA.MMA
+class WMMA_MMA<WMMA_REGINFO FragA, WMMA_REGINFO FragB,
+               WMMA_REGINFO FragC, WMMA_REGINFO FragD,
+               string ALayout, string BLayout, int Satfinite>
+  : WMMA_INSTR<WMMA_NAME_MMA<ALayout, BLayout, Satfinite, FragA, FragB, FragC, FragD>.record,
+                             [FragA.Ins, FragB.Ins, FragC.Ins]>,
+    // Requires does not seem to have effect on Instruction w/o Patterns.
+    // We set it here anyways and propagate to the Pat<> we construct below.
+    Requires<FragA.Predicates> {
+  let OutOperandList = FragD.Outs;
+  let InOperandList  = !con(Args, (ins MmaCode:$ptx));
+  string TypeList = !cond(
+    !eq(FragD.geom, "m8n8k4") : "." # FragD.ptx_elt_type
+                                # ".f16.f16."
+                                # FragC.ptx_elt_type,
+    !eq(FragD.ptx_elt_type, "s32") : ".s32"
+                                     # "." # FragA.ptx_elt_type
+                                     # "." # FragB.ptx_elt_type
+                                     # ".s32",
+    1: "." # FragD.ptx_elt_type # "." # FragC.ptx_elt_type,
+  );
+  let AsmString = !if(!eq(FragA.geom, "m8n8k4"),
+     "mma.sync.aligned.m8n8k4"
+        # "." # ALayout
+        # "." # BLayout
+        # TypeList # "\n\t\t"
+        # FragD.regstring # ",\n\t\t"
+        # FragA.regstring # ",\n\t\t"
+        # FragB.regstring # ",\n\t\t"
+        # FragC.regstring # ";",
+     "wmma.mma"
+        # !if(!eq(FragA.ptx_elt_type, "b1"), ".xor.popc", "")
+        # ".sync"
+        # "${ptx:aligned}"
+        # "." # ALayout
+        # "." # BLayout
+        # "." # FragA.geom
+        # TypeList
+        # !if(Satfinite, ".satfinite", "") # "\n\t\t"
+        # FragD.regstring # ",\n\t\t"
+        # FragA.regstring # ",\n\t\t"
+        # FragB.regstring # ",\n\t\t"
+        # FragC.regstring # ";");
+}
+
+defset list<WMMA_INSTR> MMAs  = {
+  foreach layout_a = ["row", "col"] in {
+    foreach layout_b = ["row", "col"] in {
+      foreach satf = [0, 1] in {
+        foreach op = NVVM_MMA_OPS.all_mma_ops in {
+          if NVVM_MMA_SUPPORTED<op, layout_a, layout_b, satf>.ret then {
+            def : WMMA_MMA<WMMA_REGINFO<op[0]>,
+                           WMMA_REGINFO<op[1]>,
+                           WMMA_REGINFO<op[2]>,
+                           WMMA_REGINFO<op[3]>,
+                           layout_a, layout_b, satf>;
+          }
+        } // op
+      } // satf
+    } // layout_b
+  } // layout_a
+} // defset
+
+
+// Constructing non-flat DAGs is still a pain. I can't !subst a dag node with a
+// dag, so the ptx.version must be appended *after* foreach replaces 'ins' with
+// the instruction record.
+class WMMA_PAT<WMMA_INSTR wi>
+      : Pat<wi.IntrinsicPattern,
+            !con(!foreach(tmp, wi.Args, !subst(ins, wi, tmp)),
+                 (wi ptx.version))>,
+        Requires<wi.Predicates>;
+
+// Build intrinsic->instruction patterns for all MMA instructions.
+foreach mma = !listconcat(MMAs, MMA_LDSTs) in
+  def : WMMA_PAT<mma>;

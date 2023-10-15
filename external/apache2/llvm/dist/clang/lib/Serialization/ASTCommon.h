@@ -1,9 +1,8 @@
 //===- ASTCommon.h - Common stuff for ASTReader/ASTWriter -*- C++ -*-=========//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +14,7 @@
 #define LLVM_CLANG_LIB_SERIALIZATION_ASTCOMMON_H
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclFriend.h"
 #include "clang/Serialization/ASTBitCodes.h"
 
 namespace clang {
@@ -26,14 +26,22 @@ enum DeclUpdateKind {
   UPD_CXX_ADDED_TEMPLATE_SPECIALIZATION,
   UPD_CXX_ADDED_ANONYMOUS_NAMESPACE,
   UPD_CXX_ADDED_FUNCTION_DEFINITION,
-  UPD_CXX_INSTANTIATED_STATIC_DATA_MEMBER,
+  UPD_CXX_ADDED_VAR_DEFINITION,
+  UPD_CXX_POINT_OF_INSTANTIATION,
   UPD_CXX_INSTANTIATED_CLASS_DEFINITION,
+  UPD_CXX_INSTANTIATED_DEFAULT_ARGUMENT,
+  UPD_CXX_INSTANTIATED_DEFAULT_MEMBER_INITIALIZER,
+  UPD_CXX_RESOLVED_DTOR_DELETE,
   UPD_CXX_RESOLVED_EXCEPTION_SPEC,
   UPD_CXX_DEDUCED_RETURN_TYPE,
   UPD_DECL_MARKED_USED,
   UPD_MANGLING_NUMBER,
   UPD_STATIC_LOCAL_NUMBER,
-  UPD_DECL_MARKED_OPENMP_THREADPRIVATE
+  UPD_DECL_MARKED_OPENMP_THREADPRIVATE,
+  UPD_DECL_MARKED_OPENMP_ALLOCATE,
+  UPD_DECL_MARKED_OPENMP_DECLARETARGET,
+  UPD_DECL_EXPORTED,
+  UPD_ADDED_ATTR_TO_RECORD
 };
 
 TypeIdx TypeIdxFromBuiltin(const BuiltinType *BT);
@@ -58,15 +66,13 @@ TypeID MakeTypeID(ASTContext &Context, QualType T, IdxForTypeTy IdxForType) {
     return TypeIdx(PREDEF_TYPE_AUTO_DEDUCT).asTypeID(FastQuals);
   if (T == Context.AutoRRefDeductTy)
     return TypeIdx(PREDEF_TYPE_AUTO_RREF_DEDUCT).asTypeID(FastQuals);
-  if (T == Context.VaListTagTy)
-    return TypeIdx(PREDEF_TYPE_VA_LIST_TAG).asTypeID(FastQuals);
 
   return IdxForType(T).asTypeID(FastQuals);
 }
 
 unsigned ComputeHash(Selector Sel);
 
-/// \brief Retrieve the "definitive" declaration that provides all of the
+/// Retrieve the "definitive" declaration that provides all of the
 /// visible entries for the given declaration context, if there is one.
 ///
 /// The "definitive" declaration is the only place where we need to look to
@@ -78,12 +84,45 @@ unsigned ComputeHash(Selector Sel);
 /// multiple definitions.
 const DeclContext *getDefinitiveDeclContext(const DeclContext *DC);
 
-/// \brief Determine whether the given declaration kind is redeclarable.
+/// Determine whether the given declaration kind is redeclarable.
 bool isRedeclarableDeclKind(unsigned Kind);
 
-/// \brief Determine whether the given declaration needs an anonymous
+/// Determine whether the given declaration needs an anonymous
 /// declaration number.
 bool needsAnonymousDeclarationNumber(const NamedDecl *D);
+
+/// Visit each declaration within \c DC that needs an anonymous
+/// declaration number and call \p Visit with the declaration and its number.
+template<typename Fn> void numberAnonymousDeclsWithin(const DeclContext *DC,
+                                                      Fn Visit) {
+  unsigned Index = 0;
+  for (Decl *LexicalD : DC->decls()) {
+    // For a friend decl, we care about the declaration within it, if any.
+    if (auto *FD = dyn_cast<FriendDecl>(LexicalD))
+      LexicalD = FD->getFriendDecl();
+
+    auto *ND = dyn_cast_or_null<NamedDecl>(LexicalD);
+    if (!ND || !needsAnonymousDeclarationNumber(ND))
+      continue;
+
+    Visit(ND, Index++);
+  }
+}
+
+/// Determine whether the given declaration will be included in the per-module
+/// initializer if it needs to be eagerly handed to the AST consumer. If so, we
+/// should not hand it to the consumer when deserializing it, nor include it in
+/// the list of eagerly deserialized declarations.
+inline bool isPartOfPerModuleInitializer(const Decl *D) {
+  if (isa<ImportDecl>(D))
+    return true;
+  // Template instantiations are notionally in an "instantiation unit" rather
+  // than in any particular translation unit, so they need not be part of any
+  // particular (sub)module's per-module initializer.
+  if (auto *VD = dyn_cast<VarDecl>(D))
+    return !isTemplateInstantiation(VD->getTemplateSpecializationKind());
+  return false;
+}
 
 } // namespace serialization
 

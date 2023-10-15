@@ -1,9 +1,8 @@
 //== ArrayBoundChecker.cpp ------------------------------*- C++ -*--==//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,18 +11,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/DynamicExtent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
 
 using namespace clang;
 using namespace ento;
 
 namespace {
-class ArrayBoundChecker : 
+class ArrayBoundChecker :
     public Checker<check::Location> {
   mutable std::unique_ptr<BuiltinBug> BT;
 
@@ -55,17 +55,16 @@ void ArrayBoundChecker::checkLocation(SVal l, bool isLoad, const Stmt* LoadS,
   ProgramStateRef state = C.getState();
 
   // Get the size of the array.
-  DefinedOrUnknownSVal NumElements 
-    = C.getStoreManager().getSizeInElements(state, ER->getSuperRegion(), 
-                                            ER->getValueType());
+  DefinedOrUnknownSVal ElementCount = getDynamicElementCount(
+      state, ER->getSuperRegion(), C.getSValBuilder(), ER->getValueType());
 
-  ProgramStateRef StInBound = state->assumeInBound(Idx, NumElements, true);
-  ProgramStateRef StOutBound = state->assumeInBound(Idx, NumElements, false);
+  ProgramStateRef StInBound = state->assumeInBound(Idx, ElementCount, true);
+  ProgramStateRef StOutBound = state->assumeInBound(Idx, ElementCount, false);
   if (StOutBound && !StInBound) {
-    ExplodedNode *N = C.generateSink(StOutBound);
+    ExplodedNode *N = C.generateErrorNode(StOutBound);
     if (!N)
       return;
-  
+
     if (!BT)
       BT.reset(new BuiltinBug(
           this, "Out-of-bound array access",
@@ -76,14 +75,14 @@ void ArrayBoundChecker::checkLocation(SVal l, bool isLoad, const Stmt* LoadS,
     // reference is outside the range.
 
     // Generate a report for this bug.
-    BugReport *report = 
-      new BugReport(*BT, BT->getDescription(), N);
+    auto report =
+        std::make_unique<PathSensitiveBugReport>(*BT, BT->getDescription(), N);
 
     report->addRange(LoadS->getSourceRange());
-    C.emitReport(report);
+    C.emitReport(std::move(report));
     return;
   }
-  
+
   // Array bound check succeeded.  From this point forward the array bound
   // should always succeed.
   C.addTransition(StInBound);
@@ -91,4 +90,8 @@ void ArrayBoundChecker::checkLocation(SVal l, bool isLoad, const Stmt* LoadS,
 
 void ento::registerArrayBoundChecker(CheckerManager &mgr) {
   mgr.registerChecker<ArrayBoundChecker>();
+}
+
+bool ento::shouldRegisterArrayBoundChecker(const CheckerManager &mgr) {
+  return true;
 }

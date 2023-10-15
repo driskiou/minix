@@ -1,9 +1,8 @@
 //===-- SparcSubtarget.cpp - SPARC Subtarget Information ------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -26,47 +25,37 @@ using namespace llvm;
 
 void SparcSubtarget::anchor() { }
 
-static std::string computeDataLayout(const SparcSubtarget &ST) {
-  // Sparc is big endian.
-  std::string Ret = "E-m:e";
-
-  // Some ABIs have 32bit pointers.
-  if (!ST.is64Bit())
-    Ret += "-p:32:32";
-
-  // Alignments for 64 bit integers.
-  Ret += "-i64:64";
-
-  // On SparcV9 128 floats are aligned to 128 bits, on others only to 64.
-  // On SparcV9 registers can hold 64 or 32 bits, on others only 32.
-  if (ST.is64Bit())
-    Ret += "-n32:64";
-  else
-    Ret += "-f128:64-n32";
-
-  if (ST.is64Bit())
-    Ret += "-S128";
-  else
-    Ret += "-S64";
-
-  return Ret;
-}
-
 SparcSubtarget &SparcSubtarget::initializeSubtargetDependencies(StringRef CPU,
                                                                 StringRef FS) {
+  UseSoftMulDiv = false;
   IsV9 = false;
+  IsLeon = false;
   V8DeprecatedInsts = false;
   IsVIS = false;
+  IsVIS2 = false;
+  IsVIS3 = false;
   HasHardQuad = false;
   UsePopc = false;
+  UseSoftFloat = false;
+  HasNoFSMULD = false;
+  HasNoFMULS = false;
+
+  // Leon features
+  HasLeonCasa = false;
+  HasUmacSmac = false;
+  HasPWRPSR = false;
+  InsertNOPLoad = false;
+  FixAllFDIVSQRT = false;
+  DetectRoundChange = false;
+  HasLeonCycleCounter = false;
 
   // Determine default and user specified characteristics
-  std::string CPUName = CPU;
+  std::string CPUName = std::string(CPU);
   if (CPUName.empty())
     CPUName = (Is64Bit) ? "v9" : "v8";
 
   // Parse features string.
-  ParseSubtargetFeatures(CPUName, FS);
+  ParseSubtargetFeatures(CPUName, /*TuneCPU*/ CPUName, FS);
 
   // Popc is a v9-only instruction.
   if (!IsV9)
@@ -75,12 +64,12 @@ SparcSubtarget &SparcSubtarget::initializeSubtargetDependencies(StringRef CPU,
   return *this;
 }
 
-SparcSubtarget::SparcSubtarget(const std::string &TT, const std::string &CPU,
-                               const std::string &FS, TargetMachine &TM,
+SparcSubtarget::SparcSubtarget(const Triple &TT, const std::string &CPU,
+                               const std::string &FS, const TargetMachine &TM,
                                bool is64Bit)
-    : SparcGenSubtargetInfo(TT, CPU, FS), Is64Bit(is64Bit),
-      DL(computeDataLayout(initializeSubtargetDependencies(CPU, FS))),
-      InstrInfo(*this), TLInfo(TM), TSInfo(DL), FrameLowering(*this) {}
+    : SparcGenSubtargetInfo(TT, CPU, /*TuneCPU*/ CPU, FS), TargetTriple(TT),
+      Is64Bit(is64Bit), InstrInfo(initializeSubtargetDependencies(CPU, FS)),
+      TLInfo(TM, *this), FrameLowering(*this) {}
 
 int SparcSubtarget::getAdjustedFrameSize(int frameSize) const {
 
@@ -90,7 +79,7 @@ int SparcSubtarget::getAdjustedFrameSize(int frameSize) const {
     frameSize += 128;
     // Frames with calls must also reserve space for 6 outgoing arguments
     // whether they are used or not. LowerCall_64 takes care of that.
-    assert(frameSize % 16 == 0 && "Stack size not 16-byte aligned");
+    frameSize = alignTo(frameSize, 16);
   } else {
     // Emit the correct save instruction based on the number of bytes in
     // the frame. Minimum stack frame size according to V8 ABI is:
@@ -103,7 +92,11 @@ int SparcSubtarget::getAdjustedFrameSize(int frameSize) const {
 
     // Round up to next doubleword boundary -- a double-word boundary
     // is required by the ABI.
-    frameSize = RoundUpToAlignment(frameSize, 8);
+    frameSize = alignTo(frameSize, 8);
   }
   return frameSize;
+}
+
+bool SparcSubtarget::enableMachineScheduler() const {
+  return true;
 }

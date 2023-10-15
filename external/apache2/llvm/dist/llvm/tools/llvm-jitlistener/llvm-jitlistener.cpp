@@ -1,9 +1,8 @@
 //===-- llvm-jitlistener.cpp - Utility for testing MCJIT event listener ---===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,23 +12,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/IR/LLVMContext.h"
 #include "../../lib/ExecutionEngine/IntelJITEvents/IntelJITEventsWrapper.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/ExecutionEngine/JITEventListener.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Host.h"
-#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/Signals.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include <string>
 
 using namespace llvm;
@@ -90,6 +88,46 @@ int NotifyEvent(iJIT_JVM_EVENT EventType, void *EventSpecificData) {
   return 0;
 }
 
+int ittNotifyInfo(IttEventType EventType, const char *Name, unsigned int Size) {
+  switch (EventType) {
+  case LoadBinaryModule: {
+    if (!Name) {
+      errs() << "Error: The IttNotify event listener did not provide a module "
+                "name.";
+      return -1;
+    }
+    outs() << "Module loaded : Name = " << Name << ", Size = " << Size << "\n";
+  } break;
+  case LoadBinarySection: {
+    if (!Name) {
+      errs() << "Error: The IttNotify event listener did not provide a section "
+                "name.";
+      return -1;
+    }
+    outs() << "Loaded section : Name = " << Name << ", Size = " << Size << "\n";
+  } break;
+  case UnloadBinaryModule: {
+    if (!Name) {
+      errs() << "Error: The IttNotify event listener did not provide a module "
+                "name.";
+      return -1;
+    }
+    outs() << "Module unloaded : Name = " << Name << ", Size = " << Size
+           << "\n";
+  } break;
+  case UnloadBinarySection: {
+    if (!Name) {
+      errs() << "Error: The IttNotify event listener did not provide a section "
+                "name.";
+      return -1;
+    }
+    outs() << "Unloaded section : Name = " << Name << ", Size = " << Size
+           << "\n";
+  } break;
+  }
+  return 0;
+}
+
 iJIT_IsProfilingActiveFlags IsProfilingActive(void) {
   // for testing, pretend we have an Intel Parallel Amplifier XE 2011
   // instance attached
@@ -104,8 +142,6 @@ unsigned int GetNewMethodID(void) {
 class JitEventListenerTest {
 protected:
   void InitEE(const std::string &IRFile) {
-    LLVMContext &Context = getGlobalContext();
-
     // If we have a native target, initialize it to ensure it is linked in and
     // usable by the JIT.
     InitializeNativeTarget();
@@ -159,7 +195,8 @@ public:
 
     std::unique_ptr<llvm::JITEventListener> Listener(
         JITEventListener::createIntelJITEventListener(new IntelJITEventsWrapper(
-            NotifyEvent, 0, IsProfilingActive, 0, 0, GetNewMethodID)));
+            NotifyEvent, ittNotifyInfo, 0, IsProfilingActive, 0, 0,
+            GetNewMethodID)));
 
     TheJIT->RegisterJITEventListener(Listener.get());
 
@@ -179,16 +216,10 @@ InputFilename(cl::Positional, cl::desc("<input IR file>"),
                cl::Required);
 
 int main(int argc, char **argv) {
-  // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
-  PrettyStackTraceProgram X(argc, argv);
-  llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
-
+  InitLLVM X(argc, argv);
   cl::ParseCommandLineOptions(argc, argv, "llvm jit event listener test utility\n");
 
   JitEventListenerTest Test;
-
   Test.ProcessInput(InputFilename);
-
   return 0;
 }

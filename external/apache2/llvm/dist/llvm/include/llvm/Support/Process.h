@@ -1,9 +1,8 @@
 //===- llvm/Support/Process.h -----------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 /// \file
@@ -25,27 +24,51 @@
 #ifndef LLVM_SUPPORT_PROCESS_H
 #define LLVM_SUPPORT_PROCESS_H
 
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
-#include "llvm/Config/llvm-config.h"
-#include "llvm/Support/Allocator.h"
+#include "llvm/Support/AllocatorBase.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/DataTypes.h"
-#include "llvm/Support/TimeValue.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/Program.h"
 #include <system_error>
 
 namespace llvm {
+template <typename T> class ArrayRef;
 class StringRef;
 
 namespace sys {
 
 
-/// \brief A collection of legacy interfaces for querying information about the
+/// A collection of legacy interfaces for querying information about the
 /// current executing process.
 class Process {
 public:
-  static unsigned getPageSize();
+  using Pid = int32_t;
 
-  /// \brief Return process memory usage.
+  /// Get the process's identifier.
+  static Pid getProcessId();
+
+  /// Get the process's page size.
+  /// This may fail if the underlying syscall returns an error. In most cases,
+  /// page size information is used for optimization, and this error can be
+  /// safely discarded by calling consumeError, and an estimated page size
+  /// substituted instead.
+  static Expected<unsigned> getPageSize();
+
+  /// Get the process's estimated page size.
+  /// This function always succeeds, but if the underlying syscall to determine
+  /// the page size fails then this will silently return an estimated page size.
+  /// The estimated page size is guaranteed to be a power of 2.
+  static unsigned getPageSizeEstimate() {
+    if (auto PageSize = getPageSize())
+      return *PageSize;
+    else {
+      consumeError(PageSize.takeError());
+      return 4096;
+    }
+  }
+
+  /// Return process memory usage.
   /// This static function will return the total amount of memory allocated
   /// by the process. This only counts the memory allocated via the malloc,
   /// calloc and realloc functions and includes any "free" holes in the
@@ -55,19 +78,23 @@ public:
   /// This static function will set \p user_time to the amount of CPU time
   /// spent in user (non-kernel) mode and \p sys_time to the amount of CPU
   /// time spent in system (kernel) mode.  If the operating system does not
-  /// support collection of these metrics, a zero TimeValue will be for both
+  /// support collection of these metrics, a zero duration will be for both
   /// values.
-  /// \param elapsed Returns the TimeValue::now() giving current time
+  /// \param elapsed Returns the system_clock::now() giving current time
   /// \param user_time Returns the current amount of user time for the process
   /// \param sys_time Returns the current amount of system time for the process
-  static void GetTimeUsage(TimeValue &elapsed, TimeValue &user_time,
-                           TimeValue &sys_time);
+  static void GetTimeUsage(TimePoint<> &elapsed,
+                           std::chrono::nanoseconds &user_time,
+                           std::chrono::nanoseconds &sys_time);
 
   /// This function makes the necessary calls to the operating system to
   /// prevent core files or any other kind of large memory dumps that can
   /// occur when a program fails.
-  /// @brief Prevent core file generation.
+  /// Prevent core file generation.
   static void PreventCoreFiles();
+
+  /// true if PreventCoreFiles has been called, false otherwise.
+  static bool AreCoreFilesPrevented();
 
   // This function returns the environment variable \arg name's value as a UTF-8
   // string. \arg Name is assumed to be in UTF-8 encoding too.
@@ -76,17 +103,17 @@ public:
   /// This function searches for an existing file in the list of directories
   /// in a PATH like environment variable, and returns the first file found,
   /// according to the order of the entries in the PATH like environment
-  /// variable.
-  static Optional<std::string> FindInEnvPath(const std::string& EnvName,
-                                             const std::string& FileName);
+  /// variable.  If an ignore list is specified, then any folder which is in
+  /// the PATH like environment variable but is also in IgnoreList is not
+  /// considered.
+  static Optional<std::string> FindInEnvPath(StringRef EnvName,
+                                             StringRef FileName,
+                                             ArrayRef<std::string> IgnoreList,
+                                             char Separator = EnvPathSeparator);
 
-  /// This function returns a SmallVector containing the arguments passed from
-  /// the operating system to the program.  This function expects to be handed
-  /// the vector passed in from main.
-  static std::error_code
-  GetArgumentVector(SmallVectorImpl<const char *> &Args,
-                    ArrayRef<const char *> ArgsFromMain,
-                    SpecificBumpPtrAllocator<char> &ArgAllocator);
+  static Optional<std::string> FindInEnvPath(StringRef EnvName,
+                                             StringRef FileName,
+                                             char Separator = EnvPathSeparator);
 
   // This functions ensures that the standard file descriptors (input, output,
   // and error) are properly mapped to a file descriptor before we use any of
@@ -182,6 +209,17 @@ public:
   /// Get the result of a process wide random number generator. The
   /// generator will be automatically seeded in non-deterministic fashion.
   static unsigned GetRandomNumber();
+
+  /// Equivalent to ::exit(), except when running inside a CrashRecoveryContext.
+  /// In that case, the control flow will resume after RunSafely(), like for a
+  /// crash, rather than exiting the current process.
+  /// Use \arg NoCleanup for calling _exit() instead of exit().
+  LLVM_ATTRIBUTE_NORETURN
+  static void Exit(int RetCode, bool NoCleanup = false);
+
+private:
+  LLVM_ATTRIBUTE_NORETURN
+  static void ExitNoCleanup(int RetCode);
 };
 
 }

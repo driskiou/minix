@@ -1,9 +1,8 @@
-//===-- MachineSSAUpdater.h - Unstructured SSA Update Tool ------*- C++ -*-===//
+//===- MachineSSAUpdater.h - Unstructured SSA Update Tool -------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,19 +13,19 @@
 #ifndef LLVM_CODEGEN_MACHINESSAUPDATER_H
 #define LLVM_CODEGEN_MACHINESSAUPDATER_H
 
-#include "llvm/Support/Allocator.h"
-#include "llvm/Support/Compiler.h"
+#include "llvm/CodeGen/Register.h"
 
 namespace llvm {
-  class MachineBasicBlock;
-  class MachineFunction;
-  class MachineInstr;
-  class MachineOperand;
-  class MachineRegisterInfo;
-  class TargetInstrInfo;
-  class TargetRegisterClass;
-  template<typename T> class SmallVectorImpl;
-  template<typename T> class SSAUpdaterTraits;
+
+class MachineBasicBlock;
+class MachineFunction;
+class MachineInstr;
+class MachineOperand;
+class MachineRegisterInfo;
+class TargetInstrInfo;
+class TargetRegisterClass;
+template<typename T> class SmallVectorImpl;
+template<typename T> class SSAUpdaterTraits;
 
 /// MachineSSAUpdater - This class updates SSA form for a set of virtual
 /// registers defined in multiple blocks.  This is used when code duplication
@@ -38,11 +37,8 @@ class MachineSSAUpdater {
 private:
   /// AvailableVals - This keeps track of which value to use on a per-block
   /// basis.  When we insert PHI nodes, we keep track of them here.
-  //typedef DenseMap<MachineBasicBlock*, unsigned > AvailableValsTy;
-  void *AV;
-
-  /// VR - Current virtual register whose uses are being updated.
-  unsigned VR;
+  //typedef DenseMap<MachineBasicBlock*, Register> AvailableValsTy;
+  void *AV = nullptr;
 
   /// VRC - Register class of the current virtual register.
   const TargetRegisterClass *VRC;
@@ -53,20 +49,24 @@ private:
 
   const TargetInstrInfo *TII;
   MachineRegisterInfo *MRI;
+
 public:
   /// MachineSSAUpdater constructor.  If InsertedPHIs is specified, it will be
   /// filled in with all PHI Nodes created by rewriting.
   explicit MachineSSAUpdater(MachineFunction &MF,
-                        SmallVectorImpl<MachineInstr*> *InsertedPHIs = nullptr);
+                        SmallVectorImpl<MachineInstr*> *NewPHI = nullptr);
+  MachineSSAUpdater(const MachineSSAUpdater &) = delete;
+  MachineSSAUpdater &operator=(const MachineSSAUpdater &) = delete;
   ~MachineSSAUpdater();
 
   /// Initialize - Reset this object to get ready for a new set of SSA
   /// updates.
-  void Initialize(unsigned V);
+  void Initialize(Register V);
+  void Initialize(const TargetRegisterClass *RC);
 
   /// AddAvailableValue - Indicate that a rewritten value is available at the
   /// end of the specified block with the specified value.
-  void AddAvailableValue(MachineBasicBlock *BB, unsigned V);
+  void AddAvailableValue(MachineBasicBlock *BB, Register V);
 
   /// HasValueForBlock - Return true if the MachineSSAUpdater already has a
   /// value for the specified block.
@@ -74,7 +74,7 @@ public:
 
   /// GetValueAtEndOfBlock - Construct SSA form, materializing a value that is
   /// live at the end of the specified block.
-  unsigned GetValueAtEndOfBlock(MachineBasicBlock *BB);
+  Register GetValueAtEndOfBlock(MachineBasicBlock *BB);
 
   /// GetValueInMiddleOfBlock - Construct SSA form, materializing a value that
   /// is live in the middle of the specified block.
@@ -94,8 +94,7 @@ public:
   /// their respective blocks.  However, the use of X happens in the *middle* of
   /// a block.  Because of this, we need to insert a new PHI node in SomeBB to
   /// merge the appropriate values, and this value isn't live out of the block.
-  ///
-  unsigned GetValueInMiddleOfBlock(MachineBasicBlock *BB);
+  Register GetValueInMiddleOfBlock(MachineBasicBlock *BB);
 
   /// RewriteUse - Rewrite a use of the symbolic value.  This handles PHI nodes,
   /// which use their value in the corresponding predecessor.  Note that this
@@ -105,12 +104,9 @@ public:
   void RewriteUse(MachineOperand &U);
 
 private:
-  unsigned GetValueAtEndOfBlockInternal(MachineBasicBlock *BB);
-
-  void operator=(const MachineSSAUpdater&) LLVM_DELETED_FUNCTION;
-  MachineSSAUpdater(const MachineSSAUpdater&) LLVM_DELETED_FUNCTION;
+  Register GetValueAtEndOfBlockInternal(MachineBasicBlock *BB);
 };
 
-} // End llvm namespace
+} // end namespace llvm
 
-#endif
+#endif // LLVM_CODEGEN_MACHINESSAUPDATER_H

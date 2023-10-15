@@ -1,9 +1,8 @@
 //===-- NVPTXReplaceImageHandles.cpp - Replace image handles for Fermi ----===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source 
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -16,6 +15,8 @@
 #include "NVPTX.h"
 #include "NVPTXMachineFunctionInfo.h"
 #include "NVPTXSubtarget.h"
+#include "NVPTXTargetMachine.h"
+#include "MCTargetDesc/NVPTXBaseInfo.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -35,7 +36,7 @@ public:
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
-  const char *getPassName() const override {
+  StringRef getPassName() const override {
     return "NVPTX Replace Image Handles";
   }
 private:
@@ -114,7 +115,7 @@ bool NVPTXReplaceImageHandles::processInstr(MachineInstr &MI) {
 
     replaceImageHandle(Handle, MF);
 
-    return true; 
+    return true;
   }
 
   return false;
@@ -142,21 +143,22 @@ findIndexForHandle(MachineOperand &Op, MachineFunction &MF, unsigned &Idx) {
   case NVPTX::LD_i64_avar: {
     // The handle is a parameter value being loaded, replace with the
     // parameter symbol
-    const NVPTXSubtarget &ST = MF.getTarget().getSubtarget<NVPTXSubtarget>();
-    if (ST.getDrvInterface() == NVPTX::CUDA) {
+    const NVPTXTargetMachine &TM =
+        static_cast<const NVPTXTargetMachine &>(MF.getTarget());
+    if (TM.getDrvInterface() == NVPTX::CUDA) {
       // For CUDA, we preserve the param loads coming from function arguments
       return false;
     }
 
     assert(TexHandleDef.getOperand(6).isSymbol() && "Load is not a symbol!");
     StringRef Sym = TexHandleDef.getOperand(6).getSymbolName();
-    std::string ParamBaseName = MF.getName();
+    std::string ParamBaseName = std::string(MF.getName());
     ParamBaseName += "_param_";
     assert(Sym.startswith(ParamBaseName) && "Invalid symbol reference");
     unsigned Param = atoi(Sym.data()+ParamBaseName.size());
     std::string NewSym;
     raw_string_ostream NewSymStr(NewSym);
-    NewSymStr << MF.getFunction()->getName() << "_param_" << Param;
+    NewSymStr << MF.getName() << "_param_" << Param;
 
     InstrsToRemove.insert(&TexHandleDef);
     Idx = MFI->getImageHandleSymbolIndex(NewSymStr.str().c_str());

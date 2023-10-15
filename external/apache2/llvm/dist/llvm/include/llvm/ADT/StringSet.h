@@ -1,9 +1,8 @@
-//===--- StringSet.h - The LLVM Compiler Driver -----------------*- C++ -*-===//
+//===- StringSet.h - An efficient set built on StringMap --------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open
-// Source License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,17 +17,39 @@
 
 namespace llvm {
 
-  /// StringSet - A wrapper for StringMap that provides set-like functionality.
-  template <class AllocatorTy = llvm::MallocAllocator>
-  class StringSet : public llvm::StringMap<char, AllocatorTy> {
-    typedef llvm::StringMap<char, AllocatorTy> base;
-  public:
+/// StringSet - A wrapper for StringMap that provides set-like functionality.
+template <class AllocatorTy = MallocAllocator>
+class StringSet : public StringMap<NoneType, AllocatorTy> {
+  using Base = StringMap<NoneType, AllocatorTy>;
 
-    std::pair<typename base::iterator, bool> insert(StringRef Key) {
-      assert(!Key.empty());
-      return base::insert(std::make_pair(Key, '\0'));
-    }
-  };
-}
+public:
+  StringSet() = default;
+  StringSet(std::initializer_list<StringRef> initializer) {
+    for (StringRef str : initializer)
+      insert(str);
+  }
+  explicit StringSet(AllocatorTy a) : Base(a) {}
+
+  std::pair<typename Base::iterator, bool> insert(StringRef key) {
+    return Base::try_emplace(key);
+  }
+
+  template <typename InputIt>
+  void insert(const InputIt &begin, const InputIt &end) {
+    for (auto it = begin; it != end; ++it)
+      insert(*it);
+  }
+
+  template <typename ValueTy>
+  std::pair<typename Base::iterator, bool>
+  insert(const StringMapEntry<ValueTy> &mapEntry) {
+    return insert(mapEntry.getKey());
+  }
+
+  /// Check if the set contains the given \c key.
+  bool contains(StringRef key) const { return Base::FindKey(key) != -1; }
+};
+
+} // end namespace llvm
 
 #endif // LLVM_ADT_STRINGSET_H

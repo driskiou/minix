@@ -1,9 +1,8 @@
 //===-- llvm/Support/FormattedStream.h - Formatted streams ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,6 +14,7 @@
 #ifndef LLVM_SUPPORT_FORMATTEDSTREAM_H
 #define LLVM_SUPPORT_FORMATTEDSTREAM_H
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
 #include <utility>
 
@@ -22,29 +22,16 @@ namespace llvm {
 
 /// formatted_raw_ostream - A raw_ostream that wraps another one and keeps track
 /// of line and column position, allowing padding out to specific column
-/// boundaries and querying the number of lines written to the stream.
-///
+/// boundaries and querying the number of lines written to the stream. This
+/// assumes that the contents of the stream is valid UTF-8 encoded text. This
+/// doesn't attempt to handle everything Unicode can do (combining characters,
+/// right-to-left markers, etc), but should cover the cases likely to appear in
+/// source code or diagnostic messages.
 class formatted_raw_ostream : public raw_ostream {
-public:
-  /// DELETE_STREAM - Tell the destructor to delete the held stream.
-  ///
-  static const bool DELETE_STREAM = true;
-
-  /// PRESERVE_STREAM - Tell the destructor to not delete the held
-  /// stream.
-  ///
-  static const bool PRESERVE_STREAM = false;
-
-private:
   /// TheStream - The real stream we output to. We set it to be
   /// unbuffered, since we're already doing our own buffering.
   ///
   raw_ostream *TheStream;
-
-  /// DeleteStream - Do we need to delete TheStream in the
-  /// destructor?
-  ///
-  bool DeleteStream;
 
   /// Position - The current output column and line of the data that's
   /// been flushed and the portion of the buffer that's been
@@ -56,6 +43,14 @@ private:
   /// buffer we've scanned.
   ///
   const char *Scanned;
+
+  /// PartialUTF8Char - Either empty or a prefix of a UTF-8 code unit sequence
+  /// for a Unicode scalar value which should be prepended to the buffer for the
+  /// next call to ComputePosition. This is needed when the buffer is flushed
+  /// when it ends part-way through the UTF-8 encoding of a Unicode scalar
+  /// value, so that we can compute the display width of the character once we
+  /// have the rest of it.
+  SmallString<4> PartialUTF8Char;
 
   void write_impl(const char *Ptr, size_t Size) override;
 
@@ -69,40 +64,20 @@ private:
   }
 
   /// ComputePosition - Examine the given output buffer and figure out the new
-  /// position after output.
-  ///
+  /// position after output. This is safe to call multiple times on the same
+  /// buffer, as it records the most recently scanned character and resumes from
+  /// there when the buffer has not been flushed.
   void ComputePosition(const char *Ptr, size_t size);
 
-public:
-  /// formatted_raw_ostream - Open the specified file for
-  /// writing. If an error occurs, information about the error is
-  /// put into ErrorInfo, and the stream should be immediately
-  /// destroyed; the string will be empty if no error occurred.
-  ///
-  /// As a side effect, the given Stream is set to be Unbuffered.
-  /// This is because formatted_raw_ostream does its own buffering,
-  /// so it doesn't want another layer of buffering to be happening
-  /// underneath it.
-  ///
-  formatted_raw_ostream(raw_ostream &Stream, bool Delete = false) 
-    : raw_ostream(), TheStream(nullptr), DeleteStream(false), Position(0, 0) {
-    setStream(Stream, Delete);
-  }
-  explicit formatted_raw_ostream()
-    : raw_ostream(), TheStream(nullptr), DeleteStream(false), Position(0, 0) {
-    Scanned = nullptr;
-  }
+  /// UpdatePosition - scan the characters in [Ptr, Ptr+Size), and update the
+  /// line and column numbers. Unlike ComputePosition, this must be called
+  /// exactly once on each region of the buffer.
+  void UpdatePosition(const char *Ptr, size_t Size);
 
-  ~formatted_raw_ostream() {
-    flush();
-    releaseStream();
-  }
-
-  void setStream(raw_ostream &Stream, bool Delete = false) {
+  void setStream(raw_ostream &Stream) {
     releaseStream();
 
     TheStream = &Stream;
-    DeleteStream = Delete;
 
     // This formatted_raw_ostream inherits from raw_ostream, so it'll do its
     // own buffering, and it doesn't need or want TheStream to do another
@@ -117,6 +92,30 @@ public:
     Scanned = nullptr;
   }
 
+public:
+  /// formatted_raw_ostream - Open the specified file for
+  /// writing. If an error occurs, information about the error is
+  /// put into ErrorInfo, and the stream should be immediately
+  /// destroyed; the string will be empty if no error occurred.
+  ///
+  /// As a side effect, the given Stream is set to be Unbuffered.
+  /// This is because formatted_raw_ostream does its own buffering,
+  /// so it doesn't want another layer of buffering to be happening
+  /// underneath it.
+  ///
+  formatted_raw_ostream(raw_ostream &Stream)
+      : TheStream(nullptr), Position(0, 0) {
+    setStream(Stream);
+  }
+  explicit formatted_raw_ostream() : TheStream(nullptr), Position(0, 0) {
+    Scanned = nullptr;
+  }
+
+  ~formatted_raw_ostream() override {
+    flush();
+    releaseStream();
+  }
+
   /// PadToColumn - Align the output to some column number.  If the current
   /// column is already equal to or more than NewCol, PadToColumn inserts one
   /// space.
@@ -124,11 +123,17 @@ public:
   /// \param NewCol - The column to move to.
   formatted_raw_ostream &PadToColumn(unsigned NewCol);
 
-  /// getColumn - Return the column number
-  unsigned getColumn() { return Position.first; }
+  unsigned getColumn() {
+    // Calculate current position, taking buffer contents into account.
+    ComputePosition(getBufferStart(), GetNumBytesInBuffer());
+    return Position.first;
+  }
 
-  /// getLine - Return the line number
-  unsigned getLine() { return Position.second; }
+  unsigned getLine() {
+    // Calculate current position, taking buffer contents into account.
+    ComputePosition(getBufferStart(), GetNumBytesInBuffer());
+    return Position.second;
+  }
 
   raw_ostream &resetColor() override {
     TheStream->resetColor();
@@ -151,13 +156,11 @@ public:
 
 private:
   void releaseStream() {
-    // Delete the stream if needed. Otherwise, transfer the buffer
-    // settings from this raw_ostream back to the underlying stream.
+    // Transfer the buffer settings from this raw_ostream back to the underlying
+    // stream.
     if (!TheStream)
       return;
-    if (DeleteStream)
-      delete TheStream;
-    else if (size_t BufferSize = GetBufferSize())
+    if (size_t BufferSize = GetBufferSize())
       TheStream->SetBufferSize(BufferSize);
     else
       TheStream->SetUnbuffered();

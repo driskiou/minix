@@ -1,9 +1,8 @@
 //===-- SimpleStreamChecker.cpp -----------------------------------------*- C++ -*--//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,11 +14,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugType.h"
 #include "clang/StaticAnalyzer/Core/Checker.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
+#include <utility>
 
 using namespace clang;
 using namespace ento;
@@ -51,13 +51,10 @@ class SimpleStreamChecker : public Checker<check::PostCall,
                                            check::PreCall,
                                            check::DeadSymbols,
                                            check::PointerEscape> {
-
-  mutable IdentifierInfo *IIfopen, *IIfclose;
+  CallDescription OpenFn, CloseFn;
 
   std::unique_ptr<BugType> DoubleCloseBugType;
   std::unique_ptr<BugType> LeakBugType;
-
-  void initIdentifierInfo(ASTContext &Ctx) const;
 
   void reportDoubleClose(SymbolRef FileDescSym,
                          const CallEvent &Call,
@@ -92,10 +89,10 @@ public:
 REGISTER_MAP_WITH_PROGRAMSTATE(StreamMap, SymbolRef, StreamState)
 
 namespace {
-class StopTrackingCallback : public SymbolVisitor {
+class StopTrackingCallback final : public SymbolVisitor {
   ProgramStateRef state;
 public:
-  StopTrackingCallback(ProgramStateRef st) : state(st) {}
+  StopTrackingCallback(ProgramStateRef st) : state(std::move(st)) {}
   ProgramStateRef getState() const { return state; }
 
   bool VisitSymbol(SymbolRef sym) override {
@@ -106,25 +103,23 @@ public:
 } // end anonymous namespace
 
 SimpleStreamChecker::SimpleStreamChecker()
-    : IIfopen(nullptr), IIfclose(nullptr) {
+    : OpenFn("fopen"), CloseFn("fclose", 1) {
   // Initialize the bug types.
   DoubleCloseBugType.reset(
       new BugType(this, "Double fclose", "Unix Stream API Error"));
 
-  LeakBugType.reset(
-      new BugType(this, "Resource Leak", "Unix Stream API Error"));
   // Sinks are higher importance bugs as well as calls to assert() or exit(0).
-  LeakBugType->setSuppressOnSink(true);
+  LeakBugType.reset(
+      new BugType(this, "Resource Leak", "Unix Stream API Error",
+                  /*SuppressOnSink=*/true));
 }
 
 void SimpleStreamChecker::checkPostCall(const CallEvent &Call,
                                         CheckerContext &C) const {
-  initIdentifierInfo(C.getASTContext());
-
   if (!Call.isGlobalCFunction())
     return;
 
-  if (Call.getCalleeIdentifier() != IIfopen)
+  if (!Call.isCalled(OpenFn))
     return;
 
   // Get the symbolic value corresponding to the file handle.
@@ -140,15 +135,10 @@ void SimpleStreamChecker::checkPostCall(const CallEvent &Call,
 
 void SimpleStreamChecker::checkPreCall(const CallEvent &Call,
                                        CheckerContext &C) const {
-  initIdentifierInfo(C.getASTContext());
-
   if (!Call.isGlobalCFunction())
     return;
 
-  if (Call.getCalleeIdentifier() != IIfclose)
-    return;
-
-  if (Call.getNumArgs() != 1)
+  if (!Call.isCalled(CloseFn))
     return;
 
   // Get the symbolic value corresponding to the file handle.
@@ -200,7 +190,9 @@ void SimpleStreamChecker::checkDeadSymbols(SymbolReaper &SymReaper,
       State = State->remove<StreamMap>(Sym);
   }
 
-  ExplodedNode *N = C.addTransition(State);
+  ExplodedNode *N = C.generateNonFatalErrorNode(State);
+  if (!N)
+    return;
   reportLeaks(LeakedStreams, C, N);
 }
 
@@ -208,17 +200,17 @@ void SimpleStreamChecker::reportDoubleClose(SymbolRef FileDescSym,
                                             const CallEvent &Call,
                                             CheckerContext &C) const {
   // We reached a bug, stop exploring the path here by generating a sink.
-  ExplodedNode *ErrNode = C.generateSink();
+  ExplodedNode *ErrNode = C.generateErrorNode();
   // If we've already reached this node on another path, return.
   if (!ErrNode)
     return;
 
   // Generate the report.
-  BugReport *R = new BugReport(*DoubleCloseBugType,
-      "Closing a previously closed file stream", ErrNode);
+  auto R = std::make_unique<PathSensitiveBugReport>(
+      *DoubleCloseBugType, "Closing a previously closed file stream", ErrNode);
   R->addRange(Call.getSourceRange());
   R->markInteresting(FileDescSym);
-  C.emitReport(R);
+  C.emitReport(std::move(R));
 }
 
 void SimpleStreamChecker::reportLeaks(ArrayRef<SymbolRef> LeakedStreams,
@@ -227,10 +219,11 @@ void SimpleStreamChecker::reportLeaks(ArrayRef<SymbolRef> LeakedStreams,
   // Attach bug reports to the leak node.
   // TODO: Identify the leaked file descriptor.
   for (SymbolRef LeakedStream : LeakedStreams) {
-    BugReport *R = new BugReport(*LeakBugType,
-        "Opened file is never closed; potential resource leak", ErrNode);
+    auto R = std::make_unique<PathSensitiveBugReport>(
+        *LeakBugType, "Opened file is never closed; potential resource leak",
+        ErrNode);
     R->markInteresting(LeakedStream);
-    C.emitReport(R);
+    C.emitReport(std::move(R));
   }
 }
 
@@ -273,13 +266,11 @@ SimpleStreamChecker::checkPointerEscape(ProgramStateRef State,
   return State;
 }
 
-void SimpleStreamChecker::initIdentifierInfo(ASTContext &Ctx) const {
-  if (IIfopen)
-    return;
-  IIfopen = &Ctx.Idents.get("fopen");
-  IIfclose = &Ctx.Idents.get("fclose");
-}
-
 void ento::registerSimpleStreamChecker(CheckerManager &mgr) {
   mgr.registerChecker<SimpleStreamChecker>();
+}
+
+// This checker should be enabled regardless of how language options are set.
+bool ento::shouldRegisterSimpleStreamChecker(const CheckerManager &mgr) {
+  return true;
 }

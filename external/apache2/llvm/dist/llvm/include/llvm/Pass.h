@@ -1,9 +1,8 @@
 //===- llvm/Pass.h - Base class for Passes ----------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -29,25 +28,23 @@
 #ifndef LLVM_PASS_H
 #define LLVM_PASS_H
 
-#include "llvm/Support/Compiler.h"
 #include <string>
 
 namespace llvm {
 
-class BasicBlock;
-class Function;
-class Module;
-class AnalysisUsage;
-class PassInfo;
-class ImmutablePass;
-class PMStack;
 class AnalysisResolver;
+class AnalysisUsage;
+class Function;
+class ImmutablePass;
+class Module;
+class PassInfo;
 class PMDataManager;
+class PMStack;
 class raw_ostream;
 class StringRef;
 
 // AnalysisID - Use the PassInfo to identify a pass...
-typedef const void* AnalysisID;
+using AnalysisID = const void *;
 
 /// Different types of internal pass managers. External pass managers
 /// (PassManager and FunctionPassManager) are not represented here.
@@ -59,13 +56,11 @@ enum PassManagerType {
   PMT_FunctionPassManager,   ///< FPPassManager
   PMT_LoopPassManager,       ///< LPPassManager
   PMT_RegionPassManager,     ///< RGPassManager
-  PMT_BasicBlockPassManager, ///< BBPassManager
   PMT_Last
 };
 
 // Different types of passes.
 enum PassKind {
-  PT_BasicBlock,
   PT_Region,
   PT_Loop,
   PT_Function,
@@ -74,31 +69,42 @@ enum PassKind {
   PT_PassManager
 };
 
+/// This enumerates the LLVM full LTO or ThinLTO optimization phases.
+enum class ThinOrFullLTOPhase {
+  /// No LTO/ThinLTO behavior needed.
+  None,
+  /// ThinLTO prelink (summary) phase.
+  ThinLTOPreLink,
+  /// ThinLTO postlink (backend compile) phase.
+  ThinLTOPostLink,
+  /// Full LTO prelink phase.
+  FullLTOPreLink,
+  /// Full LTO postlink (backend compile) phase.
+  FullLTOPostLink
+};
+
 //===----------------------------------------------------------------------===//
 /// Pass interface - Implemented by all 'passes'.  Subclass this if you are an
 /// interprocedural optimization or you do not fit into any of the more
 /// constrained passes described below.
 ///
 class Pass {
-  AnalysisResolver *Resolver;  // Used to resolve analysis
+  AnalysisResolver *Resolver = nullptr;  // Used to resolve analysis
   const void *PassID;
   PassKind Kind;
-  void operator=(const Pass&) LLVM_DELETED_FUNCTION;
-  Pass(const Pass &) LLVM_DELETED_FUNCTION;
 
 public:
-  explicit Pass(PassKind K, char &pid)
-    : Resolver(nullptr), PassID(&pid), Kind(K) { }
+  explicit Pass(PassKind K, char &pid) : PassID(&pid), Kind(K) {}
+  Pass(const Pass &) = delete;
+  Pass &operator=(const Pass &) = delete;
   virtual ~Pass();
-
 
   PassKind getPassKind() const { return Kind; }
 
   /// getPassName - Return a nice clean name for a pass.  This usually
   /// implemented in terms of the name that is registered by one of the
   /// Registration templates, but can be overloaded directly.
-  ///
-  virtual const char *getPassName() const;
+  virtual StringRef getPassName() const;
 
   /// getPassID - Return the PassID number that corresponds to this pass.
   AnalysisID getPassID() const {
@@ -107,12 +113,10 @@ public:
 
   /// doInitialization - Virtual method overridden by subclasses to do
   /// any necessary initialization before any pass is run.
-  ///
   virtual bool doInitialization(Module &)  { return false; }
 
   /// doFinalization - Virtual method overriden by subclasses to do any
   /// necessary clean up after all passes have run.
-  ///
   virtual bool doFinalization(Module &) { return false; }
 
   /// print - Print out the internal state of the pass.  This is called by
@@ -121,19 +125,20 @@ public:
   /// null.  This automatically forwards to a virtual function that does not
   /// provide the Module* in case the analysis doesn't need it it can just be
   /// ignored.
-  ///
-  virtual void print(raw_ostream &O, const Module *M) const;
+  virtual void print(raw_ostream &OS, const Module *M) const;
+
   void dump() const; // dump - Print to stderr.
 
   /// createPrinterPass - Get a Pass appropriate to print the IR this
   /// pass operates on (Module, Function or MachineFunction).
-  virtual Pass *createPrinterPass(raw_ostream &O,
+  virtual Pass *createPrinterPass(raw_ostream &OS,
                                   const std::string &Banner) const = 0;
 
   /// Each pass is responsible for assigning a pass manager to itself.
   /// PMS is the stack of available pass manager.
   virtual void assignPassManager(PMStack &,
                                  PassManagerType) {}
+
   /// Check if available pass managers are suitable for this pass or not.
   virtual void preparePassManager(PMStack &);
 
@@ -148,7 +153,6 @@ public:
   /// analysis information to do their job.  If a pass specifies that it uses a
   /// particular analysis result to this function, it can then use the
   /// getAnalysis<AnalysisType>() function, below.
-  ///
   virtual void getAnalysisUsage(AnalysisUsage &) const;
 
   /// releaseMemory() - This member can be implemented by a pass if it wants to
@@ -161,7 +165,6 @@ public:
   ///
   /// Optionally implement this function to release pass memory when it is no
   /// longer used.
-  ///
   virtual void releaseMemory();
 
   /// getAdjustedAnalysisPointer - This method is used when a pass implements
@@ -198,7 +201,6 @@ public:
   /// the case when the analysis is not available.  This method is often used by
   /// transformation APIs to update analysis results for a pass automatically as
   /// the transform is performed.
-  ///
   template<typename AnalysisType> AnalysisType *
     getAnalysisIfAvailable() const; // Defined in PassAnalysisSupport.h
 
@@ -207,26 +209,26 @@ public:
   /// obviously cannot give you a properly typed instance of the class if you
   /// don't have the class name available (use getAnalysisIfAvailable if you
   /// do), but it can tell you if you need to preserve the pass at least.
-  ///
   bool mustPreserveAnalysisID(char &AID) const;
 
   /// getAnalysis<AnalysisType>() - This function is used by subclasses to get
   /// to the analysis information that they claim to use by overriding the
   /// getAnalysisUsage function.
-  ///
   template<typename AnalysisType>
   AnalysisType &getAnalysis() const; // Defined in PassAnalysisSupport.h
 
-  template<typename AnalysisType>
-  AnalysisType &getAnalysis(Function &F); // Defined in PassAnalysisSupport.h
+  template <typename AnalysisType>
+  AnalysisType &
+  getAnalysis(Function &F,
+              bool *Changed = nullptr); // Defined in PassAnalysisSupport.h
 
   template<typename AnalysisType>
   AnalysisType &getAnalysisID(AnalysisID PI) const;
 
-  template<typename AnalysisType>
-  AnalysisType &getAnalysisID(AnalysisID PI, Function &F);
+  template <typename AnalysisType>
+  AnalysisType &getAnalysisID(AnalysisID PI, Function &F,
+                              bool *Changed = nullptr);
 };
-
 
 //===----------------------------------------------------------------------===//
 /// ModulePass class - This class is used to implement unstructured
@@ -235,8 +237,13 @@ public:
 ///
 class ModulePass : public Pass {
 public:
+  explicit ModulePass(char &pid) : Pass(PT_Module, pid) {}
+
+  // Force out-of-line virtual method.
+  ~ModulePass() override;
+
   /// createPrinterPass - Get a module printer pass.
-  Pass *createPrinterPass(raw_ostream &O,
+  Pass *createPrinterPass(raw_ostream &OS,
                           const std::string &Banner) const override;
 
   /// runOnModule - Virtual method overriden by subclasses to process the module
@@ -248,11 +255,11 @@ public:
   ///  Return what kind of Pass Manager can manage this pass.
   PassManagerType getPotentialPassManagerType() const override;
 
-  explicit ModulePass(char &pid) : Pass(PT_Module, pid) {}
-  // Force out-of-line virtual method.
-  virtual ~ModulePass();
+protected:
+  /// Optional passes call this function to check whether the pass should be
+  /// skipped. This is the case when optimization bisect is over the limit.
+  bool skipModule(Module &M) const;
 };
-
 
 //===----------------------------------------------------------------------===//
 /// ImmutablePass class - This class is used to provide information that does
@@ -261,25 +268,22 @@ public:
 ///
 class ImmutablePass : public ModulePass {
 public:
+  explicit ImmutablePass(char &pid) : ModulePass(pid) {}
+
+  // Force out-of-line virtual method.
+  ~ImmutablePass() override;
+
   /// initializePass - This method may be overriden by immutable passes to allow
   /// them to perform various initialization actions they require.  This is
   /// primarily because an ImmutablePass can "require" another ImmutablePass,
   /// and if it does, the overloaded version of initializePass may get access to
   /// these passes with getAnalysis<>.
-  ///
   virtual void initializePass();
 
   ImmutablePass *getAsImmutablePass() override { return this; }
 
   /// ImmutablePasses are never run.
-  ///
   bool runOnModule(Module &) override { return false; }
-
-  explicit ImmutablePass(char &pid)
-  : ModulePass(pid) {}
-
-  // Force out-of-line virtual method.
-  virtual ~ImmutablePass();
 };
 
 //===----------------------------------------------------------------------===//
@@ -296,12 +300,11 @@ public:
   explicit FunctionPass(char &pid) : Pass(PT_Function, pid) {}
 
   /// createPrinterPass - Get a function printer pass.
-  Pass *createPrinterPass(raw_ostream &O,
+  Pass *createPrinterPass(raw_ostream &OS,
                           const std::string &Banner) const override;
 
   /// runOnFunction - Virtual method overriden by subclasses to do the
   /// per-function processing of the pass.
-  ///
   virtual bool runOnFunction(Function &F) = 0;
 
   void assignPassManager(PMStack &PMS, PassManagerType T) override;
@@ -310,71 +313,28 @@ public:
   PassManagerType getPotentialPassManagerType() const override;
 
 protected:
-  /// skipOptnoneFunction - This function has Attribute::OptimizeNone
-  /// and most transformation passes should skip it.
-  bool skipOptnoneFunction(const Function &F) const;
-};
-
-
-
-//===----------------------------------------------------------------------===//
-/// BasicBlockPass class - This class is used to implement most local
-/// optimizations.  Optimizations should subclass this class if they
-/// meet the following constraints:
-///   1. Optimizations are local, operating on either a basic block or
-///      instruction at a time.
-///   2. Optimizations do not modify the CFG of the contained function, or any
-///      other basic block in the function.
-///   3. Optimizations conform to all of the constraints of FunctionPasses.
-///
-class BasicBlockPass : public Pass {
-public:
-  explicit BasicBlockPass(char &pid) : Pass(PT_BasicBlock, pid) {}
-
-  /// createPrinterPass - Get a basic block printer pass.
-  Pass *createPrinterPass(raw_ostream &O,
-                          const std::string &Banner) const override;
-
-  using llvm::Pass::doInitialization;
-  using llvm::Pass::doFinalization;
-
-  /// doInitialization - Virtual method overridden by BasicBlockPass subclasses
-  /// to do any necessary per-function initialization.
-  ///
-  virtual bool doInitialization(Function &);
-
-  /// runOnBasicBlock - Virtual method overriden by subclasses to do the
-  /// per-basicblock processing of the pass.
-  ///
-  virtual bool runOnBasicBlock(BasicBlock &BB) = 0;
-
-  /// doFinalization - Virtual method overriden by BasicBlockPass subclasses to
-  /// do any post processing needed after all passes have run.
-  ///
-  virtual bool doFinalization(Function &);
-
-  void assignPassManager(PMStack &PMS, PassManagerType T) override;
-
-  ///  Return what kind of Pass Manager can manage this pass.
-  PassManagerType getPotentialPassManagerType() const override;
-
-protected:
-  /// skipOptnoneFunction - Containing function has Attribute::OptimizeNone
-  /// and most transformation passes should skip it.
-  bool skipOptnoneFunction(const BasicBlock &BB) const;
+  /// Optional passes call this function to check whether the pass should be
+  /// skipped. This is the case when Attribute::OptimizeNone is set or when
+  /// optimization bisect is over the limit.
+  bool skipFunction(const Function &F) const;
 };
 
 /// If the user specifies the -time-passes argument on an LLVM tool command line
 /// then the value of this boolean will be true, otherwise false.
-/// @brief This is the storage for the -time-passes option.
+/// This is the storage for the -time-passes option.
 extern bool TimePassesIsEnabled;
+/// If TimePassesPerRun is true, there would be one line of report for
+/// each pass invocation.
+/// If TimePassesPerRun is false, there would be only one line of
+/// report for each pass (even there are more than one pass objects).
+/// (For new pass manager only)
+extern bool TimePassesPerRun;
 
-} // End llvm namespace
+} // end namespace llvm
 
 // Include support files that contain important APIs commonly used by Passes,
 // but that we want to separate out to make it easier to read the header files.
-//
-#include "llvm/PassSupport.h"
 #include "llvm/PassAnalysisSupport.h"
+#include "llvm/PassSupport.h"
 
-#endif
+#endif // LLVM_PASS_H

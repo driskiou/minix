@@ -1,9 +1,8 @@
 //===--- SemaType.cpp - Semantic Analysis for Types -----------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,11 +10,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/SemaInternal.h"
 #include "TypeLocBuilder.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTMutationListener.h"
+#include "clang/AST/ASTStructuralEquivalence.h"
 #include "clang/AST/CXXInheritance.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
@@ -24,15 +23,21 @@
 #include "clang/AST/TypeLocVisitor.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/TargetInfo.h"
-#include "clang/Parse/ParseDiagnostic.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/DeclSpec.h"
 #include "clang/Sema/DelayedDiagnostic.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/Template.h"
+#include "clang/Sema/TemplateInstCallback.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringSwitch.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <bitset>
 
 using namespace clang;
 
@@ -45,7 +50,7 @@ enum TypeDiagSelector {
 /// isOmittedBlockReturnType - Return true if this declarator is missing a
 /// return type because this is a omitted return type on a block literal.
 static bool isOmittedBlockReturnType(const Declarator &D) {
-  if (D.getContext() != Declarator::BlockLiteralContext ||
+  if (D.getContext() != DeclaratorContext::BlockLiteral ||
       D.getDeclSpec().hasTypeSpecifier())
     return false;
 
@@ -61,13 +66,17 @@ static bool isOmittedBlockReturnType(const Declarator &D) {
 
 /// diagnoseBadTypeAttribute - Diagnoses a type attribute which
 /// doesn't apply to the given type.
-static void diagnoseBadTypeAttribute(Sema &S, const AttributeList &attr,
+static void diagnoseBadTypeAttribute(Sema &S, const ParsedAttr &attr,
                                      QualType type) {
   TypeDiagSelector WhichType;
   bool useExpansionLoc = true;
   switch (attr.getKind()) {
-  case AttributeList::AT_ObjCGC:        WhichType = TDS_Pointer; break;
-  case AttributeList::AT_ObjCOwnership: WhichType = TDS_ObjCObjOrBlock; break;
+  case ParsedAttr::AT_ObjCGC:
+    WhichType = TDS_Pointer;
+    break;
+  case ParsedAttr::AT_ObjCOwnership:
+    WhichType = TDS_ObjCObjOrBlock;
+    break;
   default:
     // Assume everything else was a function attribute.
     WhichType = TDS_Function;
@@ -76,7 +85,7 @@ static void diagnoseBadTypeAttribute(Sema &S, const AttributeList &attr,
   }
 
   SourceLocation loc = attr.getLoc();
-  StringRef name = attr.getName()->getName();
+  StringRef name = attr.getAttrName()->getName();
 
   // The GC attributes are usually written with macros;  special-case them.
   IdentifierInfo *II = attr.isArgIdent(0) ? attr.getArgAsIdent(0)->Ident
@@ -95,32 +104,51 @@ static void diagnoseBadTypeAttribute(Sema &S, const AttributeList &attr,
 
 // objc_gc applies to Objective-C pointers or, otherwise, to the
 // smallest available pointer type (i.e. 'void*' in 'void**').
-#define OBJC_POINTER_TYPE_ATTRS_CASELIST \
-    case AttributeList::AT_ObjCGC: \
-    case AttributeList::AT_ObjCOwnership
+#define OBJC_POINTER_TYPE_ATTRS_CASELIST                                       \
+  case ParsedAttr::AT_ObjCGC:                                                  \
+  case ParsedAttr::AT_ObjCOwnership
+
+// Calling convention attributes.
+#define CALLING_CONV_ATTRS_CASELIST                                            \
+  case ParsedAttr::AT_CDecl:                                                   \
+  case ParsedAttr::AT_FastCall:                                                \
+  case ParsedAttr::AT_StdCall:                                                 \
+  case ParsedAttr::AT_ThisCall:                                                \
+  case ParsedAttr::AT_RegCall:                                                 \
+  case ParsedAttr::AT_Pascal:                                                  \
+  case ParsedAttr::AT_SwiftCall:                                               \
+  case ParsedAttr::AT_VectorCall:                                              \
+  case ParsedAttr::AT_AArch64VectorPcs:                                        \
+  case ParsedAttr::AT_MSABI:                                                   \
+  case ParsedAttr::AT_SysVABI:                                                 \
+  case ParsedAttr::AT_Pcs:                                                     \
+  case ParsedAttr::AT_IntelOclBicc:                                            \
+  case ParsedAttr::AT_PreserveMost:                                            \
+  case ParsedAttr::AT_PreserveAll
 
 // Function type attributes.
-#define FUNCTION_TYPE_ATTRS_CASELIST \
-    case AttributeList::AT_NoReturn: \
-    case AttributeList::AT_CDecl: \
-    case AttributeList::AT_FastCall: \
-    case AttributeList::AT_StdCall: \
-    case AttributeList::AT_ThisCall: \
-    case AttributeList::AT_Pascal: \
-    case AttributeList::AT_VectorCall: \
-    case AttributeList::AT_MSABI: \
-    case AttributeList::AT_SysVABI: \
-    case AttributeList::AT_Regparm: \
-    case AttributeList::AT_Pcs: \
-    case AttributeList::AT_PnaclCall: \
-    case AttributeList::AT_IntelOclBicc
+#define FUNCTION_TYPE_ATTRS_CASELIST                                           \
+  case ParsedAttr::AT_NSReturnsRetained:                                       \
+  case ParsedAttr::AT_NoReturn:                                                \
+  case ParsedAttr::AT_Regparm:                                                 \
+  case ParsedAttr::AT_CmseNSCall:                                              \
+  case ParsedAttr::AT_AnyX86NoCallerSavedRegisters:                            \
+  case ParsedAttr::AT_AnyX86NoCfCheck:                                         \
+    CALLING_CONV_ATTRS_CASELIST
 
 // Microsoft-specific type qualifiers.
-#define MS_TYPE_ATTRS_CASELIST  \
-    case AttributeList::AT_Ptr32: \
-    case AttributeList::AT_Ptr64: \
-    case AttributeList::AT_SPtr: \
-    case AttributeList::AT_UPtr
+#define MS_TYPE_ATTRS_CASELIST                                                 \
+  case ParsedAttr::AT_Ptr32:                                                   \
+  case ParsedAttr::AT_Ptr64:                                                   \
+  case ParsedAttr::AT_SPtr:                                                    \
+  case ParsedAttr::AT_UPtr
+
+// Nullability qualifiers.
+#define NULLABILITY_TYPE_ATTRS_CASELIST                                        \
+  case ParsedAttr::AT_TypeNonNull:                                             \
+  case ParsedAttr::AT_TypeNullable:                                            \
+  case ParsedAttr::AT_TypeNullableResult:                                      \
+  case ParsedAttr::AT_TypeNullUnspecified
 
 namespace {
   /// An object which stores processing state for the entire
@@ -143,17 +171,35 @@ namespace {
     bool hasSavedAttrs;
 
     /// The original set of attributes on the DeclSpec.
-    SmallVector<AttributeList*, 2> savedAttrs;
+    SmallVector<ParsedAttr *, 2> savedAttrs;
 
     /// A list of attributes to diagnose the uselessness of when the
     /// processing is complete.
-    SmallVector<AttributeList*, 2> ignoredTypeAttrs;
+    SmallVector<ParsedAttr *, 2> ignoredTypeAttrs;
+
+    /// Attributes corresponding to AttributedTypeLocs that we have not yet
+    /// populated.
+    // FIXME: The two-phase mechanism by which we construct Types and fill
+    // their TypeLocs makes it hard to correctly assign these. We keep the
+    // attributes in creation order as an attempt to make them line up
+    // properly.
+    using TypeAttrPair = std::pair<const AttributedType*, const Attr*>;
+    SmallVector<TypeAttrPair, 8> AttrsForTypes;
+    bool AttrsForTypesSorted = true;
+
+    /// MacroQualifiedTypes mapping to macro expansion locations that will be
+    /// stored in a MacroQualifiedTypeLoc.
+    llvm::DenseMap<const MacroQualifiedType *, SourceLocation> LocsForMacros;
+
+    /// Flag to indicate we parsed a noderef attribute. This is used for
+    /// validating that noderef was used on a pointer or array.
+    bool parsedNoDeref;
 
   public:
     TypeProcessingState(Sema &sema, Declarator &declarator)
-      : sema(sema), declarator(declarator),
-        chunkIndex(declarator.getNumTypeObjects()),
-        trivial(true), hasSavedAttrs(false) {}
+        : sema(sema), declarator(declarator),
+          chunkIndex(declarator.getNumTypeObjects()), trivial(true),
+          hasSavedAttrs(false), parsedNoDeref(false) {}
 
     Sema &getSema() const {
       return sema;
@@ -176,10 +222,10 @@ namespace {
       chunkIndex = idx;
     }
 
-    AttributeList *&getCurrentAttrListRef() const {
+    ParsedAttributesView &getCurrentAttributes() const {
       if (isProcessingDeclSpec())
-        return getMutableDeclSpec().getAttributes().getListRef();
-      return declarator.getTypeObject(chunkIndex).getAttrListRef();
+        return getMutableDeclSpec().getAttributes();
+      return declarator.getTypeObject(chunkIndex).getAttrs();
     }
 
     /// Save the current set of attributes on the DeclSpec.
@@ -188,27 +234,92 @@ namespace {
       if (hasSavedAttrs) return;
 
       DeclSpec &spec = getMutableDeclSpec();
-      for (AttributeList *attr = spec.getAttributes().getList(); attr;
-             attr = attr->getNext())
-        savedAttrs.push_back(attr);
+      for (ParsedAttr &AL : spec.getAttributes())
+        savedAttrs.push_back(&AL);
       trivial &= savedAttrs.empty();
       hasSavedAttrs = true;
     }
 
     /// Record that we had nowhere to put the given type attribute.
     /// We will diagnose such attributes later.
-    void addIgnoredTypeAttr(AttributeList &attr) {
+    void addIgnoredTypeAttr(ParsedAttr &attr) {
       ignoredTypeAttrs.push_back(&attr);
     }
 
     /// Diagnose all the ignored type attributes, given that the
     /// declarator worked out to the given type.
     void diagnoseIgnoredTypeAttrs(QualType type) const {
-      for (SmallVectorImpl<AttributeList*>::const_iterator
-             i = ignoredTypeAttrs.begin(), e = ignoredTypeAttrs.end();
-           i != e; ++i)
-        diagnoseBadTypeAttribute(getSema(), **i, type);
+      for (auto *Attr : ignoredTypeAttrs)
+        diagnoseBadTypeAttribute(getSema(), *Attr, type);
     }
+
+    /// Get an attributed type for the given attribute, and remember the Attr
+    /// object so that we can attach it to the AttributedTypeLoc.
+    QualType getAttributedType(Attr *A, QualType ModifiedType,
+                               QualType EquivType) {
+      QualType T =
+          sema.Context.getAttributedType(A->getKind(), ModifiedType, EquivType);
+      AttrsForTypes.push_back({cast<AttributedType>(T.getTypePtr()), A});
+      AttrsForTypesSorted = false;
+      return T;
+    }
+
+    /// Completely replace the \c auto in \p TypeWithAuto by
+    /// \p Replacement. Also replace \p TypeWithAuto in \c TypeAttrPair if
+    /// necessary.
+    QualType ReplaceAutoType(QualType TypeWithAuto, QualType Replacement) {
+      QualType T = sema.ReplaceAutoType(TypeWithAuto, Replacement);
+      if (auto *AttrTy = TypeWithAuto->getAs<AttributedType>()) {
+        // Attributed type still should be an attributed type after replacement.
+        auto *NewAttrTy = cast<AttributedType>(T.getTypePtr());
+        for (TypeAttrPair &A : AttrsForTypes) {
+          if (A.first == AttrTy)
+            A.first = NewAttrTy;
+        }
+        AttrsForTypesSorted = false;
+      }
+      return T;
+    }
+
+    /// Extract and remove the Attr* for a given attributed type.
+    const Attr *takeAttrForAttributedType(const AttributedType *AT) {
+      if (!AttrsForTypesSorted) {
+        llvm::stable_sort(AttrsForTypes, llvm::less_first());
+        AttrsForTypesSorted = true;
+      }
+
+      // FIXME: This is quadratic if we have lots of reuses of the same
+      // attributed type.
+      for (auto It = std::partition_point(
+               AttrsForTypes.begin(), AttrsForTypes.end(),
+               [=](const TypeAttrPair &A) { return A.first < AT; });
+           It != AttrsForTypes.end() && It->first == AT; ++It) {
+        if (It->second) {
+          const Attr *Result = It->second;
+          It->second = nullptr;
+          return Result;
+        }
+      }
+
+      llvm_unreachable("no Attr* for AttributedType*");
+    }
+
+    SourceLocation
+    getExpansionLocForMacroQualifiedType(const MacroQualifiedType *MQT) const {
+      auto FoundLoc = LocsForMacros.find(MQT);
+      assert(FoundLoc != LocsForMacros.end() &&
+             "Unable to find macro expansion location for MacroQualifedType");
+      return FoundLoc->second;
+    }
+
+    void setExpansionLocForMacroQualifiedType(const MacroQualifiedType *MQT,
+                                              SourceLocation Loc) {
+      LocsForMacros[MQT] = Loc;
+    }
+
+    void setParsedNoDeref(bool parsed) { parsedNoDeref = parsed; }
+
+    bool didParseNoDeref() const { return parsedNoDeref; }
 
     ~TypeProcessingState() {
       if (trivial) return;
@@ -224,46 +335,18 @@ namespace {
     void restoreDeclSpecAttrs() {
       assert(hasSavedAttrs);
 
-      if (savedAttrs.empty()) {
-        getMutableDeclSpec().getAttributes().set(nullptr);
-        return;
-      }
-
-      getMutableDeclSpec().getAttributes().set(savedAttrs[0]);
-      for (unsigned i = 0, e = savedAttrs.size() - 1; i != e; ++i)
-        savedAttrs[i]->setNext(savedAttrs[i+1]);
-      savedAttrs.back()->setNext(nullptr);
+      getMutableDeclSpec().getAttributes().clearListOnly();
+      for (ParsedAttr *AL : savedAttrs)
+        getMutableDeclSpec().getAttributes().addAtEnd(AL);
     }
   };
-}
+} // end anonymous namespace
 
-static void spliceAttrIntoList(AttributeList &attr, AttributeList *&head) {
-  attr.setNext(head);
-  head = &attr;
-}
-
-static void spliceAttrOutOfList(AttributeList &attr, AttributeList *&head) {
-  if (head == &attr) {
-    head = attr.getNext();
-    return;
-  }
-
-  AttributeList *cur = head;
-  while (true) {
-    assert(cur && cur->getNext() && "ran out of attrs?");
-    if (cur->getNext() == &attr) {
-      cur->setNext(attr.getNext());
-      return;
-    }
-    cur = cur->getNext();
-  }
-}
-
-static void moveAttrFromListToList(AttributeList &attr,
-                                   AttributeList *&fromList,
-                                   AttributeList *&toList) {
-  spliceAttrOutOfList(attr, fromList);
-  spliceAttrIntoList(attr, toList);
+static void moveAttrFromListToList(ParsedAttr &attr,
+                                   ParsedAttributesView &fromList,
+                                   ParsedAttributesView &toList) {
+  fromList.remove(&attr);
+  toList.addAtEnd(&attr);
 }
 
 /// The location of a type attribute.
@@ -276,29 +359,26 @@ enum TypeAttrLocation {
   TAL_DeclName
 };
 
-static void processTypeAttrs(TypeProcessingState &state,
-                             QualType &type, TypeAttrLocation TAL,
-                             AttributeList *attrs);
+static void processTypeAttrs(TypeProcessingState &state, QualType &type,
+                             TypeAttrLocation TAL, ParsedAttributesView &attrs);
 
-static bool handleFunctionTypeAttr(TypeProcessingState &state,
-                                   AttributeList &attr,
+static bool handleFunctionTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
                                    QualType &type);
 
 static bool handleMSPointerTypeQualifierAttr(TypeProcessingState &state,
-                                             AttributeList &attr,
-                                             QualType &type);
+                                             ParsedAttr &attr, QualType &type);
 
-static bool handleObjCGCTypeAttr(TypeProcessingState &state,
-                                 AttributeList &attr, QualType &type);
+static bool handleObjCGCTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
+                                 QualType &type);
 
 static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
-                                       AttributeList &attr, QualType &type);
+                                        ParsedAttr &attr, QualType &type);
 
 static bool handleObjCPointerTypeAttr(TypeProcessingState &state,
-                                      AttributeList &attr, QualType &type) {
-  if (attr.getKind() == AttributeList::AT_ObjCGC)
+                                      ParsedAttr &attr, QualType &type) {
+  if (attr.getKind() == ParsedAttr::AT_ObjCGC)
     return handleObjCGCTypeAttr(state, attr, type);
-  assert(attr.getKind() == AttributeList::AT_ObjCOwnership);
+  assert(attr.getKind() == ParsedAttr::AT_ObjCOwnership);
   return handleObjCOwnershipTypeAttr(state, attr, type);
 }
 
@@ -308,8 +388,12 @@ static bool handleObjCPointerTypeAttr(TypeProcessingState &state,
 ///
 /// \param i - a notional index which the search will start
 ///   immediately inside
+///
+/// \param onlyBlockPointers Whether we should only look into block
+/// pointer types (vs. all pointer types).
 static DeclaratorChunk *maybeMovePastReturnType(Declarator &declarator,
-                                                unsigned i) {
+                                                unsigned i,
+                                                bool onlyBlockPointers) {
   assert(i <= declarator.getNumTypeObjects());
 
   DeclaratorChunk *result = nullptr;
@@ -327,23 +411,31 @@ static DeclaratorChunk *maybeMovePastReturnType(Declarator &declarator,
     case DeclaratorChunk::Array:
     case DeclaratorChunk::Reference:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       return result;
 
     // If we do find a function declarator, scan inwards from that,
-    // looking for a block-pointer declarator.
+    // looking for a (block-)pointer declarator.
     case DeclaratorChunk::Function:
       for (--i; i != 0; --i) {
-        DeclaratorChunk &blockChunk = declarator.getTypeObject(i-1);
-        switch (blockChunk.Kind) {
+        DeclaratorChunk &ptrChunk = declarator.getTypeObject(i-1);
+        switch (ptrChunk.Kind) {
         case DeclaratorChunk::Paren:
-        case DeclaratorChunk::Pointer:
         case DeclaratorChunk::Array:
         case DeclaratorChunk::Function:
         case DeclaratorChunk::Reference:
-        case DeclaratorChunk::MemberPointer:
+        case DeclaratorChunk::Pipe:
           continue;
+
+        case DeclaratorChunk::MemberPointer:
+        case DeclaratorChunk::Pointer:
+          if (onlyBlockPointers)
+            continue;
+
+          LLVM_FALLTHROUGH;
+
         case DeclaratorChunk::BlockPointer:
-          result = &blockChunk;
+          result = &ptrChunk;
           goto continue_outer;
         }
         llvm_unreachable("bad declarator chunk kind");
@@ -368,8 +460,7 @@ static DeclaratorChunk *maybeMovePastReturnType(Declarator &declarator,
 /// didn't apply in whatever position it was written in, try to move
 /// it to a more appropriate position.
 static void distributeObjCPointerTypeAttr(TypeProcessingState &state,
-                                          AttributeList &attr,
-                                          QualType type) {
+                                          ParsedAttr &attr, QualType type) {
   Declarator &declarator = state.getDeclarator();
 
   // Move it to the outermost normal or block pointer declarator.
@@ -382,12 +473,13 @@ static void distributeObjCPointerTypeAttr(TypeProcessingState &state,
       // of a block.
       DeclaratorChunk *destChunk = nullptr;
       if (state.isProcessingDeclSpec() &&
-          attr.getKind() == AttributeList::AT_ObjCOwnership)
-        destChunk = maybeMovePastReturnType(declarator, i - 1);
+          attr.getKind() == ParsedAttr::AT_ObjCOwnership)
+        destChunk = maybeMovePastReturnType(declarator, i - 1,
+                                            /*onlyBlockPointers=*/true);
       if (!destChunk) destChunk = &chunk;
 
-      moveAttrFromListToList(attr, state.getCurrentAttrListRef(),
-                             destChunk->getAttrListRef());
+      moveAttrFromListToList(attr, state.getCurrentAttributes(),
+                             destChunk->getAttrs());
       return;
     }
 
@@ -398,10 +490,12 @@ static void distributeObjCPointerTypeAttr(TypeProcessingState &state,
     // We may be starting at the return type of a block.
     case DeclaratorChunk::Function:
       if (state.isProcessingDeclSpec() &&
-          attr.getKind() == AttributeList::AT_ObjCOwnership) {
-        if (DeclaratorChunk *dest = maybeMovePastReturnType(declarator, i)) {
-          moveAttrFromListToList(attr, state.getCurrentAttrListRef(),
-                                 dest->getAttrListRef());
+          attr.getKind() == ParsedAttr::AT_ObjCOwnership) {
+        if (DeclaratorChunk *dest = maybeMovePastReturnType(
+                                      declarator, i,
+                                      /*onlyBlockPointers=*/true)) {
+          moveAttrFromListToList(attr, state.getCurrentAttributes(),
+                                 dest->getAttrs());
           return;
         }
       }
@@ -410,6 +504,7 @@ static void distributeObjCPointerTypeAttr(TypeProcessingState &state,
     // Don't walk through these.
     case DeclaratorChunk::Reference:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       goto error;
     }
   }
@@ -420,10 +515,8 @@ static void distributeObjCPointerTypeAttr(TypeProcessingState &state,
 
 /// Distribute an objc_gc type attribute that was written on the
 /// declarator.
-static void
-distributeObjCPointerTypeAttrFromDeclarator(TypeProcessingState &state,
-                                            AttributeList &attr,
-                                            QualType &declSpecType) {
+static void distributeObjCPointerTypeAttrFromDeclarator(
+    TypeProcessingState &state, ParsedAttr &attr, QualType &declSpecType) {
   Declarator &declarator = state.getDeclarator();
 
   // objc_gc goes on the innermost pointer to something that's not a
@@ -442,6 +535,7 @@ distributeObjCPointerTypeAttrFromDeclarator(TypeProcessingState &state,
     case DeclaratorChunk::MemberPointer:
     case DeclaratorChunk::Paren:
     case DeclaratorChunk::Array:
+    case DeclaratorChunk::Pipe:
       continue;
 
     case DeclaratorChunk::Function:
@@ -459,8 +553,8 @@ distributeObjCPointerTypeAttrFromDeclarator(TypeProcessingState &state,
       // attribute from being applied multiple times and gives
       // the source-location-filler something to work with.
       state.saveDeclSpecAttrs();
-      moveAttrFromListToList(attr, declarator.getAttrListRef(),
-               declarator.getMutableDeclSpec().getAttributes().getListRef());
+      declarator.getMutableDeclSpec().getAttributes().takeOneFrom(
+          declarator.getAttributes(), &attr);
       return;
     }
   }
@@ -468,13 +562,13 @@ distributeObjCPointerTypeAttrFromDeclarator(TypeProcessingState &state,
   // Otherwise, if we found an appropriate chunk, splice the attribute
   // into it.
   if (innermost != -1U) {
-    moveAttrFromListToList(attr, declarator.getAttrListRef(),
-                       declarator.getTypeObject(innermost).getAttrListRef());
+    moveAttrFromListToList(attr, declarator.getAttributes(),
+                           declarator.getTypeObject(innermost).getAttrs());
     return;
   }
 
   // Otherwise, diagnose when we're done building the type.
-  spliceAttrOutOfList(attr, declarator.getAttrListRef());
+  declarator.getAttributes().remove(&attr);
   state.addIgnoredTypeAttr(attr);
 }
 
@@ -483,8 +577,7 @@ distributeObjCPointerTypeAttrFromDeclarator(TypeProcessingState &state,
 /// that it didn't apply in whatever position it was written in, try
 /// to move it to a more appropriate position.
 static void distributeFunctionTypeAttr(TypeProcessingState &state,
-                                       AttributeList &attr,
-                                       QualType type) {
+                                       ParsedAttr &attr, QualType type) {
   Declarator &declarator = state.getDeclarator();
 
   // Try to push the attribute from the return type of a function to
@@ -493,8 +586,8 @@ static void distributeFunctionTypeAttr(TypeProcessingState &state,
     DeclaratorChunk &chunk = declarator.getTypeObject(i-1);
     switch (chunk.Kind) {
     case DeclaratorChunk::Function:
-      moveAttrFromListToList(attr, state.getCurrentAttrListRef(),
-                             chunk.getAttrListRef());
+      moveAttrFromListToList(attr, state.getCurrentAttributes(),
+                             chunk.getAttrs());
       return;
 
     case DeclaratorChunk::Paren:
@@ -503,6 +596,7 @@ static void distributeFunctionTypeAttr(TypeProcessingState &state,
     case DeclaratorChunk::Array:
     case DeclaratorChunk::Reference:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       continue;
     }
   }
@@ -513,11 +607,9 @@ static void distributeFunctionTypeAttr(TypeProcessingState &state,
 /// Try to distribute a function type attribute to the innermost
 /// function chunk or type.  Returns true if the attribute was
 /// distributed, false if no location was found.
-static bool
-distributeFunctionTypeAttrToInnermost(TypeProcessingState &state,
-                                      AttributeList &attr,
-                                      AttributeList *&attrList,
-                                      QualType &declSpecType) {
+static bool distributeFunctionTypeAttrToInnermost(
+    TypeProcessingState &state, ParsedAttr &attr,
+    ParsedAttributesView &attrList, QualType &declSpecType) {
   Declarator &declarator = state.getDeclarator();
 
   // Put it on the innermost function chunk, if there is one.
@@ -525,7 +617,7 @@ distributeFunctionTypeAttrToInnermost(TypeProcessingState &state,
     DeclaratorChunk &chunk = declarator.getTypeObject(i);
     if (chunk.Kind != DeclaratorChunk::Function) continue;
 
-    moveAttrFromListToList(attr, attrList, chunk.getAttrListRef());
+    moveAttrFromListToList(attr, attrList, chunk.getAttrs());
     return true;
   }
 
@@ -534,25 +626,23 @@ distributeFunctionTypeAttrToInnermost(TypeProcessingState &state,
 
 /// A function type attribute was written in the decl spec.  Try to
 /// apply it somewhere.
-static void
-distributeFunctionTypeAttrFromDeclSpec(TypeProcessingState &state,
-                                       AttributeList &attr,
-                                       QualType &declSpecType) {
+static void distributeFunctionTypeAttrFromDeclSpec(TypeProcessingState &state,
+                                                   ParsedAttr &attr,
+                                                   QualType &declSpecType) {
   state.saveDeclSpecAttrs();
 
   // C++11 attributes before the decl specifiers actually appertain to
   // the declarators. Move them straight there. We don't support the
   // 'put them wherever you like' semantics we allow for GNU attributes.
   if (attr.isCXX11Attribute()) {
-    moveAttrFromListToList(attr, state.getCurrentAttrListRef(),
-                           state.getDeclarator().getAttrListRef());
+    moveAttrFromListToList(attr, state.getCurrentAttributes(),
+                           state.getDeclarator().getAttributes());
     return;
   }
 
   // Try to distribute to the innermost.
-  if (distributeFunctionTypeAttrToInnermost(state, attr,
-                                            state.getCurrentAttrListRef(),
-                                            declSpecType))
+  if (distributeFunctionTypeAttrToInnermost(
+          state, attr, state.getCurrentAttributes(), declSpecType))
     return;
 
   // If that failed, diagnose the bad attribute when the declarator is
@@ -562,25 +652,23 @@ distributeFunctionTypeAttrFromDeclSpec(TypeProcessingState &state,
 
 /// A function type attribute was written on the declarator.  Try to
 /// apply it somewhere.
-static void
-distributeFunctionTypeAttrFromDeclarator(TypeProcessingState &state,
-                                         AttributeList &attr,
-                                         QualType &declSpecType) {
+static void distributeFunctionTypeAttrFromDeclarator(TypeProcessingState &state,
+                                                     ParsedAttr &attr,
+                                                     QualType &declSpecType) {
   Declarator &declarator = state.getDeclarator();
 
   // Try to distribute to the innermost.
-  if (distributeFunctionTypeAttrToInnermost(state, attr,
-                                            declarator.getAttrListRef(),
-                                            declSpecType))
+  if (distributeFunctionTypeAttrToInnermost(
+          state, attr, declarator.getAttributes(), declSpecType))
     return;
 
   // If that failed, diagnose the bad attribute when the declarator is
   // fully built.
-  spliceAttrOutOfList(attr, declarator.getAttrListRef());
+  declarator.getAttributes().remove(&attr);
   state.addIgnoredTypeAttr(attr);
 }
 
-/// \brief Given that there are attributes written on the declarator
+/// Given that there are attributes written on the declarator
 /// itself, try to distribute any type attributes to the appropriate
 /// declarator chunk.
 ///
@@ -592,39 +680,42 @@ distributeFunctionTypeAttrFromDeclarator(TypeProcessingState &state,
 static void distributeTypeAttrsFromDeclarator(TypeProcessingState &state,
                                               QualType &declSpecType) {
   // Collect all the type attributes from the declarator itself.
-  assert(state.getDeclarator().getAttributes() && "declarator has no attrs!");
-  AttributeList *attr = state.getDeclarator().getAttributes();
-  AttributeList *next;
-  do {
-    next = attr->getNext();
-
+  assert(!state.getDeclarator().getAttributes().empty() &&
+         "declarator has no attrs!");
+  // The called functions in this loop actually remove things from the current
+  // list, so iterating over the existing list isn't possible.  Instead, make a
+  // non-owning copy and iterate over that.
+  ParsedAttributesView AttrsCopy{state.getDeclarator().getAttributes()};
+  for (ParsedAttr &attr : AttrsCopy) {
     // Do not distribute C++11 attributes. They have strict rules for what
     // they appertain to.
-    if (attr->isCXX11Attribute())
+    if (attr.isCXX11Attribute())
       continue;
 
-    switch (attr->getKind()) {
+    switch (attr.getKind()) {
     OBJC_POINTER_TYPE_ATTRS_CASELIST:
-      distributeObjCPointerTypeAttrFromDeclarator(state, *attr, declSpecType);
+      distributeObjCPointerTypeAttrFromDeclarator(state, attr, declSpecType);
       break;
 
-    case AttributeList::AT_NSReturnsRetained:
-      if (!state.getSema().getLangOpts().ObjCAutoRefCount)
-        break;
-      // fallthrough
-
     FUNCTION_TYPE_ATTRS_CASELIST:
-      distributeFunctionTypeAttrFromDeclarator(state, *attr, declSpecType);
+      distributeFunctionTypeAttrFromDeclarator(state, attr, declSpecType);
       break;
 
     MS_TYPE_ATTRS_CASELIST:
       // Microsoft type attributes cannot go after the declarator-id.
       continue;
 
+    NULLABILITY_TYPE_ATTRS_CASELIST:
+      // Nullability specifiers cannot go after the declarator-id.
+
+    // Objective-C __kindof does not get distributed.
+    case ParsedAttr::AT_ObjCKindOf:
+      continue;
+
     default:
       break;
     }
-  } while ((attr = next));
+  }
 }
 
 /// Add a synthetic '()' to a block-literal declarator if it is
@@ -656,7 +747,7 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
   // faking up the function chunk is still the right thing to do.
 
   // Otherwise, we need to fake up a function declarator.
-  SourceLocation loc = declarator.getLocStart();
+  SourceLocation loc = declarator.getBeginLoc();
 
   // ...and *prepend* it to the declarator.
   SourceLocation NoLoc;
@@ -665,23 +756,19 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
       /*IsAmbiguous=*/false,
       /*LParenLoc=*/NoLoc,
       /*ArgInfo=*/nullptr,
-      /*NumArgs=*/0,
+      /*NumParams=*/0,
       /*EllipsisLoc=*/NoLoc,
       /*RParenLoc=*/NoLoc,
-      /*TypeQuals=*/0,
       /*RefQualifierIsLvalueRef=*/true,
       /*RefQualifierLoc=*/NoLoc,
-      /*ConstQualifierLoc=*/NoLoc,
-      /*VolatileQualifierLoc=*/NoLoc,
-      /*RestrictQualifierLoc=*/NoLoc,
       /*MutableLoc=*/NoLoc, EST_None,
-      /*ESpecLoc=*/NoLoc,
+      /*ESpecRange=*/SourceRange(),
       /*Exceptions=*/nullptr,
       /*ExceptionRanges=*/nullptr,
       /*NumExceptions=*/0,
       /*NoexceptExpr=*/nullptr,
       /*ExceptionSpecTokens=*/nullptr,
-      loc, loc, declarator));
+      /*DeclsInPrototype=*/None, loc, loc, declarator));
 
   // For consistency, make sure the state still has us as processing
   // the decl spec.
@@ -689,7 +776,487 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
   state.setCurrentChunkIndex(declarator.getNumTypeObjects());
 }
 
-/// \brief Convert the specified declspec to the appropriate type
+static void diagnoseAndRemoveTypeQualifiers(Sema &S, const DeclSpec &DS,
+                                            unsigned &TypeQuals,
+                                            QualType TypeSoFar,
+                                            unsigned RemoveTQs,
+                                            unsigned DiagID) {
+  // If this occurs outside a template instantiation, warn the user about
+  // it; they probably didn't mean to specify a redundant qualifier.
+  typedef std::pair<DeclSpec::TQ, SourceLocation> QualLoc;
+  for (QualLoc Qual : {QualLoc(DeclSpec::TQ_const, DS.getConstSpecLoc()),
+                       QualLoc(DeclSpec::TQ_restrict, DS.getRestrictSpecLoc()),
+                       QualLoc(DeclSpec::TQ_volatile, DS.getVolatileSpecLoc()),
+                       QualLoc(DeclSpec::TQ_atomic, DS.getAtomicSpecLoc())}) {
+    if (!(RemoveTQs & Qual.first))
+      continue;
+
+    if (!S.inTemplateInstantiation()) {
+      if (TypeQuals & Qual.first)
+        S.Diag(Qual.second, DiagID)
+          << DeclSpec::getSpecifierName(Qual.first) << TypeSoFar
+          << FixItHint::CreateRemoval(Qual.second);
+    }
+
+    TypeQuals &= ~Qual.first;
+  }
+}
+
+/// Return true if this is omitted block return type. Also check type
+/// attributes and type qualifiers when returning true.
+static bool checkOmittedBlockReturnType(Sema &S, Declarator &declarator,
+                                        QualType Result) {
+  if (!isOmittedBlockReturnType(declarator))
+    return false;
+
+  // Warn if we see type attributes for omitted return type on a block literal.
+  SmallVector<ParsedAttr *, 2> ToBeRemoved;
+  for (ParsedAttr &AL : declarator.getMutableDeclSpec().getAttributes()) {
+    if (AL.isInvalid() || !AL.isTypeAttr())
+      continue;
+    S.Diag(AL.getLoc(),
+           diag::warn_block_literal_attributes_on_omitted_return_type)
+        << AL;
+    ToBeRemoved.push_back(&AL);
+  }
+  // Remove bad attributes from the list.
+  for (ParsedAttr *AL : ToBeRemoved)
+    declarator.getMutableDeclSpec().getAttributes().remove(AL);
+
+  // Warn if we see type qualifiers for omitted return type on a block literal.
+  const DeclSpec &DS = declarator.getDeclSpec();
+  unsigned TypeQuals = DS.getTypeQualifiers();
+  diagnoseAndRemoveTypeQualifiers(S, DS, TypeQuals, Result, (unsigned)-1,
+      diag::warn_block_literal_qualifiers_on_omitted_return_type);
+  declarator.getMutableDeclSpec().ClearTypeQualifiers();
+
+  return true;
+}
+
+/// Apply Objective-C type arguments to the given type.
+static QualType applyObjCTypeArgs(Sema &S, SourceLocation loc, QualType type,
+                                  ArrayRef<TypeSourceInfo *> typeArgs,
+                                  SourceRange typeArgsRange,
+                                  bool failOnError = false) {
+  // We can only apply type arguments to an Objective-C class type.
+  const auto *objcObjectType = type->getAs<ObjCObjectType>();
+  if (!objcObjectType || !objcObjectType->getInterface()) {
+    S.Diag(loc, diag::err_objc_type_args_non_class)
+      << type
+      << typeArgsRange;
+
+    if (failOnError)
+      return QualType();
+    return type;
+  }
+
+  // The class type must be parameterized.
+  ObjCInterfaceDecl *objcClass = objcObjectType->getInterface();
+  ObjCTypeParamList *typeParams = objcClass->getTypeParamList();
+  if (!typeParams) {
+    S.Diag(loc, diag::err_objc_type_args_non_parameterized_class)
+      << objcClass->getDeclName()
+      << FixItHint::CreateRemoval(typeArgsRange);
+
+    if (failOnError)
+      return QualType();
+
+    return type;
+  }
+
+  // The type must not already be specialized.
+  if (objcObjectType->isSpecialized()) {
+    S.Diag(loc, diag::err_objc_type_args_specialized_class)
+      << type
+      << FixItHint::CreateRemoval(typeArgsRange);
+
+    if (failOnError)
+      return QualType();
+
+    return type;
+  }
+
+  // Check the type arguments.
+  SmallVector<QualType, 4> finalTypeArgs;
+  unsigned numTypeParams = typeParams->size();
+  bool anyPackExpansions = false;
+  for (unsigned i = 0, n = typeArgs.size(); i != n; ++i) {
+    TypeSourceInfo *typeArgInfo = typeArgs[i];
+    QualType typeArg = typeArgInfo->getType();
+
+    // Type arguments cannot have explicit qualifiers or nullability.
+    // We ignore indirect sources of these, e.g. behind typedefs or
+    // template arguments.
+    if (TypeLoc qual = typeArgInfo->getTypeLoc().findExplicitQualifierLoc()) {
+      bool diagnosed = false;
+      SourceRange rangeToRemove;
+      if (auto attr = qual.getAs<AttributedTypeLoc>()) {
+        rangeToRemove = attr.getLocalSourceRange();
+        if (attr.getTypePtr()->getImmediateNullability()) {
+          typeArg = attr.getTypePtr()->getModifiedType();
+          S.Diag(attr.getBeginLoc(),
+                 diag::err_objc_type_arg_explicit_nullability)
+              << typeArg << FixItHint::CreateRemoval(rangeToRemove);
+          diagnosed = true;
+        }
+      }
+
+      if (!diagnosed) {
+        S.Diag(qual.getBeginLoc(), diag::err_objc_type_arg_qualified)
+            << typeArg << typeArg.getQualifiers().getAsString()
+            << FixItHint::CreateRemoval(rangeToRemove);
+      }
+    }
+
+    // Remove qualifiers even if they're non-local.
+    typeArg = typeArg.getUnqualifiedType();
+
+    finalTypeArgs.push_back(typeArg);
+
+    if (typeArg->getAs<PackExpansionType>())
+      anyPackExpansions = true;
+
+    // Find the corresponding type parameter, if there is one.
+    ObjCTypeParamDecl *typeParam = nullptr;
+    if (!anyPackExpansions) {
+      if (i < numTypeParams) {
+        typeParam = typeParams->begin()[i];
+      } else {
+        // Too many arguments.
+        S.Diag(loc, diag::err_objc_type_args_wrong_arity)
+          << false
+          << objcClass->getDeclName()
+          << (unsigned)typeArgs.size()
+          << numTypeParams;
+        S.Diag(objcClass->getLocation(), diag::note_previous_decl)
+          << objcClass;
+
+        if (failOnError)
+          return QualType();
+
+        return type;
+      }
+    }
+
+    // Objective-C object pointer types must be substitutable for the bounds.
+    if (const auto *typeArgObjC = typeArg->getAs<ObjCObjectPointerType>()) {
+      // If we don't have a type parameter to match against, assume
+      // everything is fine. There was a prior pack expansion that
+      // means we won't be able to match anything.
+      if (!typeParam) {
+        assert(anyPackExpansions && "Too many arguments?");
+        continue;
+      }
+
+      // Retrieve the bound.
+      QualType bound = typeParam->getUnderlyingType();
+      const auto *boundObjC = bound->getAs<ObjCObjectPointerType>();
+
+      // Determine whether the type argument is substitutable for the bound.
+      if (typeArgObjC->isObjCIdType()) {
+        // When the type argument is 'id', the only acceptable type
+        // parameter bound is 'id'.
+        if (boundObjC->isObjCIdType())
+          continue;
+      } else if (S.Context.canAssignObjCInterfaces(boundObjC, typeArgObjC)) {
+        // Otherwise, we follow the assignability rules.
+        continue;
+      }
+
+      // Diagnose the mismatch.
+      S.Diag(typeArgInfo->getTypeLoc().getBeginLoc(),
+             diag::err_objc_type_arg_does_not_match_bound)
+          << typeArg << bound << typeParam->getDeclName();
+      S.Diag(typeParam->getLocation(), diag::note_objc_type_param_here)
+        << typeParam->getDeclName();
+
+      if (failOnError)
+        return QualType();
+
+      return type;
+    }
+
+    // Block pointer types are permitted for unqualified 'id' bounds.
+    if (typeArg->isBlockPointerType()) {
+      // If we don't have a type parameter to match against, assume
+      // everything is fine. There was a prior pack expansion that
+      // means we won't be able to match anything.
+      if (!typeParam) {
+        assert(anyPackExpansions && "Too many arguments?");
+        continue;
+      }
+
+      // Retrieve the bound.
+      QualType bound = typeParam->getUnderlyingType();
+      if (bound->isBlockCompatibleObjCPointerType(S.Context))
+        continue;
+
+      // Diagnose the mismatch.
+      S.Diag(typeArgInfo->getTypeLoc().getBeginLoc(),
+             diag::err_objc_type_arg_does_not_match_bound)
+          << typeArg << bound << typeParam->getDeclName();
+      S.Diag(typeParam->getLocation(), diag::note_objc_type_param_here)
+        << typeParam->getDeclName();
+
+      if (failOnError)
+        return QualType();
+
+      return type;
+    }
+
+    // Dependent types will be checked at instantiation time.
+    if (typeArg->isDependentType()) {
+      continue;
+    }
+
+    // Diagnose non-id-compatible type arguments.
+    S.Diag(typeArgInfo->getTypeLoc().getBeginLoc(),
+           diag::err_objc_type_arg_not_id_compatible)
+        << typeArg << typeArgInfo->getTypeLoc().getSourceRange();
+
+    if (failOnError)
+      return QualType();
+
+    return type;
+  }
+
+  // Make sure we didn't have the wrong number of arguments.
+  if (!anyPackExpansions && finalTypeArgs.size() != numTypeParams) {
+    S.Diag(loc, diag::err_objc_type_args_wrong_arity)
+      << (typeArgs.size() < typeParams->size())
+      << objcClass->getDeclName()
+      << (unsigned)finalTypeArgs.size()
+      << (unsigned)numTypeParams;
+    S.Diag(objcClass->getLocation(), diag::note_previous_decl)
+      << objcClass;
+
+    if (failOnError)
+      return QualType();
+
+    return type;
+  }
+
+  // Success. Form the specialized type.
+  return S.Context.getObjCObjectType(type, finalTypeArgs, { }, false);
+}
+
+QualType Sema::BuildObjCTypeParamType(const ObjCTypeParamDecl *Decl,
+                                      SourceLocation ProtocolLAngleLoc,
+                                      ArrayRef<ObjCProtocolDecl *> Protocols,
+                                      ArrayRef<SourceLocation> ProtocolLocs,
+                                      SourceLocation ProtocolRAngleLoc,
+                                      bool FailOnError) {
+  QualType Result = QualType(Decl->getTypeForDecl(), 0);
+  if (!Protocols.empty()) {
+    bool HasError;
+    Result = Context.applyObjCProtocolQualifiers(Result, Protocols,
+                                                 HasError);
+    if (HasError) {
+      Diag(SourceLocation(), diag::err_invalid_protocol_qualifiers)
+        << SourceRange(ProtocolLAngleLoc, ProtocolRAngleLoc);
+      if (FailOnError) Result = QualType();
+    }
+    if (FailOnError && Result.isNull())
+      return QualType();
+  }
+
+  return Result;
+}
+
+QualType Sema::BuildObjCObjectType(QualType BaseType,
+                                   SourceLocation Loc,
+                                   SourceLocation TypeArgsLAngleLoc,
+                                   ArrayRef<TypeSourceInfo *> TypeArgs,
+                                   SourceLocation TypeArgsRAngleLoc,
+                                   SourceLocation ProtocolLAngleLoc,
+                                   ArrayRef<ObjCProtocolDecl *> Protocols,
+                                   ArrayRef<SourceLocation> ProtocolLocs,
+                                   SourceLocation ProtocolRAngleLoc,
+                                   bool FailOnError) {
+  QualType Result = BaseType;
+  if (!TypeArgs.empty()) {
+    Result = applyObjCTypeArgs(*this, Loc, Result, TypeArgs,
+                               SourceRange(TypeArgsLAngleLoc,
+                                           TypeArgsRAngleLoc),
+                               FailOnError);
+    if (FailOnError && Result.isNull())
+      return QualType();
+  }
+
+  if (!Protocols.empty()) {
+    bool HasError;
+    Result = Context.applyObjCProtocolQualifiers(Result, Protocols,
+                                                 HasError);
+    if (HasError) {
+      Diag(Loc, diag::err_invalid_protocol_qualifiers)
+        << SourceRange(ProtocolLAngleLoc, ProtocolRAngleLoc);
+      if (FailOnError) Result = QualType();
+    }
+    if (FailOnError && Result.isNull())
+      return QualType();
+  }
+
+  return Result;
+}
+
+TypeResult Sema::actOnObjCProtocolQualifierType(
+             SourceLocation lAngleLoc,
+             ArrayRef<Decl *> protocols,
+             ArrayRef<SourceLocation> protocolLocs,
+             SourceLocation rAngleLoc) {
+  // Form id<protocol-list>.
+  QualType Result = Context.getObjCObjectType(
+                      Context.ObjCBuiltinIdTy, { },
+                      llvm::makeArrayRef(
+                        (ObjCProtocolDecl * const *)protocols.data(),
+                        protocols.size()),
+                      false);
+  Result = Context.getObjCObjectPointerType(Result);
+
+  TypeSourceInfo *ResultTInfo = Context.CreateTypeSourceInfo(Result);
+  TypeLoc ResultTL = ResultTInfo->getTypeLoc();
+
+  auto ObjCObjectPointerTL = ResultTL.castAs<ObjCObjectPointerTypeLoc>();
+  ObjCObjectPointerTL.setStarLoc(SourceLocation()); // implicit
+
+  auto ObjCObjectTL = ObjCObjectPointerTL.getPointeeLoc()
+                        .castAs<ObjCObjectTypeLoc>();
+  ObjCObjectTL.setHasBaseTypeAsWritten(false);
+  ObjCObjectTL.getBaseLoc().initialize(Context, SourceLocation());
+
+  // No type arguments.
+  ObjCObjectTL.setTypeArgsLAngleLoc(SourceLocation());
+  ObjCObjectTL.setTypeArgsRAngleLoc(SourceLocation());
+
+  // Fill in protocol qualifiers.
+  ObjCObjectTL.setProtocolLAngleLoc(lAngleLoc);
+  ObjCObjectTL.setProtocolRAngleLoc(rAngleLoc);
+  for (unsigned i = 0, n = protocols.size(); i != n; ++i)
+    ObjCObjectTL.setProtocolLoc(i, protocolLocs[i]);
+
+  // We're done. Return the completed type to the parser.
+  return CreateParsedType(Result, ResultTInfo);
+}
+
+TypeResult Sema::actOnObjCTypeArgsAndProtocolQualifiers(
+             Scope *S,
+             SourceLocation Loc,
+             ParsedType BaseType,
+             SourceLocation TypeArgsLAngleLoc,
+             ArrayRef<ParsedType> TypeArgs,
+             SourceLocation TypeArgsRAngleLoc,
+             SourceLocation ProtocolLAngleLoc,
+             ArrayRef<Decl *> Protocols,
+             ArrayRef<SourceLocation> ProtocolLocs,
+             SourceLocation ProtocolRAngleLoc) {
+  TypeSourceInfo *BaseTypeInfo = nullptr;
+  QualType T = GetTypeFromParser(BaseType, &BaseTypeInfo);
+  if (T.isNull())
+    return true;
+
+  // Handle missing type-source info.
+  if (!BaseTypeInfo)
+    BaseTypeInfo = Context.getTrivialTypeSourceInfo(T, Loc);
+
+  // Extract type arguments.
+  SmallVector<TypeSourceInfo *, 4> ActualTypeArgInfos;
+  for (unsigned i = 0, n = TypeArgs.size(); i != n; ++i) {
+    TypeSourceInfo *TypeArgInfo = nullptr;
+    QualType TypeArg = GetTypeFromParser(TypeArgs[i], &TypeArgInfo);
+    if (TypeArg.isNull()) {
+      ActualTypeArgInfos.clear();
+      break;
+    }
+
+    assert(TypeArgInfo && "No type source info?");
+    ActualTypeArgInfos.push_back(TypeArgInfo);
+  }
+
+  // Build the object type.
+  QualType Result = BuildObjCObjectType(
+      T, BaseTypeInfo->getTypeLoc().getSourceRange().getBegin(),
+      TypeArgsLAngleLoc, ActualTypeArgInfos, TypeArgsRAngleLoc,
+      ProtocolLAngleLoc,
+      llvm::makeArrayRef((ObjCProtocolDecl * const *)Protocols.data(),
+                         Protocols.size()),
+      ProtocolLocs, ProtocolRAngleLoc,
+      /*FailOnError=*/false);
+
+  if (Result == T)
+    return BaseType;
+
+  // Create source information for this type.
+  TypeSourceInfo *ResultTInfo = Context.CreateTypeSourceInfo(Result);
+  TypeLoc ResultTL = ResultTInfo->getTypeLoc();
+
+  // For id<Proto1, Proto2> or Class<Proto1, Proto2>, we'll have an
+  // object pointer type. Fill in source information for it.
+  if (auto ObjCObjectPointerTL = ResultTL.getAs<ObjCObjectPointerTypeLoc>()) {
+    // The '*' is implicit.
+    ObjCObjectPointerTL.setStarLoc(SourceLocation());
+    ResultTL = ObjCObjectPointerTL.getPointeeLoc();
+  }
+
+  if (auto OTPTL = ResultTL.getAs<ObjCTypeParamTypeLoc>()) {
+    // Protocol qualifier information.
+    if (OTPTL.getNumProtocols() > 0) {
+      assert(OTPTL.getNumProtocols() == Protocols.size());
+      OTPTL.setProtocolLAngleLoc(ProtocolLAngleLoc);
+      OTPTL.setProtocolRAngleLoc(ProtocolRAngleLoc);
+      for (unsigned i = 0, n = Protocols.size(); i != n; ++i)
+        OTPTL.setProtocolLoc(i, ProtocolLocs[i]);
+    }
+
+    // We're done. Return the completed type to the parser.
+    return CreateParsedType(Result, ResultTInfo);
+  }
+
+  auto ObjCObjectTL = ResultTL.castAs<ObjCObjectTypeLoc>();
+
+  // Type argument information.
+  if (ObjCObjectTL.getNumTypeArgs() > 0) {
+    assert(ObjCObjectTL.getNumTypeArgs() == ActualTypeArgInfos.size());
+    ObjCObjectTL.setTypeArgsLAngleLoc(TypeArgsLAngleLoc);
+    ObjCObjectTL.setTypeArgsRAngleLoc(TypeArgsRAngleLoc);
+    for (unsigned i = 0, n = ActualTypeArgInfos.size(); i != n; ++i)
+      ObjCObjectTL.setTypeArgTInfo(i, ActualTypeArgInfos[i]);
+  } else {
+    ObjCObjectTL.setTypeArgsLAngleLoc(SourceLocation());
+    ObjCObjectTL.setTypeArgsRAngleLoc(SourceLocation());
+  }
+
+  // Protocol qualifier information.
+  if (ObjCObjectTL.getNumProtocols() > 0) {
+    assert(ObjCObjectTL.getNumProtocols() == Protocols.size());
+    ObjCObjectTL.setProtocolLAngleLoc(ProtocolLAngleLoc);
+    ObjCObjectTL.setProtocolRAngleLoc(ProtocolRAngleLoc);
+    for (unsigned i = 0, n = Protocols.size(); i != n; ++i)
+      ObjCObjectTL.setProtocolLoc(i, ProtocolLocs[i]);
+  } else {
+    ObjCObjectTL.setProtocolLAngleLoc(SourceLocation());
+    ObjCObjectTL.setProtocolRAngleLoc(SourceLocation());
+  }
+
+  // Base type.
+  ObjCObjectTL.setHasBaseTypeAsWritten(true);
+  if (ObjCObjectTL.getType() == T)
+    ObjCObjectTL.getBaseLoc().initializeFullCopy(BaseTypeInfo->getTypeLoc());
+  else
+    ObjCObjectTL.getBaseLoc().initialize(Context, Loc);
+
+  // We're done. Return the completed type to the parser.
+  return CreateParsedType(Result, ResultTInfo);
+}
+
+static OpenCLAccessAttr::Spelling
+getImageAccess(const ParsedAttributesView &Attrs) {
+  for (const ParsedAttr &AL : Attrs)
+    if (AL.getKind() == ParsedAttr::AT_OpenCLAccess)
+      return static_cast<OpenCLAccessAttr::Spelling>(AL.getSemanticSpelling());
+  return OpenCLAccessAttr::Keyword_read_only;
+}
+
+/// Convert the specified declspec to the appropriate type
 /// object.
 /// \param state Specifies the declarator containing the declaration specifier
 /// to be converted, along with other associated processing state.
@@ -701,10 +1268,10 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
 
   Sema &S = state.getSema();
   Declarator &declarator = state.getDeclarator();
-  const DeclSpec &DS = declarator.getDeclSpec();
+  DeclSpec &DS = declarator.getMutableDeclSpec();
   SourceLocation DeclLoc = declarator.getIdentifierLoc();
   if (DeclLoc.isInvalid())
-    DeclLoc = DS.getLocStart();
+    DeclLoc = DS.getBeginLoc();
 
   ASTContext &Context = S.Context;
 
@@ -714,64 +1281,61 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     Result = Context.VoidTy;
     break;
   case DeclSpec::TST_char:
-    if (DS.getTypeSpecSign() == DeclSpec::TSS_unspecified)
+    if (DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified)
       Result = Context.CharTy;
-    else if (DS.getTypeSpecSign() == DeclSpec::TSS_signed)
+    else if (DS.getTypeSpecSign() == TypeSpecifierSign::Signed)
       Result = Context.SignedCharTy;
     else {
-      assert(DS.getTypeSpecSign() == DeclSpec::TSS_unsigned &&
+      assert(DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned &&
              "Unknown TSS value");
       Result = Context.UnsignedCharTy;
     }
     break;
   case DeclSpec::TST_wchar:
-    if (DS.getTypeSpecSign() == DeclSpec::TSS_unspecified)
+    if (DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified)
       Result = Context.WCharTy;
-    else if (DS.getTypeSpecSign() == DeclSpec::TSS_signed) {
-      S.Diag(DS.getTypeSpecSignLoc(), diag::ext_invalid_sign_spec)
+    else if (DS.getTypeSpecSign() == TypeSpecifierSign::Signed) {
+      S.Diag(DS.getTypeSpecSignLoc(), diag::ext_wchar_t_sign_spec)
         << DS.getSpecifierName(DS.getTypeSpecType(),
                                Context.getPrintingPolicy());
       Result = Context.getSignedWCharType();
     } else {
-      assert(DS.getTypeSpecSign() == DeclSpec::TSS_unsigned &&
-        "Unknown TSS value");
-      S.Diag(DS.getTypeSpecSignLoc(), diag::ext_invalid_sign_spec)
+      assert(DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned &&
+             "Unknown TSS value");
+      S.Diag(DS.getTypeSpecSignLoc(), diag::ext_wchar_t_sign_spec)
         << DS.getSpecifierName(DS.getTypeSpecType(),
                                Context.getPrintingPolicy());
       Result = Context.getUnsignedWCharType();
     }
     break;
+  case DeclSpec::TST_char8:
+    assert(DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified &&
+           "Unknown TSS value");
+    Result = Context.Char8Ty;
+    break;
   case DeclSpec::TST_char16:
-      assert(DS.getTypeSpecSign() == DeclSpec::TSS_unspecified &&
-        "Unknown TSS value");
-      Result = Context.Char16Ty;
+    assert(DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified &&
+           "Unknown TSS value");
+    Result = Context.Char16Ty;
     break;
   case DeclSpec::TST_char32:
-      assert(DS.getTypeSpecSign() == DeclSpec::TSS_unspecified &&
-        "Unknown TSS value");
-      Result = Context.Char32Ty;
+    assert(DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified &&
+           "Unknown TSS value");
+    Result = Context.Char32Ty;
     break;
   case DeclSpec::TST_unspecified:
-    // "<proto1,proto2>" is an objc qualified ID with a missing id.
-    if (DeclSpec::ProtocolQualifierListTy PQ = DS.getProtocolQualifiers()) {
-      Result = Context.getObjCObjectType(Context.ObjCBuiltinIdTy,
-                                         (ObjCProtocolDecl*const*)PQ,
-                                         DS.getNumProtocolQualifiers());
-      Result = Context.getObjCObjectPointerType(Result);
-      break;
-    }
-
     // If this is a missing declspec in a block literal return context, then it
     // is inferred from the return statements inside the block.
     // The declspec is always missing in a lambda expr context; it is either
     // specified with a trailing return type or inferred.
     if (S.getLangOpts().CPlusPlus14 &&
-        declarator.getContext() == Declarator::LambdaExprContext) {
+        declarator.getContext() == DeclaratorContext::LambdaExpr) {
       // In C++1y, a lambda's implicit return type is 'auto'.
       Result = Context.getAutoDeductType();
       break;
-    } else if (declarator.getContext() == Declarator::LambdaExprContext ||
-               isOmittedBlockReturnType(declarator)) {
+    } else if (declarator.getContext() == DeclaratorContext::LambdaExpr ||
+               checkOmittedBlockReturnType(S, declarator,
+                                           Context.DependentTy)) {
       Result = Context.DependentTy;
       break;
     }
@@ -788,15 +1352,15 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
       // when one is not allowed.
       if (DS.isEmpty()) {
         S.Diag(DeclLoc, diag::ext_missing_declspec)
-          << DS.getSourceRange()
-        << FixItHint::CreateInsertion(DS.getLocStart(), "int");
+            << DS.getSourceRange()
+            << FixItHint::CreateInsertion(DS.getBeginLoc(), "int");
       }
     } else if (!DS.hasTypeSpecifier()) {
       // C99 and C++ require a type specifier.  For example, C99 6.7.2p2 says:
       // "At least one type specifier shall be given in the declaration
       // specifiers in each declaration, and in the specifier-qualifier list in
       // each struct declaration and type name."
-      if (S.getLangOpts().CPlusPlus) {
+      if (S.getLangOpts().CPlusPlus && !DS.isTypeSpecPipe()) {
         S.Diag(DeclLoc, diag::err_missing_type_specifier)
           << DS.getSourceRange();
 
@@ -804,20 +1368,32 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
         // value being declared, poison it as invalid so we don't get chains of
         // errors.
         declarator.setInvalidType(true);
+      } else if ((S.getLangOpts().OpenCLVersion >= 200 ||
+                  S.getLangOpts().OpenCLCPlusPlus) &&
+                 DS.isTypeSpecPipe()) {
+        S.Diag(DeclLoc, diag::err_missing_actual_pipe_type)
+          << DS.getSourceRange();
+        declarator.setInvalidType(true);
       } else {
         S.Diag(DeclLoc, diag::ext_missing_type_specifier)
           << DS.getSourceRange();
       }
     }
 
-    // FALL THROUGH.
+    LLVM_FALLTHROUGH;
   case DeclSpec::TST_int: {
-    if (DS.getTypeSpecSign() != DeclSpec::TSS_unsigned) {
+    if (DS.getTypeSpecSign() != TypeSpecifierSign::Unsigned) {
       switch (DS.getTypeSpecWidth()) {
-      case DeclSpec::TSW_unspecified: Result = Context.IntTy; break;
-      case DeclSpec::TSW_short:       Result = Context.ShortTy; break;
-      case DeclSpec::TSW_long:        Result = Context.LongTy; break;
-      case DeclSpec::TSW_longlong:
+      case TypeSpecifierWidth::Unspecified:
+        Result = Context.IntTy;
+        break;
+      case TypeSpecifierWidth::Short:
+        Result = Context.ShortTy;
+        break;
+      case TypeSpecifierWidth::Long:
+        Result = Context.LongTy;
+        break;
+      case TypeSpecifierWidth::LongLong:
         Result = Context.LongLongTy;
 
         // 'long long' is a C99 or C++11 feature.
@@ -833,10 +1409,16 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
       }
     } else {
       switch (DS.getTypeSpecWidth()) {
-      case DeclSpec::TSW_unspecified: Result = Context.UnsignedIntTy; break;
-      case DeclSpec::TSW_short:       Result = Context.UnsignedShortTy; break;
-      case DeclSpec::TSW_long:        Result = Context.UnsignedLongTy; break;
-      case DeclSpec::TSW_longlong:
+      case TypeSpecifierWidth::Unspecified:
+        Result = Context.UnsignedIntTy;
+        break;
+      case TypeSpecifierWidth::Short:
+        Result = Context.UnsignedShortTy;
+        break;
+      case TypeSpecifierWidth::Long:
+        Result = Context.UnsignedLongTy;
+        break;
+      case TypeSpecifierWidth::LongLong:
         Result = Context.UnsignedLongLongTy;
 
         // 'long long' is a C99 or C++11 feature.
@@ -853,28 +1435,119 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     }
     break;
   }
+  case DeclSpec::TST_extint: {
+    if (!S.Context.getTargetInfo().hasExtIntType())
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_unsupported)
+        << "_ExtInt";
+    Result =
+        S.BuildExtIntType(DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned,
+                          DS.getRepAsExpr(), DS.getBeginLoc());
+    if (Result.isNull()) {
+      Result = Context.IntTy;
+      declarator.setInvalidType(true);
+    }
+    break;
+  }
+  case DeclSpec::TST_accum: {
+    switch (DS.getTypeSpecWidth()) {
+    case TypeSpecifierWidth::Short:
+      Result = Context.ShortAccumTy;
+      break;
+    case TypeSpecifierWidth::Unspecified:
+      Result = Context.AccumTy;
+      break;
+    case TypeSpecifierWidth::Long:
+      Result = Context.LongAccumTy;
+      break;
+    case TypeSpecifierWidth::LongLong:
+      llvm_unreachable("Unable to specify long long as _Accum width");
+    }
+
+    if (DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned)
+      Result = Context.getCorrespondingUnsignedType(Result);
+
+    if (DS.isTypeSpecSat())
+      Result = Context.getCorrespondingSaturatedType(Result);
+
+    break;
+  }
+  case DeclSpec::TST_fract: {
+    switch (DS.getTypeSpecWidth()) {
+    case TypeSpecifierWidth::Short:
+      Result = Context.ShortFractTy;
+      break;
+    case TypeSpecifierWidth::Unspecified:
+      Result = Context.FractTy;
+      break;
+    case TypeSpecifierWidth::Long:
+      Result = Context.LongFractTy;
+      break;
+    case TypeSpecifierWidth::LongLong:
+      llvm_unreachable("Unable to specify long long as _Fract width");
+    }
+
+    if (DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned)
+      Result = Context.getCorrespondingUnsignedType(Result);
+
+    if (DS.isTypeSpecSat())
+      Result = Context.getCorrespondingSaturatedType(Result);
+
+    break;
+  }
   case DeclSpec::TST_int128:
-    if (!S.Context.getTargetInfo().hasInt128Type())
-      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_int128_unsupported);
-    if (DS.getTypeSpecSign() == DeclSpec::TSS_unsigned)
+    if (!S.Context.getTargetInfo().hasInt128Type() &&
+        !S.getLangOpts().SYCLIsDevice &&
+        !(S.getLangOpts().OpenMP && S.getLangOpts().OpenMPIsDevice))
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_unsupported)
+        << "__int128";
+    if (DS.getTypeSpecSign() == TypeSpecifierSign::Unsigned)
       Result = Context.UnsignedInt128Ty;
     else
       Result = Context.Int128Ty;
     break;
-  case DeclSpec::TST_half: Result = Context.HalfTy; break;
-  case DeclSpec::TST_float: Result = Context.FloatTy; break;
+  case DeclSpec::TST_float16:
+    // CUDA host and device may have different _Float16 support, therefore
+    // do not diagnose _Float16 usage to avoid false alarm.
+    // ToDo: more precise diagnostics for CUDA.
+    if (!S.Context.getTargetInfo().hasFloat16Type() && !S.getLangOpts().CUDA &&
+        !(S.getLangOpts().OpenMP && S.getLangOpts().OpenMPIsDevice))
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_unsupported)
+        << "_Float16";
+    Result = Context.Float16Ty;
+    break;
+  case DeclSpec::TST_half:    Result = Context.HalfTy; break;
+  case DeclSpec::TST_BFloat16:
+    if (!S.Context.getTargetInfo().hasBFloat16Type())
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_unsupported)
+        << "__bf16";
+    Result = Context.BFloat16Ty;
+    break;
+  case DeclSpec::TST_float:   Result = Context.FloatTy; break;
   case DeclSpec::TST_double:
-    if (DS.getTypeSpecWidth() == DeclSpec::TSW_long)
+    if (S.getLangOpts().OpenCL) {
+      if (!S.getOpenCLOptions().isSupported("cl_khr_fp64", S.getLangOpts()))
+        S.Diag(DS.getTypeSpecTypeLoc(),
+               diag::err_opencl_double_requires_extension)
+            << (S.getLangOpts().OpenCLVersion >= 300);
+      else if (!S.getOpenCLOptions().isAvailableOption("cl_khr_fp64", S.getLangOpts()))
+        S.Diag(DS.getTypeSpecTypeLoc(), diag::ext_opencl_double_without_pragma);
+    }
+    if (DS.getTypeSpecWidth() == TypeSpecifierWidth::Long)
       Result = Context.LongDoubleTy;
     else
       Result = Context.DoubleTy;
-
-    if (S.getLangOpts().OpenCL && !S.getOpenCLOptions().cl_khr_fp64) {
-      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_double_requires_fp64);
-      declarator.setInvalidType(true);
-    }
     break;
-  case DeclSpec::TST_bool: Result = Context.BoolTy; break; // _Bool or bool
+  case DeclSpec::TST_float128:
+    if (!S.Context.getTargetInfo().hasFloat128Type() &&
+        !S.getLangOpts().SYCLIsDevice &&
+        !(S.getLangOpts().OpenMP && S.getLangOpts().OpenMPIsDevice))
+      S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_unsupported)
+        << "__float128";
+    Result = Context.Float128Ty;
+    break;
+  case DeclSpec::TST_bool:
+    Result = Context.BoolTy; // _Bool or bool
+    break;
   case DeclSpec::TST_decimal32:    // _Decimal32
   case DeclSpec::TST_decimal64:    // _Decimal64
   case DeclSpec::TST_decimal128:   // _Decimal128
@@ -887,7 +1560,7 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
   case DeclSpec::TST_union:
   case DeclSpec::TST_struct:
   case DeclSpec::TST_interface: {
-    TypeDecl *D = dyn_cast_or_null<TypeDecl>(DS.getRepAsDecl());
+    TagDecl *D = dyn_cast_or_null<TagDecl>(DS.getRepAsDecl());
     if (!D) {
       // This can happen in C++ with ambiguous lookups.
       Result = Context.IntTy;
@@ -898,8 +1571,10 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     // If the type is deprecated or unavailable, diagnose it.
     S.DiagnoseUseOfDecl(D, DS.getTypeSpecTypeNameLoc());
 
-    assert(DS.getTypeSpecWidth() == 0 && DS.getTypeSpecComplex() == 0 &&
-           DS.getTypeSpecSign() == 0 && "No qualifiers on tag names!");
+    assert(DS.getTypeSpecWidth() == TypeSpecifierWidth::Unspecified &&
+           DS.getTypeSpecComplex() == 0 &&
+           DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified &&
+           "No qualifiers on tag names!");
 
     // TypeQuals handled by caller.
     Result = Context.getTypeDeclType(D);
@@ -907,45 +1582,18 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     // In both C and C++, make an ElaboratedType.
     ElaboratedTypeKeyword Keyword
       = ElaboratedType::getKeywordForTypeSpec(DS.getTypeSpecType());
-    Result = S.getElaboratedType(Keyword, DS.getTypeSpecScope(), Result);
+    Result = S.getElaboratedType(Keyword, DS.getTypeSpecScope(), Result,
+                                 DS.isTypeSpecOwned() ? D : nullptr);
     break;
   }
   case DeclSpec::TST_typename: {
-    assert(DS.getTypeSpecWidth() == 0 && DS.getTypeSpecComplex() == 0 &&
-           DS.getTypeSpecSign() == 0 &&
+    assert(DS.getTypeSpecWidth() == TypeSpecifierWidth::Unspecified &&
+           DS.getTypeSpecComplex() == 0 &&
+           DS.getTypeSpecSign() == TypeSpecifierSign::Unspecified &&
            "Can't handle qualifiers on typedef names yet!");
     Result = S.GetTypeFromParser(DS.getRepAsType());
-    if (Result.isNull())
+    if (Result.isNull()) {
       declarator.setInvalidType(true);
-    else if (DeclSpec::ProtocolQualifierListTy PQ
-               = DS.getProtocolQualifiers()) {
-      if (const ObjCObjectType *ObjT = Result->getAs<ObjCObjectType>()) {
-        // Silently drop any existing protocol qualifiers.
-        // TODO: determine whether that's the right thing to do.
-        if (ObjT->getNumProtocols())
-          Result = ObjT->getBaseType();
-
-        if (DS.getNumProtocolQualifiers())
-          Result = Context.getObjCObjectType(Result,
-                                             (ObjCProtocolDecl*const*) PQ,
-                                             DS.getNumProtocolQualifiers());
-      } else if (Result->isObjCIdType()) {
-        // id<protocol-list>
-        Result = Context.getObjCObjectType(Context.ObjCBuiltinIdTy,
-                                           (ObjCProtocolDecl*const*) PQ,
-                                           DS.getNumProtocolQualifiers());
-        Result = Context.getObjCObjectPointerType(Result);
-      } else if (Result->isObjCClassType()) {
-        // Class<protocol-list>
-        Result = Context.getObjCObjectType(Context.ObjCBuiltinClassTy,
-                                           (ObjCProtocolDecl*const*) PQ,
-                                           DS.getNumProtocolQualifiers());
-        Result = Context.getObjCObjectPointerType(Result);
-      } else {
-        S.Diag(DeclLoc, diag::err_invalid_protocol_qualifiers)
-          << DS.getSourceRange();
-        declarator.setInvalidType(true);
-      }
     }
 
     // TypeQuals handled by caller.
@@ -996,46 +1644,37 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     break;
 
   case DeclSpec::TST_auto:
-    // TypeQuals handled by caller.
-    // If auto is mentioned in a lambda parameter context, convert it to a 
-    // template parameter type immediately, with the appropriate depth and 
-    // index, and update sema's state (LambdaScopeInfo) for the current lambda 
-    // being analyzed (which tracks the invented type template parameter).
-    if (declarator.getContext() == Declarator::LambdaExprParameterContext) {
-      sema::LambdaScopeInfo *LSI = S.getCurLambda();
-      assert(LSI && "No LambdaScopeInfo on the stack!");
-      const unsigned TemplateParameterDepth = LSI->AutoTemplateParameterDepth;
-      const unsigned AutoParameterPosition = LSI->AutoTemplateParams.size();
-      const bool IsParameterPack = declarator.hasEllipsis();
+  case DeclSpec::TST_decltype_auto: {
+    auto AutoKW = DS.getTypeSpecType() == DeclSpec::TST_decltype_auto
+                      ? AutoTypeKeyword::DecltypeAuto
+                      : AutoTypeKeyword::Auto;
 
-      // Turns out we must create the TemplateTypeParmDecl here to 
-      // retrieve the corresponding template parameter type. 
-      TemplateTypeParmDecl *CorrespondingTemplateParam =
-        TemplateTypeParmDecl::Create(Context, 
-        // Temporarily add to the TranslationUnit DeclContext.  When the 
-        // associated TemplateParameterList is attached to a template
-        // declaration (such as FunctionTemplateDecl), the DeclContext 
-        // for each template parameter gets updated appropriately via
-        // a call to AdoptTemplateParameterList. 
-        Context.getTranslationUnitDecl(), 
-        /*KeyLoc*/ SourceLocation(), 
-        /*NameLoc*/ declarator.getLocStart(),  
-        TemplateParameterDepth, 
-        AutoParameterPosition,  // our template param index 
-        /* Identifier*/ nullptr, false, IsParameterPack);
-      LSI->AutoTemplateParams.push_back(CorrespondingTemplateParam);
-      // Replace the 'auto' in the function parameter with this invented 
-      // template type parameter.
-      Result = QualType(CorrespondingTemplateParam->getTypeForDecl(), 0);
-    } else {
-      Result = Context.getAutoType(QualType(), /*decltype(auto)*/false, false);
+    ConceptDecl *TypeConstraintConcept = nullptr;
+    llvm::SmallVector<TemplateArgument, 8> TemplateArgs;
+    if (DS.isConstrainedAuto()) {
+      if (TemplateIdAnnotation *TemplateId = DS.getRepAsTemplateId()) {
+        TypeConstraintConcept =
+            cast<ConceptDecl>(TemplateId->Template.get().getAsTemplateDecl());
+        TemplateArgumentListInfo TemplateArgsInfo;
+        TemplateArgsInfo.setLAngleLoc(TemplateId->LAngleLoc);
+        TemplateArgsInfo.setRAngleLoc(TemplateId->RAngleLoc);
+        ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
+                                           TemplateId->NumArgs);
+        S.translateTemplateArguments(TemplateArgsPtr, TemplateArgsInfo);
+        for (const auto &ArgLoc : TemplateArgsInfo.arguments())
+          TemplateArgs.push_back(ArgLoc.getArgument());
+      } else {
+        declarator.setInvalidType(true);
+      }
     }
+    Result = S.Context.getAutoType(QualType(), AutoKW,
+                                   /*IsDependent*/ false, /*IsPack=*/false,
+                                   TypeConstraintConcept, TemplateArgs);
     break;
+  }
 
-  case DeclSpec::TST_decltype_auto:
-    Result = Context.getAutoType(QualType(), 
-                                 /*decltype(auto)*/true, 
-                                 /*IsDependent*/   false);
+  case DeclSpec::TST_auto_type:
+    Result = Context.getAutoType(QualType(), AutoTypeKeyword::GNUAutoType, false);
     break;
 
   case DeclSpec::TST_unknown_anytype:
@@ -1052,11 +1691,51 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     }
     break;
 
+#define GENERIC_IMAGE_TYPE(ImgType, Id)                                        \
+  case DeclSpec::TST_##ImgType##_t:                                            \
+    switch (getImageAccess(DS.getAttributes())) {                              \
+    case OpenCLAccessAttr::Keyword_write_only:                                 \
+      Result = Context.Id##WOTy;                                               \
+      break;                                                                   \
+    case OpenCLAccessAttr::Keyword_read_write:                                 \
+      Result = Context.Id##RWTy;                                               \
+      break;                                                                   \
+    case OpenCLAccessAttr::Keyword_read_only:                                  \
+      Result = Context.Id##ROTy;                                               \
+      break;                                                                   \
+    case OpenCLAccessAttr::SpellingNotCalculated:                              \
+      llvm_unreachable("Spelling not yet calculated");                         \
+    }                                                                          \
+    break;
+#include "clang/Basic/OpenCLImageTypes.def"
+
   case DeclSpec::TST_error:
     Result = Context.IntTy;
     declarator.setInvalidType(true);
     break;
   }
+
+  // FIXME: we want resulting declarations to be marked invalid, but claiming
+  // the type is invalid is too strong - e.g. it causes ActOnTypeName to return
+  // a null type.
+  if (Result->containsErrors())
+    declarator.setInvalidType();
+
+  if (S.getLangOpts().OpenCL && Result->isOCLImage3dWOType() &&
+      !S.getOpenCLOptions().isSupported("cl_khr_3d_image_writes", S.getLangOpts())) {
+        S.Diag(DS.getTypeSpecTypeLoc(), diag::err_opencl_requires_extension)
+        << 0 << Result << "cl_khr_3d_image_writes";
+        declarator.setInvalidType();
+  }
+
+  bool IsFixedPointType = DS.getTypeSpecType() == DeclSpec::TST_accum ||
+                          DS.getTypeSpecType() == DeclSpec::TST_fract;
+
+  // Only fixed point types can be saturated
+  if (DS.isTypeSpecSat() && !IsFixedPointType)
+    S.Diag(DS.getTypeSpecSatLoc(), diag::err_invalid_saturation_spec)
+        << DS.getSpecifierName(DS.getTypeSpecType(),
+                               Context.getPrintingPolicy());
 
   // Handle complex types.
   if (DS.getTypeSpecComplex() == DeclSpec::TSC_complex) {
@@ -1080,35 +1759,34 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
 
   // Before we process any type attributes, synthesize a block literal
   // function declarator if necessary.
-  if (declarator.getContext() == Declarator::BlockLiteralContext)
+  if (declarator.getContext() == DeclaratorContext::BlockLiteral)
     maybeSynthesizeBlockSignature(state, Result);
 
   // Apply any type attributes from the decl spec.  This may cause the
   // list of type attributes to be temporarily saved while the type
   // attributes are pushed around.
-  if (AttributeList *attrs = DS.getAttributes().getList())
-    processTypeAttrs(state, Result, TAL_DeclSpec, attrs);
+  // pipe attributes will be handled later ( at GetFullTypeForDeclarator )
+  if (!DS.isTypeSpecPipe())
+    processTypeAttrs(state, Result, TAL_DeclSpec, DS.getAttributes());
 
   // Apply const/volatile/restrict qualifiers to T.
   if (unsigned TypeQuals = DS.getTypeQualifiers()) {
-
-    // Warn about CV qualifiers on functions: C99 6.7.3p8: "If the specification
-    // of a function type includes any type qualifiers, the behavior is
-    // undefined."
-    if (Result->isFunctionType() && TypeQuals) {
-      if (TypeQuals & DeclSpec::TQ_const)
-        S.Diag(DS.getConstSpecLoc(), diag::warn_typecheck_function_qualifiers)
-          << Result << DS.getSourceRange();
-      else if (TypeQuals & DeclSpec::TQ_volatile)
-        S.Diag(DS.getVolatileSpecLoc(),
-               diag::warn_typecheck_function_qualifiers)
-            << Result << DS.getSourceRange();
-      else {
-        assert((TypeQuals & (DeclSpec::TQ_restrict | DeclSpec::TQ_atomic)) &&
-               "Has CVRA quals but not C, V, R, or A?");
-        // No diagnostic; we'll diagnose 'restrict' or '_Atomic' applied to a
-        // function type later, in BuildQualifiedType.
-      }
+    // Warn about CV qualifiers on function types.
+    // C99 6.7.3p8:
+    //   If the specification of a function type includes any type qualifiers,
+    //   the behavior is undefined.
+    // C++11 [dcl.fct]p7:
+    //   The effect of a cv-qualifier-seq in a function declarator is not the
+    //   same as adding cv-qualification on top of the function type. In the
+    //   latter case, the cv-qualifiers are ignored.
+    if (Result->isFunctionType()) {
+      diagnoseAndRemoveTypeQualifiers(
+          S, DS, TypeQuals, Result, DeclSpec::TQ_const | DeclSpec::TQ_volatile,
+          S.getLangOpts().CPlusPlus
+              ? diag::warn_typecheck_function_qualifiers_ignored
+              : diag::warn_typecheck_function_qualifiers_unspecified);
+      // No diagnostic for 'restrict' or '_Atomic' applied to a
+      // function type; we'll diagnose those later, in BuildQualifiedType.
     }
 
     // C++11 [dcl.ref]p1:
@@ -1119,25 +1797,11 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     // There don't appear to be any other contexts in which a cv-qualified
     // reference type could be formed, so the 'ill-formed' clause here appears
     // to never happen.
-    if (DS.getTypeSpecType() == DeclSpec::TST_typename &&
-        TypeQuals && Result->isReferenceType()) {
-      // If this occurs outside a template instantiation, warn the user about
-      // it; they probably didn't mean to specify a redundant qualifier.
-      typedef std::pair<DeclSpec::TQ, SourceLocation> QualLoc;
-      QualLoc Quals[] = {
-        QualLoc(DeclSpec::TQ_const, DS.getConstSpecLoc()),
-        QualLoc(DeclSpec::TQ_volatile, DS.getVolatileSpecLoc()),
-        QualLoc(DeclSpec::TQ_atomic, DS.getAtomicSpecLoc())
-      };
-      for (unsigned I = 0, N = llvm::array_lengthof(Quals); I != N; ++I) {
-        if (S.ActiveTemplateInstantiations.empty()) {
-          if (TypeQuals & Quals[I].first)
-            S.Diag(Quals[I].second, diag::warn_typecheck_reference_qualifiers)
-              << DeclSpec::getSpecifierName(Quals[I].first) << Result
-              << FixItHint::CreateRemoval(Quals[I].second);
-        }
-        TypeQuals &= ~Quals[I].first;
-      }
+    if (TypeQuals && Result->isReferenceType()) {
+      diagnoseAndRemoveTypeQualifiers(
+          S, DS, TypeQuals, Result,
+          DeclSpec::TQ_const | DeclSpec::TQ_volatile | DeclSpec::TQ_atomic,
+          diag::warn_typecheck_reference_qualifiers);
     }
 
     // C90 6.5.3 constraints: "The same type qualifier shall not appear more
@@ -1184,6 +1848,12 @@ QualType Sema::BuildQualifiedType(QualType T, SourceLocation Loc,
   if (T.isNull())
     return QualType();
 
+  // Ignore any attempt to form a cv-qualified reference.
+  if (T->isReferenceType()) {
+    Qs.removeConst();
+    Qs.removeVolatile();
+  }
+
   // Enforce C99 6.7.3p2: "Types other than pointer types derived from
   // object or incomplete types shall not be restrict-qualified."
   if (Qs.hasRestrict()) {
@@ -1221,12 +1891,18 @@ QualType Sema::BuildQualifiedType(QualType T, SourceLocation Loc,
 }
 
 QualType Sema::BuildQualifiedType(QualType T, SourceLocation Loc,
-                                  unsigned CVRA, const DeclSpec *DS) {
+                                  unsigned CVRAU, const DeclSpec *DS) {
   if (T.isNull())
     return QualType();
 
-  // Convert from DeclSpec::TQ to Qualifiers::TQ by just dropping TQ_atomic.
-  unsigned CVR = CVRA & ~DeclSpec::TQ_atomic;
+  // Ignore any attempt to form a cv-qualified reference.
+  if (T->isReferenceType())
+    CVRAU &=
+        ~(DeclSpec::TQ_const | DeclSpec::TQ_volatile | DeclSpec::TQ_atomic);
+
+  // Convert from DeclSpec::TQ to Qualifiers::TQ by just dropping TQ_atomic and
+  // TQ_unaligned;
+  unsigned CVR = CVRAU & ~(DeclSpec::TQ_atomic | DeclSpec::TQ_unaligned);
 
   // C11 6.7.3/5:
   //   If the same qualifier appears more than once in the same
@@ -1236,7 +1912,7 @@ QualType Sema::BuildQualifiedType(QualType T, SourceLocation Loc,
   // It's not specified what happens when the _Atomic qualifier is applied to
   // a type specified with the _Atomic specifier, but we assume that this
   // should be treated as if the _Atomic qualifier appeared multiple times.
-  if (CVRA & DeclSpec::TQ_atomic && !T->isAtomicType()) {
+  if (CVRAU & DeclSpec::TQ_atomic && !T->isAtomicType()) {
     // C11 6.7.3/5:
     //   If other qualifiers appear along with the _Atomic qualifier in a
     //   specifier-qualifier-list, the resulting type is the so-qualified
@@ -1253,10 +1929,12 @@ QualType Sema::BuildQualifiedType(QualType T, SourceLocation Loc,
     return BuildQualifiedType(T, Loc, Split.Quals);
   }
 
-  return BuildQualifiedType(T, Loc, Qualifiers::fromCVRMask(CVR), DS);
+  Qualifiers Q = Qualifiers::fromCVRMask(CVR);
+  Q.setUnaligned(CVRAU & DeclSpec::TQ_unaligned);
+  return BuildQualifiedType(T, Loc, Q, DS);
 }
 
-/// \brief Build a paren type including \p T.
+/// Build a paren type including \p T.
 QualType Sema::BuildParenType(QualType T) {
   return Context.getParenType(T);
 }
@@ -1314,8 +1992,7 @@ static QualType inferARCLifetimeForPointee(Sema &S, QualType type,
 }
 
 static std::string getFunctionQualifiersAsString(const FunctionProtoType *FnTy){
-  std::string Quals =
-    Qualifiers::fromCVRMask(FnTy->getTypeQuals()).getAsString();
+  std::string Quals = FnTy->getMethodQuals().getAsString();
 
   switch (FnTy->getRefQualifier()) {
   case RQ_None:
@@ -1349,7 +2026,7 @@ namespace {
 ///
 /// The values of this enum are used in diagnostics.
 enum QualifiedFunctionKind { QFK_BlockPointer, QFK_Pointer, QFK_Reference };
-}
+} // end anonymous namespace
 
 /// Check whether the type T is a qualified function type, and if it is,
 /// diagnose that it cannot be contained within the given kind of declarator.
@@ -1357,7 +2034,8 @@ static bool checkQualifiedFunction(Sema &S, QualType T, SourceLocation Loc,
                                    QualifiedFunctionKind QFK) {
   // Does T refer to a function type with a cv-qualifier or a ref-qualifier?
   const FunctionProtoType *FPT = T->getAs<FunctionProtoType>();
-  if (!FPT || (FPT->getTypeQuals() == 0 && FPT->getRefQualifier() == RQ_None))
+  if (!FPT ||
+      (FPT->getMethodQuals().empty() && FPT->getRefQualifier() == RQ_None))
     return false;
 
   S.Diag(Loc, diag::err_compound_qualified_function_type)
@@ -1366,7 +2044,30 @@ static bool checkQualifiedFunction(Sema &S, QualType T, SourceLocation Loc,
   return true;
 }
 
-/// \brief Build a pointer type.
+bool Sema::CheckQualifiedFunctionForTypeId(QualType T, SourceLocation Loc) {
+  const FunctionProtoType *FPT = T->getAs<FunctionProtoType>();
+  if (!FPT ||
+      (FPT->getMethodQuals().empty() && FPT->getRefQualifier() == RQ_None))
+    return false;
+
+  Diag(Loc, diag::err_qualified_function_typeid)
+      << T << getFunctionQualifiersAsString(FPT);
+  return true;
+}
+
+// Helper to deduce addr space of a pointee type in OpenCL mode.
+static QualType deduceOpenCLPointeeAddrSpace(Sema &S, QualType PointeeType) {
+  if (!PointeeType->isUndeducedAutoType() && !PointeeType->isDependentType() &&
+      !PointeeType->isSamplerT() &&
+      !PointeeType.hasAddressSpace())
+    PointeeType = S.getASTContext().getAddrSpaceQualType(
+        PointeeType, S.getLangOpts().OpenCLGenericAddressSpace
+                         ? LangAS::opencl_generic
+                         : LangAS::opencl_private);
+  return PointeeType;
+}
+
+/// Build a pointer type.
 ///
 /// \param T The type to which we'll be building a pointer.
 ///
@@ -1388,6 +2089,13 @@ QualType Sema::BuildPointerType(QualType T,
     return QualType();
   }
 
+  if (T->isFunctionType() && getLangOpts().OpenCL &&
+      !getOpenCLOptions().isAvailableOption("__cl_clang_function_pointers",
+                                            getLangOpts())) {
+    Diag(Loc, diag::err_opencl_function_pointer) << /*pointer*/ 0;
+    return QualType();
+  }
+
   if (checkQualifiedFunction(*this, T, Loc, QFK_Pointer))
     return QualType();
 
@@ -1397,11 +2105,14 @@ QualType Sema::BuildPointerType(QualType T,
   if (getLangOpts().ObjCAutoRefCount)
     T = inferARCLifetimeForPointee(*this, T, Loc, /*reference*/ false);
 
+  if (getLangOpts().OpenCL)
+    T = deduceOpenCLPointeeAddrSpace(*this, T);
+
   // Build the pointer type.
   return Context.getPointerType(T);
 }
 
-/// \brief Build a reference type.
+/// Build a reference type.
 ///
 /// \param T The type to which we'll be building a reference.
 ///
@@ -1453,9 +2164,19 @@ QualType Sema::BuildReferenceType(QualType T, bool SpelledAsLValue,
   if (checkQualifiedFunction(*this, T, Loc, QFK_Reference))
     return QualType();
 
+  if (T->isFunctionType() && getLangOpts().OpenCL &&
+      !getOpenCLOptions().isAvailableOption("__cl_clang_function_pointers",
+                                            getLangOpts())) {
+    Diag(Loc, diag::err_opencl_function_pointer) << /*reference*/ 1;
+    return QualType();
+  }
+
   // In ARC, it is forbidden to build references to unqualified pointers.
   if (getLangOpts().ObjCAutoRefCount)
     T = inferARCLifetimeForPointee(*this, T, Loc, /*reference*/ true);
+
+  if (getLangOpts().OpenCL)
+    T = deduceOpenCLPointeeAddrSpace(*this, T);
 
   // Handle restrict on references.
   if (LValueRef)
@@ -1463,29 +2184,129 @@ QualType Sema::BuildReferenceType(QualType T, bool SpelledAsLValue,
   return Context.getRValueReferenceType(T);
 }
 
-/// Check whether the specified array size makes the array type a VLA.  If so,
-/// return true, if not, return the size of the array in SizeVal.
-static bool isArraySizeVLA(Sema &S, Expr *ArraySize, llvm::APSInt &SizeVal) {
+/// Build a Read-only Pipe type.
+///
+/// \param T The type to which we'll be building a Pipe.
+///
+/// \param Loc We do not use it for now.
+///
+/// \returns A suitable pipe type, if there are no errors. Otherwise, returns a
+/// NULL type.
+QualType Sema::BuildReadPipeType(QualType T, SourceLocation Loc) {
+  return Context.getReadPipeType(T);
+}
+
+/// Build a Write-only Pipe type.
+///
+/// \param T The type to which we'll be building a Pipe.
+///
+/// \param Loc We do not use it for now.
+///
+/// \returns A suitable pipe type, if there are no errors. Otherwise, returns a
+/// NULL type.
+QualType Sema::BuildWritePipeType(QualType T, SourceLocation Loc) {
+  return Context.getWritePipeType(T);
+}
+
+/// Build a extended int type.
+///
+/// \param IsUnsigned Boolean representing the signedness of the type.
+///
+/// \param BitWidth Size of this int type in bits, or an expression representing
+/// that.
+///
+/// \param Loc Location of the keyword.
+QualType Sema::BuildExtIntType(bool IsUnsigned, Expr *BitWidth,
+                               SourceLocation Loc) {
+  if (BitWidth->isInstantiationDependent())
+    return Context.getDependentExtIntType(IsUnsigned, BitWidth);
+
+  llvm::APSInt Bits(32);
+  ExprResult ICE =
+      VerifyIntegerConstantExpression(BitWidth, &Bits, /*FIXME*/ AllowFold);
+
+  if (ICE.isInvalid())
+    return QualType();
+
+  int64_t NumBits = Bits.getSExtValue();
+  if (!IsUnsigned && NumBits < 2) {
+    Diag(Loc, diag::err_ext_int_bad_size) << 0;
+    return QualType();
+  }
+
+  if (IsUnsigned && NumBits < 1) {
+    Diag(Loc, diag::err_ext_int_bad_size) << 1;
+    return QualType();
+  }
+
+  if (NumBits > llvm::IntegerType::MAX_INT_BITS) {
+    Diag(Loc, diag::err_ext_int_max_size) << IsUnsigned
+                                          << llvm::IntegerType::MAX_INT_BITS;
+    return QualType();
+  }
+
+  return Context.getExtIntType(IsUnsigned, NumBits);
+}
+
+/// Check whether the specified array bound can be evaluated using the relevant
+/// language rules. If so, returns the possibly-converted expression and sets
+/// SizeVal to the size. If not, but the expression might be a VLA bound,
+/// returns ExprResult(). Otherwise, produces a diagnostic and returns
+/// ExprError().
+static ExprResult checkArraySize(Sema &S, Expr *&ArraySize,
+                                 llvm::APSInt &SizeVal, unsigned VLADiag,
+                                 bool VLAIsError) {
+  if (S.getLangOpts().CPlusPlus14 &&
+      (VLAIsError ||
+       !ArraySize->getType()->isIntegralOrUnscopedEnumerationType())) {
+    // C++14 [dcl.array]p1:
+    //   The constant-expression shall be a converted constant expression of
+    //   type std::size_t.
+    //
+    // Don't apply this rule if we might be forming a VLA: in that case, we
+    // allow non-constant expressions and constant-folding. We only need to use
+    // the converted constant expression rules (to properly convert the source)
+    // when the source expression is of class type.
+    return S.CheckConvertedConstantExpression(
+        ArraySize, S.Context.getSizeType(), SizeVal, Sema::CCEK_ArrayBound);
+  }
+
   // If the size is an ICE, it certainly isn't a VLA. If we're in a GNU mode
   // (like gnu99, but not c99) accept any evaluatable value as an extension.
   class VLADiagnoser : public Sema::VerifyICEDiagnoser {
   public:
-    VLADiagnoser() : Sema::VerifyICEDiagnoser(true) {}
+    unsigned VLADiag;
+    bool VLAIsError;
+    bool IsVLA = false;
 
-    void diagnoseNotICE(Sema &S, SourceLocation Loc, SourceRange SR) override {
+    VLADiagnoser(unsigned VLADiag, bool VLAIsError)
+        : VLADiag(VLADiag), VLAIsError(VLAIsError) {}
+
+    Sema::SemaDiagnosticBuilder diagnoseNotICEType(Sema &S, SourceLocation Loc,
+                                                   QualType T) override {
+      return S.Diag(Loc, diag::err_array_size_non_int) << T;
     }
 
-    void diagnoseFold(Sema &S, SourceLocation Loc, SourceRange SR) override {
-      S.Diag(Loc, diag::ext_vla_folded_to_constant) << SR;
+    Sema::SemaDiagnosticBuilder diagnoseNotICE(Sema &S,
+                                               SourceLocation Loc) override {
+      IsVLA = !VLAIsError;
+      return S.Diag(Loc, VLADiag);
     }
-  } Diagnoser;
 
-  return S.VerifyIntegerConstantExpression(ArraySize, &SizeVal, Diagnoser,
-                                           S.LangOpts.GNUMode).isInvalid();
+    Sema::SemaDiagnosticBuilder diagnoseFold(Sema &S,
+                                             SourceLocation Loc) override {
+      return S.Diag(Loc, diag::ext_vla_folded_to_constant);
+    }
+  } Diagnoser(VLADiag, VLAIsError);
+
+  ExprResult R =
+      S.VerifyIntegerConstantExpression(ArraySize, &SizeVal, Diagnoser);
+  if (Diagnoser.IsVLA)
+    return ExprResult();
+  return R;
 }
 
-
-/// \brief Build an array type.
+/// Build an array type.
 ///
 /// \param T The type of each element in the array.
 ///
@@ -1524,7 +2345,7 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
     }
 
     if (T->isVoidType() || T->isIncompleteArrayType()) {
-      Diag(Loc, diag::err_illegal_decl_array_incomplete_type) << T;
+      Diag(Loc, diag::err_array_incomplete_or_sizeless_type) << 0 << T;
       return QualType();
     }
 
@@ -1537,14 +2358,19 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
     if (Context.getTargetInfo().getCXXABI().isMicrosoft())
       if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>())
         if (!MPTy->getClass()->isDependentType())
-          RequireCompleteType(Loc, T, 0);
+          (void)isCompleteType(Loc, T);
 
   } else {
     // C99 6.7.5.2p1: If the element type is an incomplete or function type,
     // reject it (e.g. void ary[7], struct foo ary[7], void ary[7]())
-    if (RequireCompleteType(Loc, T,
-                            diag::err_illegal_decl_array_incomplete_type))
+    if (RequireCompleteSizedType(Loc, T,
+                                 diag::err_array_incomplete_or_sizeless_type))
       return QualType();
+  }
+
+  if (T->isSizelessType()) {
+    Diag(Loc, diag::err_array_incomplete_or_sizeless_type) << 1 << T;
+    return QualType();
   }
 
   if (T->isFunctionType()) {
@@ -1584,152 +2410,235 @@ QualType Sema::BuildArrayType(QualType T, ArrayType::ArraySizeModifier ASM,
   if (!getLangOpts().CPlusPlus11 &&
       ArraySize && !ArraySize->isTypeDependent() &&
       !ArraySize->getType()->isIntegralOrUnscopedEnumerationType()) {
-    Diag(ArraySize->getLocStart(), diag::err_array_size_non_int)
-      << ArraySize->getType() << ArraySize->getSourceRange();
+    Diag(ArraySize->getBeginLoc(), diag::err_array_size_non_int)
+        << ArraySize->getType() << ArraySize->getSourceRange();
     return QualType();
+  }
+
+  // VLAs always produce at least a -Wvla diagnostic, sometimes an error.
+  unsigned VLADiag;
+  bool VLAIsError;
+  if (getLangOpts().OpenCL) {
+    // OpenCL v1.2 s6.9.d: variable length arrays are not supported.
+    VLADiag = diag::err_opencl_vla;
+    VLAIsError = true;
+  } else if (getLangOpts().C99) {
+    VLADiag = diag::warn_vla_used;
+    VLAIsError = false;
+  } else if (isSFINAEContext()) {
+    VLADiag = diag::err_vla_in_sfinae;
+    VLAIsError = true;
+  } else {
+    VLADiag = diag::ext_vla;
+    VLAIsError = false;
   }
 
   llvm::APSInt ConstVal(Context.getTypeSize(Context.getSizeType()));
   if (!ArraySize) {
-    if (ASM == ArrayType::Star)
+    if (ASM == ArrayType::Star) {
+      Diag(Loc, VLADiag);
+      if (VLAIsError)
+        return QualType();
+
       T = Context.getVariableArrayType(T, nullptr, ASM, Quals, Brackets);
-    else
+    } else {
       T = Context.getIncompleteArrayType(T, ASM, Quals);
+    }
   } else if (ArraySize->isTypeDependent() || ArraySize->isValueDependent()) {
     T = Context.getDependentSizedArrayType(T, ArraySize, ASM, Quals, Brackets);
-  } else if ((!T->isDependentType() && !T->isIncompleteType() &&
-              !T->isConstantSizeType()) ||
-             isArraySizeVLA(*this, ArraySize, ConstVal)) {
-    // Even in C++11, don't allow contextual conversions in the array bound
-    // of a VLA.
-    if (getLangOpts().CPlusPlus11 &&
-        !ArraySize->getType()->isIntegralOrUnscopedEnumerationType()) {
-      Diag(ArraySize->getLocStart(), diag::err_array_size_non_int)
-        << ArraySize->getType() << ArraySize->getSourceRange();
-      return QualType();
-    }
-
-    // C99: an array with an element type that has a non-constant-size is a VLA.
-    // C99: an array with a non-ICE size is a VLA.  We accept any expression
-    // that we can fold to a non-zero positive value as an extension.
-    T = Context.getVariableArrayType(T, ArraySize, ASM, Quals, Brackets);
   } else {
-    // C99 6.7.5.2p1: If the expression is a constant expression, it shall
-    // have a value greater than zero.
-    if (ConstVal.isSigned() && ConstVal.isNegative()) {
-      if (Entity)
-        Diag(ArraySize->getLocStart(), diag::err_decl_negative_array_size)
-          << getPrintableNameForEntity(Entity) << ArraySize->getSourceRange();
-      else
-        Diag(ArraySize->getLocStart(), diag::err_typecheck_negative_array_size)
-          << ArraySize->getSourceRange();
+    ExprResult R =
+        checkArraySize(*this, ArraySize, ConstVal, VLADiag, VLAIsError);
+    if (R.isInvalid())
+      return QualType();
+
+    if (!R.isUsable()) {
+      // C99: an array with a non-ICE size is a VLA. We accept any expression
+      // that we can fold to a non-zero positive value as a non-VLA as an
+      // extension.
+      T = Context.getVariableArrayType(T, ArraySize, ASM, Quals, Brackets);
+    } else if (!T->isDependentType() && !T->isIncompleteType() &&
+               !T->isConstantSizeType()) {
+      // C99: an array with an element type that has a non-constant-size is a
+      // VLA.
+      // FIXME: Add a note to explain why this isn't a VLA.
+      Diag(Loc, VLADiag);
+      if (VLAIsError)
+        return QualType();
+      T = Context.getVariableArrayType(T, ArraySize, ASM, Quals, Brackets);
+    } else {
+      // C99 6.7.5.2p1: If the expression is a constant expression, it shall
+      // have a value greater than zero.
+      // In C++, this follows from narrowing conversions being disallowed.
+      if (ConstVal.isSigned() && ConstVal.isNegative()) {
+        if (Entity)
+          Diag(ArraySize->getBeginLoc(), diag::err_decl_negative_array_size)
+              << getPrintableNameForEntity(Entity)
+              << ArraySize->getSourceRange();
+        else
+          Diag(ArraySize->getBeginLoc(),
+               diag::err_typecheck_negative_array_size)
+              << ArraySize->getSourceRange();
+        return QualType();
+      }
+      if (ConstVal == 0) {
+        // GCC accepts zero sized static arrays. We allow them when
+        // we're not in a SFINAE context.
+        Diag(ArraySize->getBeginLoc(),
+             isSFINAEContext() ? diag::err_typecheck_zero_array_size
+                               : diag::ext_typecheck_zero_array_size)
+            << ArraySize->getSourceRange();
+      }
+
+      // Is the array too large?
+      unsigned ActiveSizeBits =
+          (!T->isDependentType() && !T->isVariablyModifiedType() &&
+           !T->isIncompleteType() && !T->isUndeducedType())
+              ? ConstantArrayType::getNumAddressingBits(Context, T, ConstVal)
+              : ConstVal.getActiveBits();
+      if (ActiveSizeBits > ConstantArrayType::getMaxSizeBits(Context)) {
+        Diag(ArraySize->getBeginLoc(), diag::err_array_too_large)
+            << ConstVal.toString(10) << ArraySize->getSourceRange();
+        return QualType();
+      }
+
+      T = Context.getConstantArrayType(T, ConstVal, ArraySize, ASM, Quals);
+    }
+  }
+
+  if (T->isVariableArrayType() && !Context.getTargetInfo().isVLASupported()) {
+    // CUDA device code and some other targets don't support VLAs.
+    targetDiag(Loc, (getLangOpts().CUDA && getLangOpts().CUDAIsDevice)
+                        ? diag::err_cuda_vla
+                        : diag::err_vla_unsupported)
+        << ((getLangOpts().CUDA && getLangOpts().CUDAIsDevice)
+                ? CurrentCUDATarget()
+                : CFT_InvalidTarget);
+  }
+
+  // If this is not C99, diagnose array size modifiers on non-VLAs.
+  if (!getLangOpts().C99 && !T->isVariableArrayType() &&
+      (ASM != ArrayType::Normal || Quals != 0)) {
+    Diag(Loc, getLangOpts().CPlusPlus ? diag::err_c99_array_usage_cxx
+                                      : diag::ext_c99_array_usage)
+        << ASM;
+  }
+
+  // OpenCL v2.0 s6.12.5 - Arrays of blocks are not supported.
+  // OpenCL v2.0 s6.16.13.1 - Arrays of pipe type are not supported.
+  // OpenCL v2.0 s6.9.b - Arrays of image/sampler type are not supported.
+  if (getLangOpts().OpenCL) {
+    const QualType ArrType = Context.getBaseElementType(T);
+    if (ArrType->isBlockPointerType() || ArrType->isPipeType() ||
+        ArrType->isSamplerT() || ArrType->isImageType()) {
+      Diag(Loc, diag::err_opencl_invalid_type_array) << ArrType;
       return QualType();
     }
-    if (ConstVal == 0) {
-      // GCC accepts zero sized static arrays. We allow them when
-      // we're not in a SFINAE context.
-      Diag(ArraySize->getLocStart(),
-           isSFINAEContext()? diag::err_typecheck_zero_array_size
-                            : diag::ext_typecheck_zero_array_size)
-        << ArraySize->getSourceRange();
-
-      if (ASM == ArrayType::Static) {
-        Diag(ArraySize->getLocStart(),
-             diag::warn_typecheck_zero_static_array_size)
-          << ArraySize->getSourceRange();
-        ASM = ArrayType::Normal;
-      }
-    } else if (!T->isDependentType() && !T->isVariablyModifiedType() &&
-               !T->isIncompleteType() && !T->isUndeducedType()) {
-      // Is the array too large?
-      unsigned ActiveSizeBits
-        = ConstantArrayType::getNumAddressingBits(Context, T, ConstVal);
-      if (ActiveSizeBits > ConstantArrayType::getMaxSizeBits(Context)) {
-        Diag(ArraySize->getLocStart(), diag::err_array_too_large)
-          << ConstVal.toString(10)
-          << ArraySize->getSourceRange();
-        return QualType();
-      }
-    }
-
-    T = Context.getConstantArrayType(T, ConstVal, ASM, Quals);
-  }
-
-  // OpenCL v1.2 s6.9.d: variable length arrays are not supported.
-  if (getLangOpts().OpenCL && T->isVariableArrayType()) {
-    Diag(Loc, diag::err_opencl_vla);
-    return QualType();
-  }
-  // If this is not C99, extwarn about VLA's and C99 array size modifiers.
-  if (!getLangOpts().C99) {
-    if (T->isVariableArrayType()) {
-      // Prohibit the use of non-POD types in VLAs.
-      QualType BaseT = Context.getBaseElementType(T);
-      if (!T->isDependentType() &&
-          !RequireCompleteType(Loc, BaseT, 0) &&
-          !BaseT.isPODType(Context) &&
-          !BaseT->isObjCLifetimeType()) {
-        Diag(Loc, diag::err_vla_non_pod)
-          << BaseT;
-        return QualType();
-      }
-      // Prohibit the use of VLAs during template argument deduction.
-      else if (isSFINAEContext()) {
-        Diag(Loc, diag::err_vla_in_sfinae);
-        return QualType();
-      }
-      // Just extwarn about VLAs.
-      else
-        Diag(Loc, diag::ext_vla);
-    } else if (ASM != ArrayType::Normal || Quals != 0)
-      Diag(Loc,
-           getLangOpts().CPlusPlus? diag::err_c99_array_usage_cxx
-                                     : diag::ext_c99_array_usage) << ASM;
-  }
-
-  if (T->isVariableArrayType()) {
-    // Warn about VLAs for -Wvla.
-    Diag(Loc, diag::warn_vla_used);
   }
 
   return T;
 }
 
-/// \brief Build an ext-vector type.
+QualType Sema::BuildVectorType(QualType CurType, Expr *SizeExpr,
+                               SourceLocation AttrLoc) {
+  // The base type must be integer (not Boolean or enumeration) or float, and
+  // can't already be a vector.
+  if ((!CurType->isDependentType() &&
+       (!CurType->isBuiltinType() || CurType->isBooleanType() ||
+        (!CurType->isIntegerType() && !CurType->isRealFloatingType()))) ||
+      CurType->isArrayType()) {
+    Diag(AttrLoc, diag::err_attribute_invalid_vector_type) << CurType;
+    return QualType();
+  }
+
+  if (SizeExpr->isTypeDependent() || SizeExpr->isValueDependent())
+    return Context.getDependentVectorType(CurType, SizeExpr, AttrLoc,
+                                               VectorType::GenericVector);
+
+  Optional<llvm::APSInt> VecSize = SizeExpr->getIntegerConstantExpr(Context);
+  if (!VecSize) {
+    Diag(AttrLoc, diag::err_attribute_argument_type)
+        << "vector_size" << AANT_ArgumentIntegerConstant
+        << SizeExpr->getSourceRange();
+    return QualType();
+  }
+
+  if (CurType->isDependentType())
+    return Context.getDependentVectorType(CurType, SizeExpr, AttrLoc,
+                                               VectorType::GenericVector);
+
+  // vecSize is specified in bytes - convert to bits.
+  if (!VecSize->isIntN(61)) {
+    // Bit size will overflow uint64.
+    Diag(AttrLoc, diag::err_attribute_size_too_large)
+        << SizeExpr->getSourceRange() << "vector";
+    return QualType();
+  }
+  uint64_t VectorSizeBits = VecSize->getZExtValue() * 8;
+  unsigned TypeSize = static_cast<unsigned>(Context.getTypeSize(CurType));
+
+  if (VectorSizeBits == 0) {
+    Diag(AttrLoc, diag::err_attribute_zero_size)
+        << SizeExpr->getSourceRange() << "vector";
+    return QualType();
+  }
+
+  if (VectorSizeBits % TypeSize) {
+    Diag(AttrLoc, diag::err_attribute_invalid_size)
+        << SizeExpr->getSourceRange();
+    return QualType();
+  }
+
+  if (VectorSizeBits / TypeSize > std::numeric_limits<uint32_t>::max()) {
+    Diag(AttrLoc, diag::err_attribute_size_too_large)
+        << SizeExpr->getSourceRange() << "vector";
+    return QualType();
+  }
+
+  return Context.getVectorType(CurType, VectorSizeBits / TypeSize,
+                               VectorType::GenericVector);
+}
+
+/// Build an ext-vector type.
 ///
 /// Run the required checks for the extended vector type.
 QualType Sema::BuildExtVectorType(QualType T, Expr *ArraySize,
                                   SourceLocation AttrLoc) {
-  // unlike gcc's vector_size attribute, we do not allow vectors to be defined
+  // Unlike gcc's vector_size attribute, we do not allow vectors to be defined
   // in conjunction with complex types (pointers, arrays, functions, etc.).
-  if (!T->isDependentType() &&
-      !T->isIntegerType() && !T->isRealFloatingType()) {
+  //
+  // Additionally, OpenCL prohibits vectors of booleans (they're considered a
+  // reserved data type under OpenCL v2.0 s6.1.4), we don't support selects
+  // on bitvectors, and we have no well-defined ABI for bitvectors, so vectors
+  // of bool aren't allowed.
+  if ((!T->isDependentType() && !T->isIntegerType() &&
+       !T->isRealFloatingType()) ||
+      T->isBooleanType()) {
     Diag(AttrLoc, diag::err_attribute_invalid_vector_type) << T;
     return QualType();
   }
 
   if (!ArraySize->isTypeDependent() && !ArraySize->isValueDependent()) {
-    llvm::APSInt vecSize(32);
-    if (!ArraySize->isIntegerConstantExpr(vecSize, Context)) {
+    Optional<llvm::APSInt> vecSize = ArraySize->getIntegerConstantExpr(Context);
+    if (!vecSize) {
       Diag(AttrLoc, diag::err_attribute_argument_type)
         << "ext_vector_type" << AANT_ArgumentIntegerConstant
         << ArraySize->getSourceRange();
       return QualType();
     }
 
-    // unlike gcc's vector_size attribute, the size is specified as the
+    if (!vecSize->isIntN(32)) {
+      Diag(AttrLoc, diag::err_attribute_size_too_large)
+          << ArraySize->getSourceRange() << "vector";
+      return QualType();
+    }
+    // Unlike gcc's vector_size attribute, the size is specified as the
     // number of elements, not the number of bytes.
-    unsigned vectorSize = static_cast<unsigned>(vecSize.getZExtValue());
+    unsigned vectorSize = static_cast<unsigned>(vecSize->getZExtValue());
 
     if (vectorSize == 0) {
       Diag(AttrLoc, diag::err_attribute_zero_size)
-      << ArraySize->getSourceRange();
-      return QualType();
-    }
-
-    if (VectorType::isVectorSizeTooLarge(vectorSize)) {
-      Diag(AttrLoc, diag::err_attribute_size_too_large)
-        << ArraySize->getSourceRange();
+          << ArraySize->getSourceRange() << "vector";
       return QualType();
     }
 
@@ -1737,6 +2646,81 @@ QualType Sema::BuildExtVectorType(QualType T, Expr *ArraySize,
   }
 
   return Context.getDependentSizedExtVectorType(T, ArraySize, AttrLoc);
+}
+
+QualType Sema::BuildMatrixType(QualType ElementTy, Expr *NumRows, Expr *NumCols,
+                               SourceLocation AttrLoc) {
+  assert(Context.getLangOpts().MatrixTypes &&
+         "Should never build a matrix type when it is disabled");
+
+  // Check element type, if it is not dependent.
+  if (!ElementTy->isDependentType() &&
+      !MatrixType::isValidElementType(ElementTy)) {
+    Diag(AttrLoc, diag::err_attribute_invalid_matrix_type) << ElementTy;
+    return QualType();
+  }
+
+  if (NumRows->isTypeDependent() || NumCols->isTypeDependent() ||
+      NumRows->isValueDependent() || NumCols->isValueDependent())
+    return Context.getDependentSizedMatrixType(ElementTy, NumRows, NumCols,
+                                               AttrLoc);
+
+  Optional<llvm::APSInt> ValueRows = NumRows->getIntegerConstantExpr(Context);
+  Optional<llvm::APSInt> ValueColumns =
+      NumCols->getIntegerConstantExpr(Context);
+
+  auto const RowRange = NumRows->getSourceRange();
+  auto const ColRange = NumCols->getSourceRange();
+
+  // Both are row and column expressions are invalid.
+  if (!ValueRows && !ValueColumns) {
+    Diag(AttrLoc, diag::err_attribute_argument_type)
+        << "matrix_type" << AANT_ArgumentIntegerConstant << RowRange
+        << ColRange;
+    return QualType();
+  }
+
+  // Only the row expression is invalid.
+  if (!ValueRows) {
+    Diag(AttrLoc, diag::err_attribute_argument_type)
+        << "matrix_type" << AANT_ArgumentIntegerConstant << RowRange;
+    return QualType();
+  }
+
+  // Only the column expression is invalid.
+  if (!ValueColumns) {
+    Diag(AttrLoc, diag::err_attribute_argument_type)
+        << "matrix_type" << AANT_ArgumentIntegerConstant << ColRange;
+    return QualType();
+  }
+
+  // Check the matrix dimensions.
+  unsigned MatrixRows = static_cast<unsigned>(ValueRows->getZExtValue());
+  unsigned MatrixColumns = static_cast<unsigned>(ValueColumns->getZExtValue());
+  if (MatrixRows == 0 && MatrixColumns == 0) {
+    Diag(AttrLoc, diag::err_attribute_zero_size)
+        << "matrix" << RowRange << ColRange;
+    return QualType();
+  }
+  if (MatrixRows == 0) {
+    Diag(AttrLoc, diag::err_attribute_zero_size) << "matrix" << RowRange;
+    return QualType();
+  }
+  if (MatrixColumns == 0) {
+    Diag(AttrLoc, diag::err_attribute_zero_size) << "matrix" << ColRange;
+    return QualType();
+  }
+  if (!ConstantMatrixType::isDimensionValid(MatrixRows)) {
+    Diag(AttrLoc, diag::err_attribute_size_too_large)
+        << RowRange << "matrix row";
+    return QualType();
+  }
+  if (!ConstantMatrixType::isDimensionValid(MatrixColumns)) {
+    Diag(AttrLoc, diag::err_attribute_size_too_large)
+        << ColRange << "matrix column";
+    return QualType();
+  }
+  return Context.getConstantMatrixType(ElementTy, MatrixRows, MatrixColumns);
 }
 
 bool Sema::CheckFunctionReturnType(QualType T, SourceLocation Loc) {
@@ -1756,11 +2740,78 @@ bool Sema::CheckFunctionReturnType(QualType T, SourceLocation Loc) {
   // Methods cannot return interface types. All ObjC objects are
   // passed by reference.
   if (T->isObjCObjectType()) {
-    Diag(Loc, diag::err_object_cannot_be_passed_returned_by_value) << 0 << T;
-    return 0;
+    Diag(Loc, diag::err_object_cannot_be_passed_returned_by_value)
+        << 0 << T << FixItHint::CreateInsertion(Loc, "*");
+    return true;
   }
 
+  if (T.hasNonTrivialToPrimitiveDestructCUnion() ||
+      T.hasNonTrivialToPrimitiveCopyCUnion())
+    checkNonTrivialCUnion(T, Loc, NTCUC_FunctionReturn,
+                          NTCUK_Destruct|NTCUK_Copy);
+
+  // C++2a [dcl.fct]p12:
+  //   A volatile-qualified return type is deprecated
+  if (T.isVolatileQualified() && getLangOpts().CPlusPlus20)
+    Diag(Loc, diag::warn_deprecated_volatile_return) << T;
+
   return false;
+}
+
+/// Check the extended parameter information.  Most of the necessary
+/// checking should occur when applying the parameter attribute; the
+/// only other checks required are positional restrictions.
+static void checkExtParameterInfos(Sema &S, ArrayRef<QualType> paramTypes,
+                    const FunctionProtoType::ExtProtoInfo &EPI,
+                    llvm::function_ref<SourceLocation(unsigned)> getParamLoc) {
+  assert(EPI.ExtParameterInfos && "shouldn't get here without param infos");
+
+  bool hasCheckedSwiftCall = false;
+  auto checkForSwiftCC = [&](unsigned paramIndex) {
+    // Only do this once.
+    if (hasCheckedSwiftCall) return;
+    hasCheckedSwiftCall = true;
+    if (EPI.ExtInfo.getCC() == CC_Swift) return;
+    S.Diag(getParamLoc(paramIndex), diag::err_swift_param_attr_not_swiftcall)
+      << getParameterABISpelling(EPI.ExtParameterInfos[paramIndex].getABI());
+  };
+
+  for (size_t paramIndex = 0, numParams = paramTypes.size();
+          paramIndex != numParams; ++paramIndex) {
+    switch (EPI.ExtParameterInfos[paramIndex].getABI()) {
+    // Nothing interesting to check for orindary-ABI parameters.
+    case ParameterABI::Ordinary:
+      continue;
+
+    // swift_indirect_result parameters must be a prefix of the function
+    // arguments.
+    case ParameterABI::SwiftIndirectResult:
+      checkForSwiftCC(paramIndex);
+      if (paramIndex != 0 &&
+          EPI.ExtParameterInfos[paramIndex - 1].getABI()
+            != ParameterABI::SwiftIndirectResult) {
+        S.Diag(getParamLoc(paramIndex),
+               diag::err_swift_indirect_result_not_first);
+      }
+      continue;
+
+    case ParameterABI::SwiftContext:
+      checkForSwiftCC(paramIndex);
+      continue;
+
+    // swift_error parameters must be preceded by a swift_context parameter.
+    case ParameterABI::SwiftErrorResult:
+      checkForSwiftCC(paramIndex);
+      if (paramIndex == 0 ||
+          EPI.ExtParameterInfos[paramIndex - 1].getABI() !=
+              ParameterABI::SwiftContext) {
+        S.Diag(getParamLoc(paramIndex),
+               diag::err_swift_error_result_not_after_swift_context);
+      }
+      continue;
+    }
+    llvm_unreachable("bad ABI kind");
+  }
 }
 
 QualType Sema::BuildFunctionType(QualType T,
@@ -1784,7 +2835,22 @@ QualType Sema::BuildFunctionType(QualType T,
       Invalid = true;
     }
 
+    // C++2a [dcl.fct]p4:
+    //   A parameter with volatile-qualified type is deprecated
+    if (ParamType.isVolatileQualified() && getLangOpts().CPlusPlus20)
+      Diag(Loc, diag::warn_deprecated_volatile_param) << ParamType;
+
     ParamTypes[Idx] = ParamType;
+  }
+
+  if (EPI.ExtParameterInfos) {
+    checkExtParameterInfos(*this, ParamTypes, EPI,
+                           [=](unsigned i) { return Loc; });
+  }
+
+  if (EPI.ExtInfo.getProducesResult()) {
+    // This is just a warning, so we can't fail to build if we see it.
+    checkNSReturnsRetainedReturnType(Loc, T);
   }
 
   if (Invalid)
@@ -1793,7 +2859,7 @@ QualType Sema::BuildFunctionType(QualType T,
   return Context.getFunctionType(T, ParamTypes, EPI);
 }
 
-/// \brief Build a member pointer type \c T Class::*.
+/// Build a member pointer type \c T Class::*.
 ///
 /// \param T the type to which the member pointer refers.
 /// \param Class the class type into which the member pointer points.
@@ -1809,13 +2875,7 @@ QualType Sema::BuildMemberPointerType(QualType T, QualType Class,
   // exception specification.
   if (CheckDistantExceptionSpec(T)) {
     Diag(Loc, diag::err_distant_exception_spec);
-
-    // FIXME: If we're doing this as part of template instantiation,
-    // we should return immediately.
-
-    // Build the type anyway, but use the canonical type so that the
-    // exception specifiers are stripped off.
-    T = Context.getCanonicalType(T);
+    return QualType();
   }
 
   // C++ 8.3.3p3: A pointer to member shall not point to ... a member
@@ -1837,15 +2897,25 @@ QualType Sema::BuildMemberPointerType(QualType T, QualType Class,
     return QualType();
   }
 
+  if (T->isFunctionType() && getLangOpts().OpenCL &&
+      !getOpenCLOptions().isAvailableOption("__cl_clang_function_pointers",
+                                            getLangOpts())) {
+    Diag(Loc, diag::err_opencl_function_pointer) << /*pointer*/ 0;
+    return QualType();
+  }
+
   // Adjust the default free function calling convention to the default method
   // calling convention.
+  bool IsCtorOrDtor =
+      (Entity.getNameKind() == DeclarationName::CXXConstructorName) ||
+      (Entity.getNameKind() == DeclarationName::CXXDestructorName);
   if (T->isFunctionType())
-    adjustMemberFunctionCC(T, /*IsStatic=*/false);
+    adjustMemberFunctionCC(T, /*IsStatic=*/false, IsCtorOrDtor, Loc);
 
   return Context.getMemberPointerType(T, Class.getTypePtr());
 }
 
-/// \brief Build a block pointer type.
+/// Build a block pointer type.
 ///
 /// \param T The type to which we'll be building a block pointer.
 ///
@@ -1866,6 +2936,9 @@ QualType Sema::BuildBlockPointerType(QualType T,
 
   if (checkQualifiedFunction(*this, T, Loc, QFK_BlockPointer))
     return QualType();
+
+  if (getLangOpts().OpenCL)
+    T = deduceOpenCLPointeeAddrSpace(*this, T);
 
   return Context.getBlockPointerType(T);
 }
@@ -1938,6 +3011,7 @@ static void inferARCWriteback(TypeProcessingState &state,
     case DeclaratorChunk::Array: // suppress if written (id[])?
     case DeclaratorChunk::Function:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       return;
     }
   }
@@ -1976,9 +3050,8 @@ static void inferARCWriteback(TypeProcessingState &state,
     if (chunk.Kind != DeclaratorChunk::Pointer &&
         chunk.Kind != DeclaratorChunk::BlockPointer)
       return;
-    for (const AttributeList *attr = chunk.getAttrs(); attr;
-           attr = attr->getNext())
-      if (attr->getKind() == AttributeList::AT_ObjCOwnership)
+    for (const ParsedAttr &AL : chunk.getAttrs())
+      if (AL.getKind() == ParsedAttr::AT_ObjCOwnership)
         return;
 
     transferARCOwnershipToDeclaratorChunk(state, Qualifiers::OCL_Autoreleasing,
@@ -1995,35 +3068,37 @@ void Sema::diagnoseIgnoredQualifiers(unsigned DiagID, unsigned Quals,
                                      SourceLocation ConstQualLoc,
                                      SourceLocation VolatileQualLoc,
                                      SourceLocation RestrictQualLoc,
-                                     SourceLocation AtomicQualLoc) {
+                                     SourceLocation AtomicQualLoc,
+                                     SourceLocation UnalignedQualLoc) {
   if (!Quals)
     return;
 
   struct Qual {
-    unsigned Mask;
     const char *Name;
+    unsigned Mask;
     SourceLocation Loc;
-  } const QualKinds[4] = {
-    { DeclSpec::TQ_const, "const", ConstQualLoc },
-    { DeclSpec::TQ_volatile, "volatile", VolatileQualLoc },
-    { DeclSpec::TQ_restrict, "restrict", RestrictQualLoc },
-    { DeclSpec::TQ_atomic, "_Atomic", AtomicQualLoc }
+  } const QualKinds[5] = {
+    { "const", DeclSpec::TQ_const, ConstQualLoc },
+    { "volatile", DeclSpec::TQ_volatile, VolatileQualLoc },
+    { "restrict", DeclSpec::TQ_restrict, RestrictQualLoc },
+    { "__unaligned", DeclSpec::TQ_unaligned, UnalignedQualLoc },
+    { "_Atomic", DeclSpec::TQ_atomic, AtomicQualLoc }
   };
 
   SmallString<32> QualStr;
   unsigned NumQuals = 0;
   SourceLocation Loc;
-  FixItHint FixIts[4];
+  FixItHint FixIts[5];
 
   // Build a string naming the redundant qualifiers.
-  for (unsigned I = 0; I != 4; ++I) {
-    if (Quals & QualKinds[I].Mask) {
+  for (auto &E : QualKinds) {
+    if (Quals & E.Mask) {
       if (!QualStr.empty()) QualStr += ' ';
-      QualStr += QualKinds[I].Name;
+      QualStr += E.Name;
 
       // If we have a location for the qualifier, offer a fixit.
-      SourceLocation QualLoc = QualKinds[I].Loc;
-      if (!QualLoc.isInvalid()) {
+      SourceLocation QualLoc = E.Loc;
+      if (QualLoc.isValid()) {
         FixIts[NumQuals] = FixItHint::CreateRemoval(QualLoc);
         if (Loc.isInvalid() ||
             getSourceManager().isBeforeInTranslationUnit(QualLoc, Loc))
@@ -2042,12 +3117,12 @@ void Sema::diagnoseIgnoredQualifiers(unsigned DiagID, unsigned Quals,
 static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
                                                   Declarator &D,
                                                   unsigned FunctionChunkIndex) {
-  if (D.getTypeObject(FunctionChunkIndex).Fun.hasTrailingReturnType()) {
-    // FIXME: TypeSourceInfo doesn't preserve location information for
-    // qualifiers.
+  const DeclaratorChunk::FunctionTypeInfo &FTI =
+      D.getTypeObject(FunctionChunkIndex).Fun;
+  if (FTI.hasTrailingReturnType()) {
     S.diagnoseIgnoredQualifiers(diag::warn_qual_return_type,
                                 RetTy.getLocalCVRQualifiers(),
-                                D.getIdentifierLoc());
+                                FTI.getTrailingReturnTypeLoc());
     return;
   }
 
@@ -2065,10 +3140,11 @@ static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
           diag::warn_qual_return_type,
           PTI.TypeQuals,
           SourceLocation(),
-          SourceLocation::getFromRawEncoding(PTI.ConstQualLoc),
-          SourceLocation::getFromRawEncoding(PTI.VolatileQualLoc),
-          SourceLocation::getFromRawEncoding(PTI.RestrictQualLoc),
-          SourceLocation::getFromRawEncoding(PTI.AtomicQualLoc));
+          PTI.ConstQualLoc,
+          PTI.VolatileQualLoc,
+          PTI.RestrictQualLoc,
+          PTI.AtomicQualLoc,
+          PTI.UnalignedQualLoc);
       return;
     }
 
@@ -2077,6 +3153,7 @@ static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
     case DeclaratorChunk::Reference:
     case DeclaratorChunk::Array:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       // FIXME: We can't currently provide an accurate source location and a
       // fix-it hint for these.
       unsigned AtomicQual = RetTy->isAtomicType() ? DeclSpec::TQ_atomic : 0;
@@ -2092,7 +3169,7 @@ static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
   // If the qualifiers come from a conversion function type, don't diagnose
   // them -- they're not necessarily redundant, since such a conversion
   // operator can be explicitly called as "x.operator const int()".
-  if (D.getName().getKind() == UnqualifiedId::IK_ConversionFunctionId)
+  if (D.getName().getKind() == UnqualifiedIdKind::IK_ConversionFunctionId)
     return;
 
   // Just parens all the way out to the decl specifiers. Diagnose any qualifiers
@@ -2103,8 +3180,110 @@ static void diagnoseRedundantReturnTypeQualifiers(Sema &S, QualType RetTy,
                               D.getDeclSpec().getConstSpecLoc(),
                               D.getDeclSpec().getVolatileSpecLoc(),
                               D.getDeclSpec().getRestrictSpecLoc(),
-                              D.getDeclSpec().getAtomicSpecLoc());
+                              D.getDeclSpec().getAtomicSpecLoc(),
+                              D.getDeclSpec().getUnalignedSpecLoc());
 }
+
+static std::pair<QualType, TypeSourceInfo *>
+InventTemplateParameter(TypeProcessingState &state, QualType T,
+                        TypeSourceInfo *TrailingTSI, AutoType *Auto,
+                        InventedTemplateParameterInfo &Info) {
+  Sema &S = state.getSema();
+  Declarator &D = state.getDeclarator();
+
+  const unsigned TemplateParameterDepth = Info.AutoTemplateParameterDepth;
+  const unsigned AutoParameterPosition = Info.TemplateParams.size();
+  const bool IsParameterPack = D.hasEllipsis();
+
+  // If auto is mentioned in a lambda parameter or abbreviated function
+  // template context, convert it to a template parameter type.
+
+  // Create the TemplateTypeParmDecl here to retrieve the corresponding
+  // template parameter type. Template parameters are temporarily added
+  // to the TU until the associated TemplateDecl is created.
+  TemplateTypeParmDecl *InventedTemplateParam =
+      TemplateTypeParmDecl::Create(
+          S.Context, S.Context.getTranslationUnitDecl(),
+          /*KeyLoc=*/D.getDeclSpec().getTypeSpecTypeLoc(),
+          /*NameLoc=*/D.getIdentifierLoc(),
+          TemplateParameterDepth, AutoParameterPosition,
+          S.InventAbbreviatedTemplateParameterTypeName(
+              D.getIdentifier(), AutoParameterPosition), false,
+          IsParameterPack, /*HasTypeConstraint=*/Auto->isConstrained());
+  InventedTemplateParam->setImplicit();
+  Info.TemplateParams.push_back(InventedTemplateParam);
+
+  // Attach type constraints to the new parameter.
+  if (Auto->isConstrained()) {
+    if (TrailingTSI) {
+      // The 'auto' appears in a trailing return type we've already built;
+      // extract its type constraints to attach to the template parameter.
+      AutoTypeLoc AutoLoc = TrailingTSI->getTypeLoc().getContainedAutoTypeLoc();
+      TemplateArgumentListInfo TAL(AutoLoc.getLAngleLoc(), AutoLoc.getRAngleLoc());
+      bool Invalid = false;
+      for (unsigned Idx = 0; Idx < AutoLoc.getNumArgs(); ++Idx) {
+        if (D.getEllipsisLoc().isInvalid() && !Invalid &&
+            S.DiagnoseUnexpandedParameterPack(AutoLoc.getArgLoc(Idx),
+                                              Sema::UPPC_TypeConstraint))
+          Invalid = true;
+        TAL.addArgument(AutoLoc.getArgLoc(Idx));
+      }
+
+      if (!Invalid) {
+        S.AttachTypeConstraint(
+            AutoLoc.getNestedNameSpecifierLoc(), AutoLoc.getConceptNameInfo(),
+            AutoLoc.getNamedConcept(),
+            AutoLoc.hasExplicitTemplateArgs() ? &TAL : nullptr,
+            InventedTemplateParam, D.getEllipsisLoc());
+      }
+    } else {
+      // The 'auto' appears in the decl-specifiers; we've not finished forming
+      // TypeSourceInfo for it yet.
+      TemplateIdAnnotation *TemplateId = D.getDeclSpec().getRepAsTemplateId();
+      TemplateArgumentListInfo TemplateArgsInfo;
+      bool Invalid = false;
+      if (TemplateId->LAngleLoc.isValid()) {
+        ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
+                                           TemplateId->NumArgs);
+        S.translateTemplateArguments(TemplateArgsPtr, TemplateArgsInfo);
+
+        if (D.getEllipsisLoc().isInvalid()) {
+          for (TemplateArgumentLoc Arg : TemplateArgsInfo.arguments()) {
+            if (S.DiagnoseUnexpandedParameterPack(Arg,
+                                                  Sema::UPPC_TypeConstraint)) {
+              Invalid = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!Invalid) {
+        S.AttachTypeConstraint(
+            D.getDeclSpec().getTypeSpecScope().getWithLocInContext(S.Context),
+            DeclarationNameInfo(DeclarationName(TemplateId->Name),
+                                TemplateId->TemplateNameLoc),
+            cast<ConceptDecl>(TemplateId->Template.get().getAsTemplateDecl()),
+            TemplateId->LAngleLoc.isValid() ? &TemplateArgsInfo : nullptr,
+            InventedTemplateParam, D.getEllipsisLoc());
+      }
+    }
+  }
+
+  // Replace the 'auto' in the function parameter with this invented
+  // template type parameter.
+  // FIXME: Retain some type sugar to indicate that this was written
+  //  as 'auto'?
+  QualType Replacement(InventedTemplateParam->getTypeForDecl(), 0);
+  QualType NewT = state.ReplaceAutoType(T, Replacement);
+  TypeSourceInfo *NewTSI =
+      TrailingTSI ? S.ReplaceAutoTypeSourceInfo(TrailingTSI, Replacement)
+                  : nullptr;
+  return {NewT, NewTSI};
+}
+
+static TypeSourceInfo *
+GetTypeSourceInfoForDeclarator(TypeProcessingState &State,
+                               QualType T, TypeSourceInfo *ReturnTypeInfo);
 
 static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
                                              TypeSourceInfo *&ReturnTypeInfo) {
@@ -2116,16 +3295,13 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
   // The TagDecl owned by the DeclSpec.
   TagDecl *OwnedTagDecl = nullptr;
 
-  bool ContainsPlaceholderType = false;
-
   switch (D.getName().getKind()) {
-  case UnqualifiedId::IK_ImplicitSelfParam:
-  case UnqualifiedId::IK_OperatorFunctionId:
-  case UnqualifiedId::IK_Identifier:
-  case UnqualifiedId::IK_LiteralOperatorId:
-  case UnqualifiedId::IK_TemplateId:
+  case UnqualifiedIdKind::IK_ImplicitSelfParam:
+  case UnqualifiedIdKind::IK_OperatorFunctionId:
+  case UnqualifiedIdKind::IK_Identifier:
+  case UnqualifiedIdKind::IK_LiteralOperatorId:
+  case UnqualifiedIdKind::IK_TemplateId:
     T = ConvertDeclSpecToType(state);
-    ContainsPlaceholderType = D.getDeclSpec().containsPlaceholderType();
 
     if (!D.isInvalidType() && D.getDeclSpec().isTypeSpecOwned()) {
       OwnedTagDecl = cast<TagDecl>(D.getDeclSpec().getRepAsDecl());
@@ -2134,202 +3310,299 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
     }
     break;
 
-  case UnqualifiedId::IK_ConstructorName:
-  case UnqualifiedId::IK_ConstructorTemplateId:
-  case UnqualifiedId::IK_DestructorName:
+  case UnqualifiedIdKind::IK_ConstructorName:
+  case UnqualifiedIdKind::IK_ConstructorTemplateId:
+  case UnqualifiedIdKind::IK_DestructorName:
     // Constructors and destructors don't have return types. Use
     // "void" instead.
     T = SemaRef.Context.VoidTy;
-    if (AttributeList *attrs = D.getDeclSpec().getAttributes().getList())
-      processTypeAttrs(state, T, TAL_DeclSpec, attrs);
+    processTypeAttrs(state, T, TAL_DeclSpec,
+                     D.getMutableDeclSpec().getAttributes());
     break;
 
-  case UnqualifiedId::IK_ConversionFunctionId:
+  case UnqualifiedIdKind::IK_DeductionGuideName:
+    // Deduction guides have a trailing return type and no type in their
+    // decl-specifier sequence. Use a placeholder return type for now.
+    T = SemaRef.Context.DependentTy;
+    break;
+
+  case UnqualifiedIdKind::IK_ConversionFunctionId:
     // The result type of a conversion function is the type that it
     // converts to.
     T = SemaRef.GetTypeFromParser(D.getName().ConversionFunctionId,
                                   &ReturnTypeInfo);
-    ContainsPlaceholderType = T->getContainedAutoType();
     break;
   }
 
-  if (D.getAttributes())
+  if (!D.getAttributes().empty())
     distributeTypeAttrsFromDeclarator(state, T);
 
+  // Find the deduced type in this type. Look in the trailing return type if we
+  // have one, otherwise in the DeclSpec type.
+  // FIXME: The standard wording doesn't currently describe this.
+  DeducedType *Deduced = T->getContainedDeducedType();
+  bool DeducedIsTrailingReturnType = false;
+  if (Deduced && isa<AutoType>(Deduced) && D.hasTrailingReturnType()) {
+    QualType T = SemaRef.GetTypeFromParser(D.getTrailingReturnType());
+    Deduced = T.isNull() ? nullptr : T->getContainedDeducedType();
+    DeducedIsTrailingReturnType = true;
+  }
+
   // C++11 [dcl.spec.auto]p5: reject 'auto' if it is not in an allowed context.
-  // In C++11, a function declarator using 'auto' must have a trailing return
-  // type (this is checked later) and we can skip this. In other languages
-  // using auto, we need to check regardless.
-  // C++14 In generic lambdas allow 'auto' in their parameters.
-  if (ContainsPlaceholderType &&
-      (!SemaRef.getLangOpts().CPlusPlus11 || !D.isFunctionDeclarator())) {
+  if (Deduced) {
+    AutoType *Auto = dyn_cast<AutoType>(Deduced);
     int Error = -1;
 
+    // Is this a 'auto' or 'decltype(auto)' type (as opposed to __auto_type or
+    // class template argument deduction)?
+    bool IsCXXAutoType =
+        (Auto && Auto->getKeyword() != AutoTypeKeyword::GNUAutoType);
+    bool IsDeducedReturnType = false;
+
     switch (D.getContext()) {
-    case Declarator::KNRTypeListContext:
-      llvm_unreachable("K&R type lists aren't allowed in C++");
-    case Declarator::LambdaExprContext:
-      llvm_unreachable("Can't specify a type specifier in lambda grammar");
-    case Declarator::ObjCParameterContext:
-    case Declarator::ObjCResultContext:
-    case Declarator::PrototypeContext:
-      Error = 0;  
+    case DeclaratorContext::LambdaExpr:
+      // Declared return type of a lambda-declarator is implicit and is always
+      // 'auto'.
       break;
-    case Declarator::LambdaExprParameterContext:
-      if (!(SemaRef.getLangOpts().CPlusPlus14 
-              && D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto))
-        Error = 14;
+    case DeclaratorContext::ObjCParameter:
+    case DeclaratorContext::ObjCResult:
+      Error = 0;
       break;
-    case Declarator::MemberContext:
-      if (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static)
-        break;
-      switch (cast<TagDecl>(SemaRef.CurContext)->getTagKind()) {
-      case TTK_Enum: llvm_unreachable("unhandled tag kind");
-      case TTK_Struct: Error = 1; /* Struct member */ break;
-      case TTK_Union:  Error = 2; /* Union member */ break;
-      case TTK_Class:  Error = 3; /* Class member */ break;
-      case TTK_Interface: Error = 4; /* Interface member */ break;
+    case DeclaratorContext::RequiresExpr:
+      Error = 22;
+      break;
+    case DeclaratorContext::Prototype:
+    case DeclaratorContext::LambdaExprParameter: {
+      InventedTemplateParameterInfo *Info = nullptr;
+      if (D.getContext() == DeclaratorContext::Prototype) {
+        // With concepts we allow 'auto' in function parameters.
+        if (!SemaRef.getLangOpts().CPlusPlus20 || !Auto ||
+            Auto->getKeyword() != AutoTypeKeyword::Auto) {
+          Error = 0;
+          break;
+        } else if (!SemaRef.getCurScope()->isFunctionDeclarationScope()) {
+          Error = 21;
+          break;
+        }
+
+        Info = &SemaRef.InventedParameterInfos.back();
+      } else {
+        // In C++14, generic lambdas allow 'auto' in their parameters.
+        if (!SemaRef.getLangOpts().CPlusPlus14 || !Auto ||
+            Auto->getKeyword() != AutoTypeKeyword::Auto) {
+          Error = 16;
+          break;
+        }
+        Info = SemaRef.getCurLambda();
+        assert(Info && "No LambdaScopeInfo on the stack!");
       }
+
+      // We'll deal with inventing template parameters for 'auto' in trailing
+      // return types when we pick up the trailing return type when processing
+      // the function chunk.
+      if (!DeducedIsTrailingReturnType)
+        T = InventTemplateParameter(state, T, nullptr, Auto, *Info).first;
       break;
-    case Declarator::CXXCatchContext:
-    case Declarator::ObjCCatchContext:
-      Error = 5; // Exception declaration
+    }
+    case DeclaratorContext::Member: {
+      if (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_static ||
+          D.isFunctionDeclarator())
+        break;
+      bool Cxx = SemaRef.getLangOpts().CPlusPlus;
+      if (isa<ObjCContainerDecl>(SemaRef.CurContext)) {
+        Error = 6; // Interface member.
+      } else {
+        switch (cast<TagDecl>(SemaRef.CurContext)->getTagKind()) {
+        case TTK_Enum: llvm_unreachable("unhandled tag kind");
+        case TTK_Struct: Error = Cxx ? 1 : 2; /* Struct member */ break;
+        case TTK_Union:  Error = Cxx ? 3 : 4; /* Union member */ break;
+        case TTK_Class:  Error = 5; /* Class member */ break;
+        case TTK_Interface: Error = 6; /* Interface member */ break;
+        }
+      }
+      if (D.getDeclSpec().isFriendSpecified())
+        Error = 20; // Friend type
       break;
-    case Declarator::TemplateParamContext:
-      Error = 6; // Template parameter
+    }
+    case DeclaratorContext::CXXCatch:
+    case DeclaratorContext::ObjCCatch:
+      Error = 7; // Exception declaration
       break;
-    case Declarator::BlockLiteralContext:
-      Error = 7; // Block literal
+    case DeclaratorContext::TemplateParam:
+      if (isa<DeducedTemplateSpecializationType>(Deduced) &&
+          !SemaRef.getLangOpts().CPlusPlus20)
+        Error = 19; // Template parameter (until C++20)
+      else if (!SemaRef.getLangOpts().CPlusPlus17)
+        Error = 8; // Template parameter (until C++17)
       break;
-    case Declarator::TemplateTypeArgContext:
-      Error = 8; // Template type argument
+    case DeclaratorContext::BlockLiteral:
+      Error = 9; // Block literal
       break;
-    case Declarator::AliasDeclContext:
-    case Declarator::AliasTemplateContext:
-      Error = 10; // Type alias
+    case DeclaratorContext::TemplateArg:
+      // Within a template argument list, a deduced template specialization
+      // type will be reinterpreted as a template template argument.
+      if (isa<DeducedTemplateSpecializationType>(Deduced) &&
+          !D.getNumTypeObjects() &&
+          D.getDeclSpec().getParsedSpecifiers() == DeclSpec::PQ_TypeSpecifier)
+        break;
+      LLVM_FALLTHROUGH;
+    case DeclaratorContext::TemplateTypeArg:
+      Error = 10; // Template type argument
       break;
-    case Declarator::TrailingReturnContext:
-      if (!SemaRef.getLangOpts().CPlusPlus14)
-        Error = 11; // Function return type
+    case DeclaratorContext::AliasDecl:
+    case DeclaratorContext::AliasTemplate:
+      Error = 12; // Type alias
       break;
-    case Declarator::ConversionIdContext:
-      if (!SemaRef.getLangOpts().CPlusPlus14)
-        Error = 12; // conversion-type-id
+    case DeclaratorContext::TrailingReturn:
+    case DeclaratorContext::TrailingReturnVar:
+      if (!SemaRef.getLangOpts().CPlusPlus14 || !IsCXXAutoType)
+        Error = 13; // Function return type
+      IsDeducedReturnType = true;
       break;
-    case Declarator::TypeNameContext:
-      Error = 13; // Generic
+    case DeclaratorContext::ConversionId:
+      if (!SemaRef.getLangOpts().CPlusPlus14 || !IsCXXAutoType)
+        Error = 14; // conversion-type-id
+      IsDeducedReturnType = true;
       break;
-    case Declarator::FileContext:
-    case Declarator::BlockContext:
-    case Declarator::ForContext:
-    case Declarator::ConditionContext:
-    case Declarator::CXXNewContext:
+    case DeclaratorContext::FunctionalCast:
+      if (isa<DeducedTemplateSpecializationType>(Deduced))
+        break;
+      LLVM_FALLTHROUGH;
+    case DeclaratorContext::TypeName:
+      Error = 15; // Generic
+      break;
+    case DeclaratorContext::File:
+    case DeclaratorContext::Block:
+    case DeclaratorContext::ForInit:
+    case DeclaratorContext::SelectionInit:
+    case DeclaratorContext::Condition:
+      // FIXME: P0091R3 (erroneously) does not permit class template argument
+      // deduction in conditions, for-init-statements, and other declarations
+      // that are not simple-declarations.
+      break;
+    case DeclaratorContext::CXXNew:
+      // FIXME: P0091R3 does not permit class template argument deduction here,
+      // but we follow GCC and allow it anyway.
+      if (!IsCXXAutoType && !isa<DeducedTemplateSpecializationType>(Deduced))
+        Error = 17; // 'new' type
+      break;
+    case DeclaratorContext::KNRTypeList:
+      Error = 18; // K&R function parameter
       break;
     }
 
     if (D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef)
-      Error = 9;
-
-    // In Objective-C it is an error to use 'auto' on a function declarator.
-    if (D.isFunctionDeclarator())
       Error = 11;
 
-    // C++11 [dcl.spec.auto]p2: 'auto' is always fine if the declarator
-    // contains a trailing return type. That is only legal at the outermost
-    // level. Check all declarator chunks (outermost first) anyway, to give
-    // better diagnostics.
-    if (SemaRef.getLangOpts().CPlusPlus11 && Error != -1) {
-      for (unsigned i = 0, e = D.getNumTypeObjects(); i != e; ++i) {
-        unsigned chunkIndex = e - i - 1;
-        state.setCurrentChunkIndex(chunkIndex);
-        DeclaratorChunk &DeclType = D.getTypeObject(chunkIndex);
-        if (DeclType.Kind == DeclaratorChunk::Function) {
-          const DeclaratorChunk::FunctionTypeInfo &FTI = DeclType.Fun;
-          if (FTI.hasTrailingReturnType()) {
-            Error = -1;
-            break;
-          }
-        }
-      }
-    }
+    // In Objective-C it is an error to use 'auto' on a function declarator
+    // (and everywhere for '__auto_type').
+    if (D.isFunctionDeclarator() &&
+        (!SemaRef.getLangOpts().CPlusPlus11 || !IsCXXAutoType))
+      Error = 13;
 
     SourceRange AutoRange = D.getDeclSpec().getTypeSpecTypeLoc();
-    if (D.getName().getKind() == UnqualifiedId::IK_ConversionFunctionId)
+    if (D.getName().getKind() == UnqualifiedIdKind::IK_ConversionFunctionId)
       AutoRange = D.getName().getSourceRange();
 
     if (Error != -1) {
-      const bool IsDeclTypeAuto = 
-          D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_decltype_auto;
+      unsigned Kind;
+      if (Auto) {
+        switch (Auto->getKeyword()) {
+        case AutoTypeKeyword::Auto: Kind = 0; break;
+        case AutoTypeKeyword::DecltypeAuto: Kind = 1; break;
+        case AutoTypeKeyword::GNUAutoType: Kind = 2; break;
+        }
+      } else {
+        assert(isa<DeducedTemplateSpecializationType>(Deduced) &&
+               "unknown auto type");
+        Kind = 3;
+      }
+
+      auto *DTST = dyn_cast<DeducedTemplateSpecializationType>(Deduced);
+      TemplateName TN = DTST ? DTST->getTemplateName() : TemplateName();
+
       SemaRef.Diag(AutoRange.getBegin(), diag::err_auto_not_allowed)
-        << IsDeclTypeAuto << Error << AutoRange;
+        << Kind << Error << (int)SemaRef.getTemplateNameKindForDiagnostics(TN)
+        << QualType(Deduced, 0) << AutoRange;
+      if (auto *TD = TN.getAsTemplateDecl())
+        SemaRef.Diag(TD->getLocation(), diag::note_template_decl_here);
+
       T = SemaRef.Context.IntTy;
       D.setInvalidType(true);
-    } else
+    } else if (Auto && D.getContext() != DeclaratorContext::LambdaExpr) {
+      // If there was a trailing return type, we already got
+      // warn_cxx98_compat_trailing_return_type in the parser.
       SemaRef.Diag(AutoRange.getBegin(),
-                   diag::warn_cxx98_compat_auto_type_specifier)
-        << AutoRange;
+                   D.getContext() == DeclaratorContext::LambdaExprParameter
+                       ? diag::warn_cxx11_compat_generic_lambda
+                   : IsDeducedReturnType
+                       ? diag::warn_cxx11_compat_deduced_return_type
+                       : diag::warn_cxx98_compat_auto_type_specifier)
+          << AutoRange;
+    }
   }
 
   if (SemaRef.getLangOpts().CPlusPlus &&
       OwnedTagDecl && OwnedTagDecl->isCompleteDefinition()) {
     // Check the contexts where C++ forbids the declaration of a new class
     // or enumeration in a type-specifier-seq.
+    unsigned DiagID = 0;
     switch (D.getContext()) {
-    case Declarator::TrailingReturnContext:
+    case DeclaratorContext::TrailingReturn:
+    case DeclaratorContext::TrailingReturnVar:
       // Class and enumeration definitions are syntactically not allowed in
       // trailing return types.
       llvm_unreachable("parser should not have allowed this");
       break;
-    case Declarator::FileContext:
-    case Declarator::MemberContext:
-    case Declarator::BlockContext:
-    case Declarator::ForContext:
-    case Declarator::BlockLiteralContext:
-    case Declarator::LambdaExprContext:
+    case DeclaratorContext::File:
+    case DeclaratorContext::Member:
+    case DeclaratorContext::Block:
+    case DeclaratorContext::ForInit:
+    case DeclaratorContext::SelectionInit:
+    case DeclaratorContext::BlockLiteral:
+    case DeclaratorContext::LambdaExpr:
       // C++11 [dcl.type]p3:
       //   A type-specifier-seq shall not define a class or enumeration unless
       //   it appears in the type-id of an alias-declaration (7.1.3) that is not
       //   the declaration of a template-declaration.
-    case Declarator::AliasDeclContext:
+    case DeclaratorContext::AliasDecl:
       break;
-    case Declarator::AliasTemplateContext:
-      SemaRef.Diag(OwnedTagDecl->getLocation(),
-             diag::err_type_defined_in_alias_template)
-        << SemaRef.Context.getTypeDeclType(OwnedTagDecl);
-      D.setInvalidType(true);
+    case DeclaratorContext::AliasTemplate:
+      DiagID = diag::err_type_defined_in_alias_template;
       break;
-    case Declarator::TypeNameContext:
-    case Declarator::ConversionIdContext:
-    case Declarator::TemplateParamContext:
-    case Declarator::CXXNewContext:
-    case Declarator::CXXCatchContext:
-    case Declarator::ObjCCatchContext:
-    case Declarator::TemplateTypeArgContext:
-      SemaRef.Diag(OwnedTagDecl->getLocation(),
-             diag::err_type_defined_in_type_specifier)
-        << SemaRef.Context.getTypeDeclType(OwnedTagDecl);
-      D.setInvalidType(true);
+    case DeclaratorContext::TypeName:
+    case DeclaratorContext::FunctionalCast:
+    case DeclaratorContext::ConversionId:
+    case DeclaratorContext::TemplateParam:
+    case DeclaratorContext::CXXNew:
+    case DeclaratorContext::CXXCatch:
+    case DeclaratorContext::ObjCCatch:
+    case DeclaratorContext::TemplateArg:
+    case DeclaratorContext::TemplateTypeArg:
+      DiagID = diag::err_type_defined_in_type_specifier;
       break;
-    case Declarator::PrototypeContext:
-    case Declarator::LambdaExprParameterContext:
-    case Declarator::ObjCParameterContext:
-    case Declarator::ObjCResultContext:
-    case Declarator::KNRTypeListContext:
+    case DeclaratorContext::Prototype:
+    case DeclaratorContext::LambdaExprParameter:
+    case DeclaratorContext::ObjCParameter:
+    case DeclaratorContext::ObjCResult:
+    case DeclaratorContext::KNRTypeList:
+    case DeclaratorContext::RequiresExpr:
       // C++ [dcl.fct]p6:
       //   Types shall not be defined in return or parameter types.
-      SemaRef.Diag(OwnedTagDecl->getLocation(),
-                   diag::err_type_defined_in_param_type)
-        << SemaRef.Context.getTypeDeclType(OwnedTagDecl);
-      D.setInvalidType(true);
+      DiagID = diag::err_type_defined_in_param_type;
       break;
-    case Declarator::ConditionContext:
+    case DeclaratorContext::Condition:
       // C++ 6.4p2:
       // The type-specifier-seq shall not contain typedef and shall not declare
       // a new class or enumeration.
-      SemaRef.Diag(OwnedTagDecl->getLocation(),
-                   diag::err_type_defined_in_condition);
-      D.setInvalidType(true);
+      DiagID = diag::err_type_defined_in_condition;
       break;
+    }
+
+    if (DiagID != 0) {
+      SemaRef.Diag(OwnedTagDecl->getLocation(), DiagID)
+          << SemaRef.Context.getTypeDeclType(OwnedTagDecl);
+      D.setInvalidType(true);
     }
   }
 
@@ -2359,15 +3632,14 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
   // Only warn if this declarator is declaring a function at block scope, and
   // doesn't have a storage class (such as 'extern') specified.
   if (!D.isFunctionDeclarator() ||
-      D.getFunctionDefinitionKind() != FDK_Declaration ||
+      D.getFunctionDefinitionKind() != FunctionDefinitionKind::Declaration ||
       !S.CurContext->isFunctionOrMethod() ||
-      D.getDeclSpec().getStorageClassSpec()
-        != DeclSpec::SCS_unspecified)
+      D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_unspecified)
     return;
 
   // Inside a condition, a direct initializer is not permitted. We allow one to
   // be parsed in order to give better diagnostics in condition parsing.
-  if (D.getContext() == Declarator::ConditionContext)
+  if (D.getContext() == DeclaratorContext::Condition)
     return;
 
   SourceRange ParenRange(DeclType.Loc, DeclType.EndLoc);
@@ -2393,6 +3665,7 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
         S.Diag(D.getCommaLoc(), diag::note_empty_parens_function_call)
           << FixItHint::CreateReplacement(D.getCommaLoc(), ";")
           << D.getIdentifier();
+      Result.suppressDiagnostics();
     }
   }
 
@@ -2434,15 +3707,151 @@ static void warnAboutAmbiguousFunction(Sema &S, Declarator &D,
   }
 }
 
+/// Produce an appropriate diagnostic for a declarator with top-level
+/// parentheses.
+static void warnAboutRedundantParens(Sema &S, Declarator &D, QualType T) {
+  DeclaratorChunk &Paren = D.getTypeObject(D.getNumTypeObjects() - 1);
+  assert(Paren.Kind == DeclaratorChunk::Paren &&
+         "do not have redundant top-level parentheses");
+
+  // This is a syntactic check; we're not interested in cases that arise
+  // during template instantiation.
+  if (S.inTemplateInstantiation())
+    return;
+
+  // Check whether this could be intended to be a construction of a temporary
+  // object in C++ via a function-style cast.
+  bool CouldBeTemporaryObject =
+      S.getLangOpts().CPlusPlus && D.isExpressionContext() &&
+      !D.isInvalidType() && D.getIdentifier() &&
+      D.getDeclSpec().getParsedSpecifiers() == DeclSpec::PQ_TypeSpecifier &&
+      (T->isRecordType() || T->isDependentType()) &&
+      D.getDeclSpec().getTypeQualifiers() == 0 && D.isFirstDeclarator();
+
+  bool StartsWithDeclaratorId = true;
+  for (auto &C : D.type_objects()) {
+    switch (C.Kind) {
+    case DeclaratorChunk::Paren:
+      if (&C == &Paren)
+        continue;
+      LLVM_FALLTHROUGH;
+    case DeclaratorChunk::Pointer:
+      StartsWithDeclaratorId = false;
+      continue;
+
+    case DeclaratorChunk::Array:
+      if (!C.Arr.NumElts)
+        CouldBeTemporaryObject = false;
+      continue;
+
+    case DeclaratorChunk::Reference:
+      // FIXME: Suppress the warning here if there is no initializer; we're
+      // going to give an error anyway.
+      // We assume that something like 'T (&x) = y;' is highly likely to not
+      // be intended to be a temporary object.
+      CouldBeTemporaryObject = false;
+      StartsWithDeclaratorId = false;
+      continue;
+
+    case DeclaratorChunk::Function:
+      // In a new-type-id, function chunks require parentheses.
+      if (D.getContext() == DeclaratorContext::CXXNew)
+        return;
+      // FIXME: "A(f())" deserves a vexing-parse warning, not just a
+      // redundant-parens warning, but we don't know whether the function
+      // chunk was syntactically valid as an expression here.
+      CouldBeTemporaryObject = false;
+      continue;
+
+    case DeclaratorChunk::BlockPointer:
+    case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
+      // These cannot appear in expressions.
+      CouldBeTemporaryObject = false;
+      StartsWithDeclaratorId = false;
+      continue;
+    }
+  }
+
+  // FIXME: If there is an initializer, assume that this is not intended to be
+  // a construction of a temporary object.
+
+  // Check whether the name has already been declared; if not, this is not a
+  // function-style cast.
+  if (CouldBeTemporaryObject) {
+    LookupResult Result(S, D.getIdentifier(), SourceLocation(),
+                        Sema::LookupOrdinaryName);
+    if (!S.LookupName(Result, S.getCurScope()))
+      CouldBeTemporaryObject = false;
+    Result.suppressDiagnostics();
+  }
+
+  SourceRange ParenRange(Paren.Loc, Paren.EndLoc);
+
+  if (!CouldBeTemporaryObject) {
+    // If we have A (::B), the parentheses affect the meaning of the program.
+    // Suppress the warning in that case. Don't bother looking at the DeclSpec
+    // here: even (e.g.) "int ::x" is visually ambiguous even though it's
+    // formally unambiguous.
+    if (StartsWithDeclaratorId && D.getCXXScopeSpec().isValid()) {
+      for (NestedNameSpecifier *NNS = D.getCXXScopeSpec().getScopeRep(); NNS;
+           NNS = NNS->getPrefix()) {
+        if (NNS->getKind() == NestedNameSpecifier::Global)
+          return;
+      }
+    }
+
+    S.Diag(Paren.Loc, diag::warn_redundant_parens_around_declarator)
+        << ParenRange << FixItHint::CreateRemoval(Paren.Loc)
+        << FixItHint::CreateRemoval(Paren.EndLoc);
+    return;
+  }
+
+  S.Diag(Paren.Loc, diag::warn_parens_disambiguated_as_variable_declaration)
+      << ParenRange << D.getIdentifier();
+  auto *RD = T->getAsCXXRecordDecl();
+  if (!RD || !RD->hasDefinition() || RD->hasNonTrivialDestructor())
+    S.Diag(Paren.Loc, diag::note_raii_guard_add_name)
+        << FixItHint::CreateInsertion(Paren.Loc, " varname") << T
+        << D.getIdentifier();
+  // FIXME: A cast to void is probably a better suggestion in cases where it's
+  // valid (when there is no initializer and we're not in a condition).
+  S.Diag(D.getBeginLoc(), diag::note_function_style_cast_add_parentheses)
+      << FixItHint::CreateInsertion(D.getBeginLoc(), "(")
+      << FixItHint::CreateInsertion(S.getLocForEndOfToken(D.getEndLoc()), ")");
+  S.Diag(Paren.Loc, diag::note_remove_parens_for_variable_declaration)
+      << FixItHint::CreateRemoval(Paren.Loc)
+      << FixItHint::CreateRemoval(Paren.EndLoc);
+}
+
 /// Helper for figuring out the default CC for a function declarator type.  If
 /// this is the outermost chunk, then we can determine the CC from the
 /// declarator context.  If not, then this could be either a member function
 /// type or normal function type.
-static CallingConv
-getCCForDeclaratorChunk(Sema &S, Declarator &D,
-                        const DeclaratorChunk::FunctionTypeInfo &FTI,
-                        unsigned ChunkIndex) {
+static CallingConv getCCForDeclaratorChunk(
+    Sema &S, Declarator &D, const ParsedAttributesView &AttrList,
+    const DeclaratorChunk::FunctionTypeInfo &FTI, unsigned ChunkIndex) {
   assert(D.getTypeObject(ChunkIndex).Kind == DeclaratorChunk::Function);
+
+  // Check for an explicit CC attribute.
+  for (const ParsedAttr &AL : AttrList) {
+    switch (AL.getKind()) {
+    CALLING_CONV_ATTRS_CASELIST : {
+      // Ignore attributes that don't validate or can't apply to the
+      // function type.  We'll diagnose the failure to apply them in
+      // handleFunctionTypeAttr.
+      CallingConv CC;
+      if (!S.CheckCallingConvAttr(AL, CC) &&
+          (!FTI.isVariadic || supportsVariadicCall(CC))) {
+        return CC;
+      }
+      break;
+    }
+
+    default:
+      break;
+    }
+  }
 
   bool IsCXXInstanceMethod = false;
 
@@ -2463,6 +3872,10 @@ getCCForDeclaratorChunk(Sema &S, Declarator &D,
       // in a member pointer.
       IsCXXInstanceMethod =
           D.getTypeObject(I).Kind == DeclaratorChunk::MemberPointer;
+    } else if (D.getContext() == DeclaratorContext::LambdaExpr) {
+      // This can only be a call operator for a lambda, which is an instance
+      // method.
+      IsCXXInstanceMethod = true;
     } else {
       // We're the innermost decl chunk, so must be a function declarator.
       assert(D.isFunctionDeclarator());
@@ -2476,8 +3889,520 @@ getCCForDeclaratorChunk(Sema &S, Declarator &D,
     }
   }
 
-  return S.Context.getDefaultCallingConvention(FTI.isVariadic,
-                                               IsCXXInstanceMethod);
+  CallingConv CC = S.Context.getDefaultCallingConvention(FTI.isVariadic,
+                                                         IsCXXInstanceMethod);
+
+  // Attribute AT_OpenCLKernel affects the calling convention for SPIR
+  // and AMDGPU targets, hence it cannot be treated as a calling
+  // convention attribute. This is the simplest place to infer
+  // calling convention for OpenCL kernels.
+  if (S.getLangOpts().OpenCL) {
+    for (const ParsedAttr &AL : D.getDeclSpec().getAttributes()) {
+      if (AL.getKind() == ParsedAttr::AT_OpenCLKernel) {
+        CC = CC_OpenCLKernel;
+        break;
+      }
+    }
+  }
+
+  return CC;
+}
+
+namespace {
+  /// A simple notion of pointer kinds, which matches up with the various
+  /// pointer declarators.
+  enum class SimplePointerKind {
+    Pointer,
+    BlockPointer,
+    MemberPointer,
+    Array,
+  };
+} // end anonymous namespace
+
+IdentifierInfo *Sema::getNullabilityKeyword(NullabilityKind nullability) {
+  switch (nullability) {
+  case NullabilityKind::NonNull:
+    if (!Ident__Nonnull)
+      Ident__Nonnull = PP.getIdentifierInfo("_Nonnull");
+    return Ident__Nonnull;
+
+  case NullabilityKind::Nullable:
+    if (!Ident__Nullable)
+      Ident__Nullable = PP.getIdentifierInfo("_Nullable");
+    return Ident__Nullable;
+
+  case NullabilityKind::NullableResult:
+    if (!Ident__Nullable_result)
+      Ident__Nullable_result = PP.getIdentifierInfo("_Nullable_result");
+    return Ident__Nullable_result;
+
+  case NullabilityKind::Unspecified:
+    if (!Ident__Null_unspecified)
+      Ident__Null_unspecified = PP.getIdentifierInfo("_Null_unspecified");
+    return Ident__Null_unspecified;
+  }
+  llvm_unreachable("Unknown nullability kind.");
+}
+
+/// Retrieve the identifier "NSError".
+IdentifierInfo *Sema::getNSErrorIdent() {
+  if (!Ident_NSError)
+    Ident_NSError = PP.getIdentifierInfo("NSError");
+
+  return Ident_NSError;
+}
+
+/// Check whether there is a nullability attribute of any kind in the given
+/// attribute list.
+static bool hasNullabilityAttr(const ParsedAttributesView &attrs) {
+  for (const ParsedAttr &AL : attrs) {
+    if (AL.getKind() == ParsedAttr::AT_TypeNonNull ||
+        AL.getKind() == ParsedAttr::AT_TypeNullable ||
+        AL.getKind() == ParsedAttr::AT_TypeNullableResult ||
+        AL.getKind() == ParsedAttr::AT_TypeNullUnspecified)
+      return true;
+  }
+
+  return false;
+}
+
+namespace {
+  /// Describes the kind of a pointer a declarator describes.
+  enum class PointerDeclaratorKind {
+    // Not a pointer.
+    NonPointer,
+    // Single-level pointer.
+    SingleLevelPointer,
+    // Multi-level pointer (of any pointer kind).
+    MultiLevelPointer,
+    // CFFooRef*
+    MaybePointerToCFRef,
+    // CFErrorRef*
+    CFErrorRefPointer,
+    // NSError**
+    NSErrorPointerPointer,
+  };
+
+  /// Describes a declarator chunk wrapping a pointer that marks inference as
+  /// unexpected.
+  // These values must be kept in sync with diagnostics.
+  enum class PointerWrappingDeclaratorKind {
+    /// Pointer is top-level.
+    None = -1,
+    /// Pointer is an array element.
+    Array = 0,
+    /// Pointer is the referent type of a C++ reference.
+    Reference = 1
+  };
+} // end anonymous namespace
+
+/// Classify the given declarator, whose type-specified is \c type, based on
+/// what kind of pointer it refers to.
+///
+/// This is used to determine the default nullability.
+static PointerDeclaratorKind
+classifyPointerDeclarator(Sema &S, QualType type, Declarator &declarator,
+                          PointerWrappingDeclaratorKind &wrappingKind) {
+  unsigned numNormalPointers = 0;
+
+  // For any dependent type, we consider it a non-pointer.
+  if (type->isDependentType())
+    return PointerDeclaratorKind::NonPointer;
+
+  // Look through the declarator chunks to identify pointers.
+  for (unsigned i = 0, n = declarator.getNumTypeObjects(); i != n; ++i) {
+    DeclaratorChunk &chunk = declarator.getTypeObject(i);
+    switch (chunk.Kind) {
+    case DeclaratorChunk::Array:
+      if (numNormalPointers == 0)
+        wrappingKind = PointerWrappingDeclaratorKind::Array;
+      break;
+
+    case DeclaratorChunk::Function:
+    case DeclaratorChunk::Pipe:
+      break;
+
+    case DeclaratorChunk::BlockPointer:
+    case DeclaratorChunk::MemberPointer:
+      return numNormalPointers > 0 ? PointerDeclaratorKind::MultiLevelPointer
+                                   : PointerDeclaratorKind::SingleLevelPointer;
+
+    case DeclaratorChunk::Paren:
+      break;
+
+    case DeclaratorChunk::Reference:
+      if (numNormalPointers == 0)
+        wrappingKind = PointerWrappingDeclaratorKind::Reference;
+      break;
+
+    case DeclaratorChunk::Pointer:
+      ++numNormalPointers;
+      if (numNormalPointers > 2)
+        return PointerDeclaratorKind::MultiLevelPointer;
+      break;
+    }
+  }
+
+  // Then, dig into the type specifier itself.
+  unsigned numTypeSpecifierPointers = 0;
+  do {
+    // Decompose normal pointers.
+    if (auto ptrType = type->getAs<PointerType>()) {
+      ++numNormalPointers;
+
+      if (numNormalPointers > 2)
+        return PointerDeclaratorKind::MultiLevelPointer;
+
+      type = ptrType->getPointeeType();
+      ++numTypeSpecifierPointers;
+      continue;
+    }
+
+    // Decompose block pointers.
+    if (type->getAs<BlockPointerType>()) {
+      return numNormalPointers > 0 ? PointerDeclaratorKind::MultiLevelPointer
+                                   : PointerDeclaratorKind::SingleLevelPointer;
+    }
+
+    // Decompose member pointers.
+    if (type->getAs<MemberPointerType>()) {
+      return numNormalPointers > 0 ? PointerDeclaratorKind::MultiLevelPointer
+                                   : PointerDeclaratorKind::SingleLevelPointer;
+    }
+
+    // Look at Objective-C object pointers.
+    if (auto objcObjectPtr = type->getAs<ObjCObjectPointerType>()) {
+      ++numNormalPointers;
+      ++numTypeSpecifierPointers;
+
+      // If this is NSError**, report that.
+      if (auto objcClassDecl = objcObjectPtr->getInterfaceDecl()) {
+        if (objcClassDecl->getIdentifier() == S.getNSErrorIdent() &&
+            numNormalPointers == 2 && numTypeSpecifierPointers < 2) {
+          return PointerDeclaratorKind::NSErrorPointerPointer;
+        }
+      }
+
+      break;
+    }
+
+    // Look at Objective-C class types.
+    if (auto objcClass = type->getAs<ObjCInterfaceType>()) {
+      if (objcClass->getInterface()->getIdentifier() == S.getNSErrorIdent()) {
+        if (numNormalPointers == 2 && numTypeSpecifierPointers < 2)
+          return PointerDeclaratorKind::NSErrorPointerPointer;
+      }
+
+      break;
+    }
+
+    // If at this point we haven't seen a pointer, we won't see one.
+    if (numNormalPointers == 0)
+      return PointerDeclaratorKind::NonPointer;
+
+    if (auto recordType = type->getAs<RecordType>()) {
+      RecordDecl *recordDecl = recordType->getDecl();
+
+      // If this is CFErrorRef*, report it as such.
+      if (numNormalPointers == 2 && numTypeSpecifierPointers < 2 &&
+          S.isCFError(recordDecl)) {
+        return PointerDeclaratorKind::CFErrorRefPointer;
+      }
+      break;
+    }
+
+    break;
+  } while (true);
+
+  switch (numNormalPointers) {
+  case 0:
+    return PointerDeclaratorKind::NonPointer;
+
+  case 1:
+    return PointerDeclaratorKind::SingleLevelPointer;
+
+  case 2:
+    return PointerDeclaratorKind::MaybePointerToCFRef;
+
+  default:
+    return PointerDeclaratorKind::MultiLevelPointer;
+  }
+}
+
+bool Sema::isCFError(RecordDecl *RD) {
+  // If we already know about CFError, test it directly.
+  if (CFError)
+    return CFError == RD;
+
+  // Check whether this is CFError, which we identify based on its bridge to
+  // NSError. CFErrorRef used to be declared with "objc_bridge" but is now
+  // declared with "objc_bridge_mutable", so look for either one of the two
+  // attributes.
+  if (RD->getTagKind() == TTK_Struct) {
+    IdentifierInfo *bridgedType = nullptr;
+    if (auto bridgeAttr = RD->getAttr<ObjCBridgeAttr>())
+      bridgedType = bridgeAttr->getBridgedType();
+    else if (auto bridgeAttr = RD->getAttr<ObjCBridgeMutableAttr>())
+      bridgedType = bridgeAttr->getBridgedType();
+
+    if (bridgedType == getNSErrorIdent()) {
+      CFError = RD;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static FileID getNullabilityCompletenessCheckFileID(Sema &S,
+                                                    SourceLocation loc) {
+  // If we're anywhere in a function, method, or closure context, don't perform
+  // completeness checks.
+  for (DeclContext *ctx = S.CurContext; ctx; ctx = ctx->getParent()) {
+    if (ctx->isFunctionOrMethod())
+      return FileID();
+
+    if (ctx->isFileContext())
+      break;
+  }
+
+  // We only care about the expansion location.
+  loc = S.SourceMgr.getExpansionLoc(loc);
+  FileID file = S.SourceMgr.getFileID(loc);
+  if (file.isInvalid())
+    return FileID();
+
+  // Retrieve file information.
+  bool invalid = false;
+  const SrcMgr::SLocEntry &sloc = S.SourceMgr.getSLocEntry(file, &invalid);
+  if (invalid || !sloc.isFile())
+    return FileID();
+
+  // We don't want to perform completeness checks on the main file or in
+  // system headers.
+  const SrcMgr::FileInfo &fileInfo = sloc.getFile();
+  if (fileInfo.getIncludeLoc().isInvalid())
+    return FileID();
+  if (fileInfo.getFileCharacteristic() != SrcMgr::C_User &&
+      S.Diags.getSuppressSystemWarnings()) {
+    return FileID();
+  }
+
+  return file;
+}
+
+/// Creates a fix-it to insert a C-style nullability keyword at \p pointerLoc,
+/// taking into account whitespace before and after.
+template <typename DiagBuilderT>
+static void fixItNullability(Sema &S, DiagBuilderT &Diag,
+                             SourceLocation PointerLoc,
+                             NullabilityKind Nullability) {
+  assert(PointerLoc.isValid());
+  if (PointerLoc.isMacroID())
+    return;
+
+  SourceLocation FixItLoc = S.getLocForEndOfToken(PointerLoc);
+  if (!FixItLoc.isValid() || FixItLoc == PointerLoc)
+    return;
+
+  const char *NextChar = S.SourceMgr.getCharacterData(FixItLoc);
+  if (!NextChar)
+    return;
+
+  SmallString<32> InsertionTextBuf{" "};
+  InsertionTextBuf += getNullabilitySpelling(Nullability);
+  InsertionTextBuf += " ";
+  StringRef InsertionText = InsertionTextBuf.str();
+
+  if (isWhitespace(*NextChar)) {
+    InsertionText = InsertionText.drop_back();
+  } else if (NextChar[-1] == '[') {
+    if (NextChar[0] == ']')
+      InsertionText = InsertionText.drop_back().drop_front();
+    else
+      InsertionText = InsertionText.drop_front();
+  } else if (!isIdentifierBody(NextChar[0], /*allow dollar*/true) &&
+             !isIdentifierBody(NextChar[-1], /*allow dollar*/true)) {
+    InsertionText = InsertionText.drop_back().drop_front();
+  }
+
+  Diag << FixItHint::CreateInsertion(FixItLoc, InsertionText);
+}
+
+static void emitNullabilityConsistencyWarning(Sema &S,
+                                              SimplePointerKind PointerKind,
+                                              SourceLocation PointerLoc,
+                                              SourceLocation PointerEndLoc) {
+  assert(PointerLoc.isValid());
+
+  if (PointerKind == SimplePointerKind::Array) {
+    S.Diag(PointerLoc, diag::warn_nullability_missing_array);
+  } else {
+    S.Diag(PointerLoc, diag::warn_nullability_missing)
+      << static_cast<unsigned>(PointerKind);
+  }
+
+  auto FixItLoc = PointerEndLoc.isValid() ? PointerEndLoc : PointerLoc;
+  if (FixItLoc.isMacroID())
+    return;
+
+  auto addFixIt = [&](NullabilityKind Nullability) {
+    auto Diag = S.Diag(FixItLoc, diag::note_nullability_fix_it);
+    Diag << static_cast<unsigned>(Nullability);
+    Diag << static_cast<unsigned>(PointerKind);
+    fixItNullability(S, Diag, FixItLoc, Nullability);
+  };
+  addFixIt(NullabilityKind::Nullable);
+  addFixIt(NullabilityKind::NonNull);
+}
+
+/// Complains about missing nullability if the file containing \p pointerLoc
+/// has other uses of nullability (either the keywords or the \c assume_nonnull
+/// pragma).
+///
+/// If the file has \e not seen other uses of nullability, this particular
+/// pointer is saved for possible later diagnosis. See recordNullabilitySeen().
+static void
+checkNullabilityConsistency(Sema &S, SimplePointerKind pointerKind,
+                            SourceLocation pointerLoc,
+                            SourceLocation pointerEndLoc = SourceLocation()) {
+  // Determine which file we're performing consistency checking for.
+  FileID file = getNullabilityCompletenessCheckFileID(S, pointerLoc);
+  if (file.isInvalid())
+    return;
+
+  // If we haven't seen any type nullability in this file, we won't warn now
+  // about anything.
+  FileNullability &fileNullability = S.NullabilityMap[file];
+  if (!fileNullability.SawTypeNullability) {
+    // If this is the first pointer declarator in the file, and the appropriate
+    // warning is on, record it in case we need to diagnose it retroactively.
+    diag::kind diagKind;
+    if (pointerKind == SimplePointerKind::Array)
+      diagKind = diag::warn_nullability_missing_array;
+    else
+      diagKind = diag::warn_nullability_missing;
+
+    if (fileNullability.PointerLoc.isInvalid() &&
+        !S.Context.getDiagnostics().isIgnored(diagKind, pointerLoc)) {
+      fileNullability.PointerLoc = pointerLoc;
+      fileNullability.PointerEndLoc = pointerEndLoc;
+      fileNullability.PointerKind = static_cast<unsigned>(pointerKind);
+    }
+
+    return;
+  }
+
+  // Complain about missing nullability.
+  emitNullabilityConsistencyWarning(S, pointerKind, pointerLoc, pointerEndLoc);
+}
+
+/// Marks that a nullability feature has been used in the file containing
+/// \p loc.
+///
+/// If this file already had pointer types in it that were missing nullability,
+/// the first such instance is retroactively diagnosed.
+///
+/// \sa checkNullabilityConsistency
+static void recordNullabilitySeen(Sema &S, SourceLocation loc) {
+  FileID file = getNullabilityCompletenessCheckFileID(S, loc);
+  if (file.isInvalid())
+    return;
+
+  FileNullability &fileNullability = S.NullabilityMap[file];
+  if (fileNullability.SawTypeNullability)
+    return;
+  fileNullability.SawTypeNullability = true;
+
+  // If we haven't seen any type nullability before, now we have. Retroactively
+  // diagnose the first unannotated pointer, if there was one.
+  if (fileNullability.PointerLoc.isInvalid())
+    return;
+
+  auto kind = static_cast<SimplePointerKind>(fileNullability.PointerKind);
+  emitNullabilityConsistencyWarning(S, kind, fileNullability.PointerLoc,
+                                    fileNullability.PointerEndLoc);
+}
+
+/// Returns true if any of the declarator chunks before \p endIndex include a
+/// level of indirection: array, pointer, reference, or pointer-to-member.
+///
+/// Because declarator chunks are stored in outer-to-inner order, testing
+/// every chunk before \p endIndex is testing all chunks that embed the current
+/// chunk as part of their type.
+///
+/// It is legal to pass the result of Declarator::getNumTypeObjects() as the
+/// end index, in which case all chunks are tested.
+static bool hasOuterPointerLikeChunk(const Declarator &D, unsigned endIndex) {
+  unsigned i = endIndex;
+  while (i != 0) {
+    // Walk outwards along the declarator chunks.
+    --i;
+    const DeclaratorChunk &DC = D.getTypeObject(i);
+    switch (DC.Kind) {
+    case DeclaratorChunk::Paren:
+      break;
+    case DeclaratorChunk::Array:
+    case DeclaratorChunk::Pointer:
+    case DeclaratorChunk::Reference:
+    case DeclaratorChunk::MemberPointer:
+      return true;
+    case DeclaratorChunk::Function:
+    case DeclaratorChunk::BlockPointer:
+    case DeclaratorChunk::Pipe:
+      // These are invalid anyway, so just ignore.
+      break;
+    }
+  }
+  return false;
+}
+
+static bool IsNoDerefableChunk(DeclaratorChunk Chunk) {
+  return (Chunk.Kind == DeclaratorChunk::Pointer ||
+          Chunk.Kind == DeclaratorChunk::Array);
+}
+
+template<typename AttrT>
+static AttrT *createSimpleAttr(ASTContext &Ctx, ParsedAttr &AL) {
+  AL.setUsedAsTypeAttr();
+  return ::new (Ctx) AttrT(Ctx, AL);
+}
+
+static Attr *createNullabilityAttr(ASTContext &Ctx, ParsedAttr &Attr,
+                                   NullabilityKind NK) {
+  switch (NK) {
+  case NullabilityKind::NonNull:
+    return createSimpleAttr<TypeNonNullAttr>(Ctx, Attr);
+
+  case NullabilityKind::Nullable:
+    return createSimpleAttr<TypeNullableAttr>(Ctx, Attr);
+
+  case NullabilityKind::NullableResult:
+    return createSimpleAttr<TypeNullableResultAttr>(Ctx, Attr);
+
+  case NullabilityKind::Unspecified:
+    return createSimpleAttr<TypeNullUnspecifiedAttr>(Ctx, Attr);
+  }
+  llvm_unreachable("unknown NullabilityKind");
+}
+
+// Diagnose whether this is a case with the multiple addr spaces.
+// Returns true if this is an invalid case.
+// ISO/IEC TR 18037 S5.3 (amending C99 6.7.3): "No type shall be qualified
+// by qualifiers for two or more different address spaces."
+static bool DiagnoseMultipleAddrSpaceAttributes(Sema &S, LangAS ASOld,
+                                                LangAS ASNew,
+                                                SourceLocation AttrLoc) {
+  if (ASOld != LangAS::Default) {
+    if (ASOld != ASNew) {
+      S.Diag(AttrLoc, diag::err_attribute_address_multiple_qualifiers);
+      return true;
+    }
+    // Emit a warning if they are identical; it's likely unintended.
+    S.Diag(AttrLoc,
+           diag::warn_attribute_address_multiple_identical_qualifiers);
+  }
+  return false;
 }
 
 static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
@@ -2498,28 +4423,43 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
   // Does this declaration declare a typedef-name?
   bool IsTypedefName =
-    D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef ||
-    D.getContext() == Declarator::AliasDeclContext ||
-    D.getContext() == Declarator::AliasTemplateContext;
+      D.getDeclSpec().getStorageClassSpec() == DeclSpec::SCS_typedef ||
+      D.getContext() == DeclaratorContext::AliasDecl ||
+      D.getContext() == DeclaratorContext::AliasTemplate;
 
   // Does T refer to a function type with a cv-qualifier or a ref-qualifier?
   bool IsQualifiedFunction = T->isFunctionProtoType() &&
-      (T->castAs<FunctionProtoType>()->getTypeQuals() != 0 ||
+      (!T->castAs<FunctionProtoType>()->getMethodQuals().empty() ||
        T->castAs<FunctionProtoType>()->getRefQualifier() != RQ_None);
 
   // If T is 'decltype(auto)', the only declarators we can have are parens
   // and at most one function declarator if this is a function declaration.
-  if (const AutoType *AT = T->getAs<AutoType>()) {
-    if (AT->isDecltypeAuto()) {
+  // If T is a deduced class template specialization type, we can have no
+  // declarator chunks at all.
+  if (auto *DT = T->getAs<DeducedType>()) {
+    const AutoType *AT = T->getAs<AutoType>();
+    bool IsClassTemplateDeduction = isa<DeducedTemplateSpecializationType>(DT);
+    if ((AT && AT->isDecltypeAuto()) || IsClassTemplateDeduction) {
       for (unsigned I = 0, E = D.getNumTypeObjects(); I != E; ++I) {
         unsigned Index = E - I - 1;
         DeclaratorChunk &DeclChunk = D.getTypeObject(Index);
-        unsigned DiagId = diag::err_decltype_auto_compound_type;
+        unsigned DiagId = IsClassTemplateDeduction
+                              ? diag::err_deduced_class_template_compound_type
+                              : diag::err_decltype_auto_compound_type;
         unsigned DiagKind = 0;
         switch (DeclChunk.Kind) {
         case DeclaratorChunk::Paren:
+          // FIXME: Rejecting this is a little silly.
+          if (IsClassTemplateDeduction) {
+            DiagKind = 4;
+            break;
+          }
           continue;
         case DeclaratorChunk::Function: {
+          if (IsClassTemplateDeduction) {
+            DiagKind = 3;
+            break;
+          }
           unsigned FnIndex;
           if (D.isFunctionDeclarationContext() &&
               D.isFunctionDeclarator(FnIndex) && FnIndex == Index)
@@ -2538,6 +4478,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         case DeclaratorChunk::Array:
           DiagKind = 2;
           break;
+        case DeclaratorChunk::Pipe:
+          break;
         }
 
         S.Diag(DeclChunk.Loc, DiagId) << DiagKind;
@@ -2546,6 +4488,291 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       }
     }
   }
+
+  // Determine whether we should infer _Nonnull on pointer types.
+  Optional<NullabilityKind> inferNullability;
+  bool inferNullabilityCS = false;
+  bool inferNullabilityInnerOnly = false;
+  bool inferNullabilityInnerOnlyComplete = false;
+
+  // Are we in an assume-nonnull region?
+  bool inAssumeNonNullRegion = false;
+  SourceLocation assumeNonNullLoc = S.PP.getPragmaAssumeNonNullLoc();
+  if (assumeNonNullLoc.isValid()) {
+    inAssumeNonNullRegion = true;
+    recordNullabilitySeen(S, assumeNonNullLoc);
+  }
+
+  // Whether to complain about missing nullability specifiers or not.
+  enum {
+    /// Never complain.
+    CAMN_No,
+    /// Complain on the inner pointers (but not the outermost
+    /// pointer).
+    CAMN_InnerPointers,
+    /// Complain about any pointers that don't have nullability
+    /// specified or inferred.
+    CAMN_Yes
+  } complainAboutMissingNullability = CAMN_No;
+  unsigned NumPointersRemaining = 0;
+  auto complainAboutInferringWithinChunk = PointerWrappingDeclaratorKind::None;
+
+  if (IsTypedefName) {
+    // For typedefs, we do not infer any nullability (the default),
+    // and we only complain about missing nullability specifiers on
+    // inner pointers.
+    complainAboutMissingNullability = CAMN_InnerPointers;
+
+    if (T->canHaveNullability(/*ResultIfUnknown*/false) &&
+        !T->getNullability(S.Context)) {
+      // Note that we allow but don't require nullability on dependent types.
+      ++NumPointersRemaining;
+    }
+
+    for (unsigned i = 0, n = D.getNumTypeObjects(); i != n; ++i) {
+      DeclaratorChunk &chunk = D.getTypeObject(i);
+      switch (chunk.Kind) {
+      case DeclaratorChunk::Array:
+      case DeclaratorChunk::Function:
+      case DeclaratorChunk::Pipe:
+        break;
+
+      case DeclaratorChunk::BlockPointer:
+      case DeclaratorChunk::MemberPointer:
+        ++NumPointersRemaining;
+        break;
+
+      case DeclaratorChunk::Paren:
+      case DeclaratorChunk::Reference:
+        continue;
+
+      case DeclaratorChunk::Pointer:
+        ++NumPointersRemaining;
+        continue;
+      }
+    }
+  } else {
+    bool isFunctionOrMethod = false;
+    switch (auto context = state.getDeclarator().getContext()) {
+    case DeclaratorContext::ObjCParameter:
+    case DeclaratorContext::ObjCResult:
+    case DeclaratorContext::Prototype:
+    case DeclaratorContext::TrailingReturn:
+    case DeclaratorContext::TrailingReturnVar:
+      isFunctionOrMethod = true;
+      LLVM_FALLTHROUGH;
+
+    case DeclaratorContext::Member:
+      if (state.getDeclarator().isObjCIvar() && !isFunctionOrMethod) {
+        complainAboutMissingNullability = CAMN_No;
+        break;
+      }
+
+      // Weak properties are inferred to be nullable.
+      if (state.getDeclarator().isObjCWeakProperty() && inAssumeNonNullRegion) {
+        inferNullability = NullabilityKind::Nullable;
+        break;
+      }
+
+      LLVM_FALLTHROUGH;
+
+    case DeclaratorContext::File:
+    case DeclaratorContext::KNRTypeList: {
+      complainAboutMissingNullability = CAMN_Yes;
+
+      // Nullability inference depends on the type and declarator.
+      auto wrappingKind = PointerWrappingDeclaratorKind::None;
+      switch (classifyPointerDeclarator(S, T, D, wrappingKind)) {
+      case PointerDeclaratorKind::NonPointer:
+      case PointerDeclaratorKind::MultiLevelPointer:
+        // Cannot infer nullability.
+        break;
+
+      case PointerDeclaratorKind::SingleLevelPointer:
+        // Infer _Nonnull if we are in an assumes-nonnull region.
+        if (inAssumeNonNullRegion) {
+          complainAboutInferringWithinChunk = wrappingKind;
+          inferNullability = NullabilityKind::NonNull;
+          inferNullabilityCS = (context == DeclaratorContext::ObjCParameter ||
+                                context == DeclaratorContext::ObjCResult);
+        }
+        break;
+
+      case PointerDeclaratorKind::CFErrorRefPointer:
+      case PointerDeclaratorKind::NSErrorPointerPointer:
+        // Within a function or method signature, infer _Nullable at both
+        // levels.
+        if (isFunctionOrMethod && inAssumeNonNullRegion)
+          inferNullability = NullabilityKind::Nullable;
+        break;
+
+      case PointerDeclaratorKind::MaybePointerToCFRef:
+        if (isFunctionOrMethod) {
+          // On pointer-to-pointer parameters marked cf_returns_retained or
+          // cf_returns_not_retained, if the outer pointer is explicit then
+          // infer the inner pointer as _Nullable.
+          auto hasCFReturnsAttr =
+              [](const ParsedAttributesView &AttrList) -> bool {
+            return AttrList.hasAttribute(ParsedAttr::AT_CFReturnsRetained) ||
+                   AttrList.hasAttribute(ParsedAttr::AT_CFReturnsNotRetained);
+          };
+          if (const auto *InnermostChunk = D.getInnermostNonParenChunk()) {
+            if (hasCFReturnsAttr(D.getAttributes()) ||
+                hasCFReturnsAttr(InnermostChunk->getAttrs()) ||
+                hasCFReturnsAttr(D.getDeclSpec().getAttributes())) {
+              inferNullability = NullabilityKind::Nullable;
+              inferNullabilityInnerOnly = true;
+            }
+          }
+        }
+        break;
+      }
+      break;
+    }
+
+    case DeclaratorContext::ConversionId:
+      complainAboutMissingNullability = CAMN_Yes;
+      break;
+
+    case DeclaratorContext::AliasDecl:
+    case DeclaratorContext::AliasTemplate:
+    case DeclaratorContext::Block:
+    case DeclaratorContext::BlockLiteral:
+    case DeclaratorContext::Condition:
+    case DeclaratorContext::CXXCatch:
+    case DeclaratorContext::CXXNew:
+    case DeclaratorContext::ForInit:
+    case DeclaratorContext::SelectionInit:
+    case DeclaratorContext::LambdaExpr:
+    case DeclaratorContext::LambdaExprParameter:
+    case DeclaratorContext::ObjCCatch:
+    case DeclaratorContext::TemplateParam:
+    case DeclaratorContext::TemplateArg:
+    case DeclaratorContext::TemplateTypeArg:
+    case DeclaratorContext::TypeName:
+    case DeclaratorContext::FunctionalCast:
+    case DeclaratorContext::RequiresExpr:
+      // Don't infer in these contexts.
+      break;
+    }
+  }
+
+  // Local function that returns true if its argument looks like a va_list.
+  auto isVaList = [&S](QualType T) -> bool {
+    auto *typedefTy = T->getAs<TypedefType>();
+    if (!typedefTy)
+      return false;
+    TypedefDecl *vaListTypedef = S.Context.getBuiltinVaListDecl();
+    do {
+      if (typedefTy->getDecl() == vaListTypedef)
+        return true;
+      if (auto *name = typedefTy->getDecl()->getIdentifier())
+        if (name->isStr("va_list"))
+          return true;
+      typedefTy = typedefTy->desugar()->getAs<TypedefType>();
+    } while (typedefTy);
+    return false;
+  };
+
+  // Local function that checks the nullability for a given pointer declarator.
+  // Returns true if _Nonnull was inferred.
+  auto inferPointerNullability =
+      [&](SimplePointerKind pointerKind, SourceLocation pointerLoc,
+          SourceLocation pointerEndLoc,
+          ParsedAttributesView &attrs, AttributePool &Pool) -> ParsedAttr * {
+    // We've seen a pointer.
+    if (NumPointersRemaining > 0)
+      --NumPointersRemaining;
+
+    // If a nullability attribute is present, there's nothing to do.
+    if (hasNullabilityAttr(attrs))
+      return nullptr;
+
+    // If we're supposed to infer nullability, do so now.
+    if (inferNullability && !inferNullabilityInnerOnlyComplete) {
+      ParsedAttr::Syntax syntax = inferNullabilityCS
+                                      ? ParsedAttr::AS_ContextSensitiveKeyword
+                                      : ParsedAttr::AS_Keyword;
+      ParsedAttr *nullabilityAttr = Pool.create(
+          S.getNullabilityKeyword(*inferNullability), SourceRange(pointerLoc),
+          nullptr, SourceLocation(), nullptr, 0, syntax);
+
+      attrs.addAtEnd(nullabilityAttr);
+
+      if (inferNullabilityCS) {
+        state.getDeclarator().getMutableDeclSpec().getObjCQualifiers()
+          ->setObjCDeclQualifier(ObjCDeclSpec::DQ_CSNullability);
+      }
+
+      if (pointerLoc.isValid() &&
+          complainAboutInferringWithinChunk !=
+            PointerWrappingDeclaratorKind::None) {
+        auto Diag =
+            S.Diag(pointerLoc, diag::warn_nullability_inferred_on_nested_type);
+        Diag << static_cast<int>(complainAboutInferringWithinChunk);
+        fixItNullability(S, Diag, pointerLoc, NullabilityKind::NonNull);
+      }
+
+      if (inferNullabilityInnerOnly)
+        inferNullabilityInnerOnlyComplete = true;
+      return nullabilityAttr;
+    }
+
+    // If we're supposed to complain about missing nullability, do so
+    // now if it's truly missing.
+    switch (complainAboutMissingNullability) {
+    case CAMN_No:
+      break;
+
+    case CAMN_InnerPointers:
+      if (NumPointersRemaining == 0)
+        break;
+      LLVM_FALLTHROUGH;
+
+    case CAMN_Yes:
+      checkNullabilityConsistency(S, pointerKind, pointerLoc, pointerEndLoc);
+    }
+    return nullptr;
+  };
+
+  // If the type itself could have nullability but does not, infer pointer
+  // nullability and perform consistency checking.
+  if (S.CodeSynthesisContexts.empty()) {
+    if (T->canHaveNullability(/*ResultIfUnknown*/false) &&
+        !T->getNullability(S.Context)) {
+      if (isVaList(T)) {
+        // Record that we've seen a pointer, but do nothing else.
+        if (NumPointersRemaining > 0)
+          --NumPointersRemaining;
+      } else {
+        SimplePointerKind pointerKind = SimplePointerKind::Pointer;
+        if (T->isBlockPointerType())
+          pointerKind = SimplePointerKind::BlockPointer;
+        else if (T->isMemberPointerType())
+          pointerKind = SimplePointerKind::MemberPointer;
+
+        if (auto *attr = inferPointerNullability(
+                pointerKind, D.getDeclSpec().getTypeSpecTypeLoc(),
+                D.getDeclSpec().getEndLoc(),
+                D.getMutableDeclSpec().getAttributes(),
+                D.getMutableDeclSpec().getAttributePool())) {
+          T = state.getAttributedType(
+              createNullabilityAttr(Context, *attr, *inferNullability), T, T);
+        }
+      }
+    }
+
+    if (complainAboutMissingNullability == CAMN_Yes &&
+        T->isArrayType() && !T->getNullability(S.Context) && !isVaList(T) &&
+        D.isPrototypeContext() &&
+        !hasOuterPointerLikeChunk(D, D.getNumTypeObjects())) {
+      checkNullabilityConsistency(S, SimplePointerKind::Array,
+                                  D.getDeclSpec().getTypeSpecTypeLoc());
+    }
+  }
+
+  bool ExpectNoDerefChunk =
+      state.getCurrentAttributes().hasAttribute(ParsedAttr::AT_NoDeref);
 
   // Walk the DeclTypeInfo, building the recursive type as we go.
   // DeclTypeInfos are ordered from the identifier out, which is
@@ -2557,16 +4784,28 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     IsQualifiedFunction &= DeclType.Kind == DeclaratorChunk::Paren;
     switch (DeclType.Kind) {
     case DeclaratorChunk::Paren:
+      if (i == 0)
+        warnAboutRedundantParens(S, D, T);
       T = S.BuildParenType(T);
       break;
     case DeclaratorChunk::BlockPointer:
       // If blocks are disabled, emit an error.
       if (!LangOpts.Blocks)
-        S.Diag(DeclType.Loc, diag::err_blocks_disable);
+        S.Diag(DeclType.Loc, diag::err_blocks_disable) << LangOpts.OpenCL;
+
+      // Handle pointer nullability.
+      inferPointerNullability(SimplePointerKind::BlockPointer, DeclType.Loc,
+                              DeclType.EndLoc, DeclType.getAttrs(),
+                              state.getDeclarator().getAttributePool());
 
       T = S.BuildBlockPointerType(T, D.getIdentifierLoc(), Name);
-      if (DeclType.Cls.TypeQuals)
+      if (DeclType.Cls.TypeQuals || LangOpts.OpenCL) {
+        // OpenCL v2.0, s6.12.5 - Block variable declarations are implicitly
+        // qualified with const.
+        if (LangOpts.OpenCL)
+          DeclType.Cls.TypeQuals |= DeclSpec::TQ_const;
         T = S.BuildQualifiedType(T, DeclType.Loc, DeclType.Cls.TypeQuals);
+      }
       break;
     case DeclaratorChunk::Pointer:
       // Verify that we're not building a pointer to pointer to function with
@@ -2576,16 +4815,33 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         D.setInvalidType(true);
         // Build the type anyway.
       }
-      if (LangOpts.ObjC1 && T->getAs<ObjCObjectType>()) {
+
+      // Handle pointer nullability
+      inferPointerNullability(SimplePointerKind::Pointer, DeclType.Loc,
+                              DeclType.EndLoc, DeclType.getAttrs(),
+                              state.getDeclarator().getAttributePool());
+
+      if (LangOpts.ObjC && T->getAs<ObjCObjectType>()) {
         T = Context.getObjCObjectPointerType(T);
         if (DeclType.Ptr.TypeQuals)
           T = S.BuildQualifiedType(T, DeclType.Loc, DeclType.Ptr.TypeQuals);
         break;
       }
+
+      // OpenCL v2.0 s6.9b - Pointer to image/sampler cannot be used.
+      // OpenCL v2.0 s6.13.16.1 - Pointer to pipe cannot be used.
+      // OpenCL v2.0 s6.12.5 - Pointers to Blocks are not allowed.
+      if (LangOpts.OpenCL) {
+        if (T->isImageType() || T->isSamplerT() || T->isPipeType() ||
+            T->isBlockPointerType()) {
+          S.Diag(D.getIdentifierLoc(), diag::err_opencl_pointer_to_type) << T;
+          D.setInvalidType(true);
+        }
+      }
+
       T = S.BuildPointerType(T, DeclType.Loc, Name);
       if (DeclType.Ptr.TypeQuals)
         T = S.BuildQualifiedType(T, DeclType.Loc, DeclType.Ptr.TypeQuals);
-
       break;
     case DeclaratorChunk::Reference: {
       // Verify that we're not building a reference to pointer to function with
@@ -2632,7 +4888,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // array type, ...
       if (ASM == ArrayType::Static || ATI.TypeQuals) {
         if (!(D.isPrototypeContext() ||
-              D.getContext() == Declarator::KNRTypeListContext)) {
+              D.getContext() == DeclaratorContext::KNRTypeList)) {
           S.Diag(DeclType.Loc, diag::err_array_static_outside_prototype) <<
               (ASM == ArrayType::Static ? "'static'" : "type qualifier");
           // Remove the 'static' and the type qualifiers.
@@ -2644,42 +4900,35 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
         // C99 6.7.5.2p1: ... and then only in the outermost array type
         // derivation.
-        unsigned x = chunkIndex;
-        while (x != 0) {
-          // Walk outwards along the declarator chunks.
-          x--;
-          const DeclaratorChunk &DC = D.getTypeObject(x);
-          switch (DC.Kind) {
-          case DeclaratorChunk::Paren:
-            continue;
-          case DeclaratorChunk::Array:
-          case DeclaratorChunk::Pointer:
-          case DeclaratorChunk::Reference:
-          case DeclaratorChunk::MemberPointer:
-            S.Diag(DeclType.Loc, diag::err_array_static_not_outermost) <<
-              (ASM == ArrayType::Static ? "'static'" : "type qualifier");
-            if (ASM == ArrayType::Static)
-              ASM = ArrayType::Normal;
-            ATI.TypeQuals = 0;
-            D.setInvalidType(true);
-            break;
-          case DeclaratorChunk::Function:
-          case DeclaratorChunk::BlockPointer:
-            // These are invalid anyway, so just ignore.
-            break;
-          }
+        if (hasOuterPointerLikeChunk(D, chunkIndex)) {
+          S.Diag(DeclType.Loc, diag::err_array_static_not_outermost) <<
+            (ASM == ArrayType::Static ? "'static'" : "type qualifier");
+          if (ASM == ArrayType::Static)
+            ASM = ArrayType::Normal;
+          ATI.TypeQuals = 0;
+          D.setInvalidType(true);
         }
       }
       const AutoType *AT = T->getContainedAutoType();
       // Allow arrays of auto if we are a generic lambda parameter.
       // i.e. [](auto (&array)[5]) { return array[0]; }; OK
-      if (AT && D.getContext() != Declarator::LambdaExprParameterContext) {
+      if (AT && D.getContext() != DeclaratorContext::LambdaExprParameter) {
         // We've already diagnosed this for decltype(auto).
         if (!AT->isDecltypeAuto())
           S.Diag(DeclType.Loc, diag::err_illegal_decl_array_of_auto)
-            << getPrintableNameForEntity(Name) << T;
+              << getPrintableNameForEntity(Name) << T;
         T = QualType();
         break;
+      }
+
+      // Array parameters can be marked nullable as well, although it's not
+      // necessary if they're marked 'static'.
+      if (complainAboutMissingNullability == CAMN_Yes &&
+          !hasNullabilityAttr(DeclType.getAttrs()) &&
+          ASM != ArrayType::Static &&
+          D.isPrototypeContext() &&
+          !hasOuterPointerLikeChunk(D, chunkIndex)) {
+        checkNullabilityConsistency(S, SimplePointerKind::Array, DeclType.Loc);
       }
 
       T = S.BuildArrayType(T, ASM, ArraySize, ATI.TypeQuals,
@@ -2690,36 +4939,50 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // If the function declarator has a prototype (i.e. it is not () and
       // does not have a K&R-style identifier list), then the arguments are part
       // of the type, otherwise the argument list is ().
-      const DeclaratorChunk::FunctionTypeInfo &FTI = DeclType.Fun;
-      IsQualifiedFunction = FTI.TypeQuals || FTI.hasRefQualifier();
+      DeclaratorChunk::FunctionTypeInfo &FTI = DeclType.Fun;
+      IsQualifiedFunction =
+          FTI.hasMethodTypeQualifiers() || FTI.hasRefQualifier();
 
       // Check for auto functions and trailing return type and adjust the
       // return type accordingly.
       if (!D.isInvalidType()) {
         // trailing-return-type is only required if we're declaring a function,
         // and not, for instance, a pointer to a function.
-        if (D.getDeclSpec().containsPlaceholderType() &&
-            !FTI.hasTrailingReturnType() && chunkIndex == 0 &&
-            !S.getLangOpts().CPlusPlus14) {
-          S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
-                 D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto
-                     ? diag::err_auto_missing_trailing_return
-                     : diag::err_deduced_return_type);
-          T = Context.IntTy;
-          D.setInvalidType(true);
+        if (D.getDeclSpec().hasAutoTypeSpec() &&
+            !FTI.hasTrailingReturnType() && chunkIndex == 0) {
+          if (!S.getLangOpts().CPlusPlus14) {
+            S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
+                   D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto
+                       ? diag::err_auto_missing_trailing_return
+                       : diag::err_deduced_return_type);
+            T = Context.IntTy;
+            D.setInvalidType(true);
+          } else {
+            S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
+                   diag::warn_cxx11_compat_deduced_return_type);
+          }
         } else if (FTI.hasTrailingReturnType()) {
           // T must be exactly 'auto' at this point. See CWG issue 681.
           if (isa<ParenType>(T)) {
-            S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
-                 diag::err_trailing_return_in_parens)
-              << T << D.getDeclSpec().getSourceRange();
+            S.Diag(D.getBeginLoc(), diag::err_trailing_return_in_parens)
+                << T << D.getSourceRange();
             D.setInvalidType(true);
-          } else if (D.getContext() != Declarator::LambdaExprContext &&
+          } else if (D.getName().getKind() ==
+                     UnqualifiedIdKind::IK_DeductionGuideName) {
+            if (T != Context.DependentTy) {
+              S.Diag(D.getDeclSpec().getBeginLoc(),
+                     diag::err_deduction_guide_with_complex_decl)
+                  << D.getSourceRange();
+              D.setInvalidType(true);
+            }
+          } else if (D.getContext() != DeclaratorContext::LambdaExpr &&
                      (T.hasQualifiers() || !isa<AutoType>(T) ||
-                      cast<AutoType>(T)->isDecltypeAuto())) {
+                      cast<AutoType>(T)->getKeyword() !=
+                          AutoTypeKeyword::Auto ||
+                      cast<AutoType>(T)->isConstrained())) {
             S.Diag(D.getDeclSpec().getTypeSpecTypeLoc(),
-                 diag::err_trailing_return_without_auto)
-              << T << D.getDeclSpec().getSourceRange();
+                   diag::err_trailing_return_without_auto)
+                << T << D.getDeclSpec().getSourceRange();
             D.setInvalidType(true);
           }
           T = S.GetTypeFromParser(FTI.getTrailingReturnType(), &TInfo);
@@ -2727,19 +4990,36 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
             // An error occurred parsing the trailing return type.
             T = Context.IntTy;
             D.setInvalidType(true);
+          } else if (AutoType *Auto = T->getContainedAutoType()) {
+            // If the trailing return type contains an `auto`, we may need to
+            // invent a template parameter for it, for cases like
+            // `auto f() -> C auto` or `[](auto (*p) -> auto) {}`.
+            InventedTemplateParameterInfo *InventedParamInfo = nullptr;
+            if (D.getContext() == DeclaratorContext::Prototype)
+              InventedParamInfo = &S.InventedParameterInfos.back();
+            else if (D.getContext() == DeclaratorContext::LambdaExprParameter)
+              InventedParamInfo = S.getCurLambda();
+            if (InventedParamInfo) {
+              std::tie(T, TInfo) = InventTemplateParameter(
+                  state, T, TInfo, Auto, *InventedParamInfo);
+            }
           }
+        } else {
+          // This function type is not the type of the entity being declared,
+          // so checking the 'auto' is not the responsibility of this chunk.
         }
       }
 
       // C99 6.7.5.3p1: The return type may not be a function or array type.
       // For conversion functions, we'll diagnose this particular error later.
-      if ((T->isArrayType() || T->isFunctionType()) &&
-          (D.getName().getKind() != UnqualifiedId::IK_ConversionFunctionId)) {
+      if (!D.isInvalidType() && (T->isArrayType() || T->isFunctionType()) &&
+          (D.getName().getKind() !=
+           UnqualifiedIdKind::IK_ConversionFunctionId)) {
         unsigned diagID = diag::err_func_returning_array_function;
         // Last processing chunk in block context means this function chunk
         // represents the block.
         if (chunkIndex == 0 &&
-            D.getContext() == Declarator::BlockLiteralContext)
+            D.getContext() == DeclaratorContext::BlockLiteral)
           diagID = diag::err_block_returning_array_function;
         S.Diag(DeclType.Loc, diagID) << T->isFunctionType() << T;
         T = Context.IntTy;
@@ -2750,13 +5030,39 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // FIXME: This really should be in BuildFunctionType.
       if (T->isHalfType()) {
         if (S.getLangOpts().OpenCL) {
-          if (!S.getOpenCLOptions().cl_khr_fp16) {
-            S.Diag(D.getIdentifierLoc(), diag::err_opencl_half_return) << T;
+          if (!S.getOpenCLOptions().isAvailableOption("cl_khr_fp16",
+                                                      S.getLangOpts())) {
+            S.Diag(D.getIdentifierLoc(), diag::err_opencl_invalid_return)
+                << T << 0 /*pointer hint*/;
             D.setInvalidType(true);
-          } 
+          }
         } else if (!S.getLangOpts().HalfArgsAndReturns) {
           S.Diag(D.getIdentifierLoc(),
             diag::err_parameters_retval_cannot_have_fp16_type) << 1;
+          D.setInvalidType(true);
+        }
+      }
+
+      if (LangOpts.OpenCL) {
+        // OpenCL v2.0 s6.12.5 - A block cannot be the return value of a
+        // function.
+        if (T->isBlockPointerType() || T->isImageType() || T->isSamplerT() ||
+            T->isPipeType()) {
+          S.Diag(D.getIdentifierLoc(), diag::err_opencl_invalid_return)
+              << T << 1 /*hint off*/;
+          D.setInvalidType(true);
+        }
+        // OpenCL doesn't support variadic functions and blocks
+        // (s6.9.e and s6.12.5 OpenCL v2.0) except for printf.
+        // We also allow here any toolchain reserved identifiers.
+        if (FTI.isVariadic &&
+            !S.getOpenCLOptions().isAvailableOption(
+                "__cl_clang_variadic_functions", S.getLangOpts()) &&
+            !(D.getIdentifier() &&
+              ((D.getIdentifier()->getName() == "printf" &&
+                (LangOpts.OpenCLCPlusPlus || LangOpts.OpenCLVersion >= 120)) ||
+               D.getIdentifier()->getName().startswith("__")))) {
+          S.Diag(D.getIdentifierLoc(), diag::err_opencl_variadic_function);
           D.setInvalidType(true);
         }
       }
@@ -2766,11 +5072,11 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       if (T->isObjCObjectType()) {
         SourceLocation DiagLoc, FixitLoc;
         if (TInfo) {
-          DiagLoc = TInfo->getTypeLoc().getLocStart();
-          FixitLoc = S.getLocForEndOfToken(TInfo->getTypeLoc().getLocEnd());
+          DiagLoc = TInfo->getTypeLoc().getBeginLoc();
+          FixitLoc = S.getLocForEndOfToken(TInfo->getTypeLoc().getEndLoc());
         } else {
           DiagLoc = D.getDeclSpec().getTypeSpecTypeLoc();
-          FixitLoc = S.getLocForEndOfToken(D.getDeclSpec().getLocEnd());
+          FixitLoc = S.getLocForEndOfToken(D.getDeclSpec().getEndLoc());
         }
         S.Diag(DiagLoc, diag::err_object_cannot_be_passed_returned_by_value)
           << 0 << T
@@ -2792,8 +5098,22 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // class type in C++.
       if ((T.getCVRQualifiers() || T->isAtomicType()) &&
           !(S.getLangOpts().CPlusPlus &&
-            (T->isDependentType() || T->isRecordType())))
-        diagnoseRedundantReturnTypeQualifiers(S, T, D, chunkIndex);
+            (T->isDependentType() || T->isRecordType()))) {
+        if (T->isVoidType() && !S.getLangOpts().CPlusPlus &&
+            D.getFunctionDefinitionKind() ==
+                FunctionDefinitionKind::Definition) {
+          // [6.9.1/3] qualified void return is invalid on a C
+          // function definition.  Apparently ok on declarations and
+          // in C++ though (!)
+          S.Diag(DeclType.Loc, diag::err_func_returning_qualified_void) << T;
+        } else
+          diagnoseRedundantReturnTypeQualifiers(S, T, D, chunkIndex);
+
+        // C++2a [dcl.fct]p12:
+        //   A volatile-qualified return type is deprecated
+        if (T.isVolatileQualified() && S.getLangOpts().CPlusPlus20)
+          S.Diag(DeclType.Loc, diag::warn_deprecated_volatile_return) << T;
+      }
 
       // Objective-C ARC ownership qualifiers are ignored on the function
       // return type (by type canonicalization). Complain if this attribute
@@ -2802,20 +5122,17 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         SourceLocation AttrLoc;
         if (chunkIndex + 1 < D.getNumTypeObjects()) {
           DeclaratorChunk ReturnTypeChunk = D.getTypeObject(chunkIndex + 1);
-          for (const AttributeList *Attr = ReturnTypeChunk.getAttrs();
-               Attr; Attr = Attr->getNext()) {
-            if (Attr->getKind() == AttributeList::AT_ObjCOwnership) {
-              AttrLoc = Attr->getLoc();
+          for (const ParsedAttr &AL : ReturnTypeChunk.getAttrs()) {
+            if (AL.getKind() == ParsedAttr::AT_ObjCOwnership) {
+              AttrLoc = AL.getLoc();
               break;
             }
           }
         }
         if (AttrLoc.isInvalid()) {
-          for (const AttributeList *Attr
-                 = D.getDeclSpec().getAttributes().getList();
-               Attr; Attr = Attr->getNext()) {
-            if (Attr->getKind() == AttributeList::AT_ObjCOwnership) {
-              AttrLoc = Attr->getLoc();
+          for (const ParsedAttr &AL : D.getDeclSpec().getAttributes()) {
+            if (AL.getKind() == ParsedAttr::AT_ObjCOwnership) {
+              AttrLoc = AL.getLoc();
               break;
             }
           }
@@ -2826,7 +5143,8 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
           // the predefined
           // __strong/__weak/__autoreleasing/__unsafe_unretained.
           if (AttrLoc.isMacroID())
-            AttrLoc = S.SourceMgr.getImmediateExpansionRange(AttrLoc).first;
+            AttrLoc =
+                S.SourceMgr.getImmediateExpansionRange(AttrLoc).getBegin();
 
           S.Diag(AttrLoc, diag::warn_arc_lifetime_result_type)
             << T.getQualifiers().getObjCLifetime();
@@ -2843,38 +5161,31 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
       // Exception specs are not allowed in typedefs. Complain, but add it
       // anyway.
-      if (IsTypedefName && FTI.getExceptionSpecType())
-        S.Diag(FTI.getExceptionSpecLoc(), diag::err_exception_spec_in_typedef)
-          << (D.getContext() == Declarator::AliasDeclContext ||
-              D.getContext() == Declarator::AliasTemplateContext);
+      if (IsTypedefName && FTI.getExceptionSpecType() && !LangOpts.CPlusPlus17)
+        S.Diag(FTI.getExceptionSpecLocBeg(),
+               diag::err_exception_spec_in_typedef)
+            << (D.getContext() == DeclaratorContext::AliasDecl ||
+                D.getContext() == DeclaratorContext::AliasTemplate);
 
       // If we see "T var();" or "T var(T());" at block scope, it is probably
       // an attempt to initialize a variable, not a function declaration.
       if (FTI.isAmbiguous)
         warnAboutAmbiguousFunction(S, D, DeclType, T);
 
-      FunctionType::ExtInfo EI(getCCForDeclaratorChunk(S, D, FTI, chunkIndex));
+      FunctionType::ExtInfo EI(
+          getCCForDeclaratorChunk(S, D, DeclType.getAttrs(), FTI, chunkIndex));
 
-      if (!FTI.NumParams && !FTI.isVariadic && !LangOpts.CPlusPlus) {
+      if (!FTI.NumParams && !FTI.isVariadic && !LangOpts.CPlusPlus
+                                            && !LangOpts.OpenCL) {
         // Simple void foo(), where the incoming T is the result type.
         T = Context.getFunctionNoProtoType(T, EI);
       } else {
         // We allow a zero-parameter variadic function in C if the
         // function is marked with the "overloadable" attribute. Scan
         // for this attribute now.
-        if (!FTI.NumParams && FTI.isVariadic && !LangOpts.CPlusPlus) {
-          bool Overloadable = false;
-          for (const AttributeList *Attrs = D.getAttributes();
-               Attrs; Attrs = Attrs->getNext()) {
-            if (Attrs->getKind() == AttributeList::AT_Overloadable) {
-              Overloadable = true;
-              break;
-            }
-          }
-
-          if (!Overloadable)
+        if (!FTI.NumParams && FTI.isVariadic && !LangOpts.CPlusPlus)
+          if (!D.getAttributes().hasAttribute(ParsedAttr::AT_Overloadable))
             S.Diag(FTI.getEllipsisLoc(), diag::err_ellipsis_first_param);
-        }
 
         if (FTI.NumParams && FTI.Params[0].Param == nullptr) {
           // C99 6.7.5.3p3: Reject int(x,y,z) when it's not a function
@@ -2890,8 +5201,11 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         FunctionProtoType::ExtProtoInfo EPI;
         EPI.ExtInfo = EI;
         EPI.Variadic = FTI.isVariadic;
+        EPI.EllipsisLoc = FTI.getEllipsisLoc();
         EPI.HasTrailingReturn = FTI.hasTrailingReturnType();
-        EPI.TypeQuals = FTI.TypeQuals;
+        EPI.TypeQuals.addCVRUQualifiers(
+            FTI.MethodQualifiers ? FTI.MethodQualifiers->getTypeQualifiers()
+                                 : 0);
         EPI.RefQualifier = !FTI.hasRefQualifier()? RQ_None
                     : FTI.RefQualifierIsLValueRef? RQ_LValue
                     : RQ_RValue;
@@ -2901,9 +5215,9 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         SmallVector<QualType, 16> ParamTys;
         ParamTys.reserve(FTI.NumParams);
 
-        SmallVector<bool, 16> ConsumedParameters;
-        ConsumedParameters.reserve(FTI.NumParams);
-        bool HasAnyConsumedParameters = false;
+        SmallVector<FunctionProtoType::ExtParameterInfo, 16>
+          ExtParameterInfos(FTI.NumParams);
+        bool HasAnyInterestingExtParameterInfos = false;
 
         for (unsigned i = 0, e = FTI.NumParams; i != e; ++i) {
           ParmVarDecl *Param = cast<ParmVarDecl>(FTI.Params[i].Param);
@@ -2918,7 +5232,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
             // is an incomplete type (C99 6.2.5p19) and function decls cannot
             // have parameters of incomplete type.
             if (FTI.NumParams != 1 || FTI.isVariadic) {
-              S.Diag(DeclType.Loc, diag::err_void_only_param);
+              S.Diag(FTI.Params[i].IdentLoc, diag::err_void_only_param);
               ParamTy = Context.IntTy;
               Param->setType(ParamTy);
             } else if (FTI.Params[i].Ident) {
@@ -2938,9 +5252,10 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
             // Disallow half FP parameters.
             // FIXME: This really should be in BuildFunctionType.
             if (S.getLangOpts().OpenCL) {
-              if (!S.getOpenCLOptions().cl_khr_fp16) {
-                S.Diag(Param->getLocation(),
-                  diag::err_opencl_half_param) << ParamTy;
+              if (!S.getOpenCLOptions().isAvailableOption("cl_khr_fp16",
+                                                          S.getLangOpts())) {
+                S.Diag(Param->getLocation(), diag::err_opencl_invalid_param)
+                    << ParamTy << 0;
                 D.setInvalidType();
                 Param->setInvalidDecl();
               }
@@ -2959,19 +5274,42 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                 Param->setKNRPromoted(true);
               }
             }
+          } else if (S.getLangOpts().OpenCL && ParamTy->isBlockPointerType()) {
+            // OpenCL 2.0 s6.12.5: A block cannot be a parameter of a function.
+            S.Diag(Param->getLocation(), diag::err_opencl_invalid_param)
+                << ParamTy << 1 /*hint off*/;
+            D.setInvalidType();
           }
 
-          if (LangOpts.ObjCAutoRefCount) {
-            bool Consumed = Param->hasAttr<NSConsumedAttr>();
-            ConsumedParameters.push_back(Consumed);
-            HasAnyConsumedParameters |= Consumed;
+          if (LangOpts.ObjCAutoRefCount && Param->hasAttr<NSConsumedAttr>()) {
+            ExtParameterInfos[i] = ExtParameterInfos[i].withIsConsumed(true);
+            HasAnyInterestingExtParameterInfos = true;
+          }
+
+          if (auto attr = Param->getAttr<ParameterABIAttr>()) {
+            ExtParameterInfos[i] =
+              ExtParameterInfos[i].withABI(attr->getABI());
+            HasAnyInterestingExtParameterInfos = true;
+          }
+
+          if (Param->hasAttr<PassObjectSizeAttr>()) {
+            ExtParameterInfos[i] = ExtParameterInfos[i].withHasPassObjectSize();
+            HasAnyInterestingExtParameterInfos = true;
+          }
+
+          if (Param->hasAttr<NoEscapeAttr>()) {
+            ExtParameterInfos[i] = ExtParameterInfos[i].withIsNoEscape(true);
+            HasAnyInterestingExtParameterInfos = true;
           }
 
           ParamTys.push_back(ParamTy);
         }
 
-        if (HasAnyConsumedParameters)
-          EPI.ConsumedParameters = ConsumedParameters.data();
+        if (HasAnyInterestingExtParameterInfos) {
+          EPI.ExtParameterInfos = ExtParameterInfos.data();
+          checkExtParameterInfos(S, ParamTys, EPI,
+              [&](unsigned i) { return FTI.Params[i].Param->getLocation(); });
+        }
 
         SmallVector<QualType, 4> Exceptions;
         SmallVector<ParsedType, 2> DynamicExceptions;
@@ -2981,14 +5319,14 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
         if (FTI.getExceptionSpecType() == EST_Dynamic) {
           // FIXME: It's rather inefficient to have to split into two vectors
           // here.
-          unsigned N = FTI.NumExceptions;
+          unsigned N = FTI.getNumExceptions();
           DynamicExceptions.reserve(N);
           DynamicExceptionRanges.reserve(N);
           for (unsigned I = 0; I != N; ++I) {
             DynamicExceptions.push_back(FTI.Exceptions[I].Ty);
             DynamicExceptionRanges.push_back(FTI.Exceptions[I].Range);
           }
-        } else if (FTI.getExceptionSpecType() == EST_ComputedNoexcept) {
+        } else if (isComputedNoexcept(FTI.getExceptionSpecType())) {
           NoexceptExpr = FTI.NoexceptExpr;
         }
 
@@ -3000,15 +5338,54 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                                       Exceptions,
                                       EPI.ExceptionSpec);
 
+        // FIXME: Set address space from attrs for C++ mode here.
+        // OpenCLCPlusPlus: A class member function has an address space.
+        auto IsClassMember = [&]() {
+          return (!state.getDeclarator().getCXXScopeSpec().isEmpty() &&
+                  state.getDeclarator()
+                          .getCXXScopeSpec()
+                          .getScopeRep()
+                          ->getKind() == NestedNameSpecifier::TypeSpec) ||
+                 state.getDeclarator().getContext() ==
+                     DeclaratorContext::Member ||
+                 state.getDeclarator().getContext() ==
+                     DeclaratorContext::LambdaExpr;
+        };
+
+        if (state.getSema().getLangOpts().OpenCLCPlusPlus && IsClassMember()) {
+          LangAS ASIdx = LangAS::Default;
+          // Take address space attr if any and mark as invalid to avoid adding
+          // them later while creating QualType.
+          if (FTI.MethodQualifiers)
+            for (ParsedAttr &attr : FTI.MethodQualifiers->getAttributes()) {
+              LangAS ASIdxNew = attr.asOpenCLLangAS();
+              if (DiagnoseMultipleAddrSpaceAttributes(S, ASIdx, ASIdxNew,
+                                                      attr.getLoc()))
+                D.setInvalidType(true);
+              else
+                ASIdx = ASIdxNew;
+            }
+          // If a class member function's address space is not set, set it to
+          // __generic.
+          LangAS AS =
+              (ASIdx == LangAS::Default ? S.getDefaultCXXMethodAddrSpace()
+                                        : ASIdx);
+          EPI.TypeQuals.addAddressSpace(AS);
+        }
         T = Context.getFunctionType(T, ParamTys, EPI);
       }
-
       break;
     }
-    case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::MemberPointer: {
       // The scope spec must refer to a class, or be dependent.
       CXXScopeSpec &SS = DeclType.Mem.Scope();
       QualType ClsType;
+
+      // Handle pointer nullability.
+      inferPointerNullability(SimplePointerKind::MemberPointer, DeclType.Loc,
+                              DeclType.EndLoc, DeclType.getAttrs(),
+                              state.getDeclarator().getAttributePool());
+
       if (SS.isInvalid()) {
         // Avoid emitting extra errors if we already errored on the scope.
         D.setInvalidType(true);
@@ -3060,14 +5437,66 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       break;
     }
 
+    case DeclaratorChunk::Pipe: {
+      T = S.BuildReadPipeType(T, DeclType.Loc);
+      processTypeAttrs(state, T, TAL_DeclSpec,
+                       D.getMutableDeclSpec().getAttributes());
+      break;
+    }
+    }
+
     if (T.isNull()) {
       D.setInvalidType(true);
       T = Context.IntTy;
     }
 
     // See if there are any attributes on this declarator chunk.
-    if (AttributeList *attrs = const_cast<AttributeList*>(DeclType.getAttrs()))
-      processTypeAttrs(state, T, TAL_DeclChunk, attrs);
+    processTypeAttrs(state, T, TAL_DeclChunk, DeclType.getAttrs());
+
+    if (DeclType.Kind != DeclaratorChunk::Paren) {
+      if (ExpectNoDerefChunk && !IsNoDerefableChunk(DeclType))
+        S.Diag(DeclType.Loc, diag::warn_noderef_on_non_pointer_or_array);
+
+      ExpectNoDerefChunk = state.didParseNoDeref();
+    }
+  }
+
+  if (ExpectNoDerefChunk)
+    S.Diag(state.getDeclarator().getBeginLoc(),
+           diag::warn_noderef_on_non_pointer_or_array);
+
+  // GNU warning -Wstrict-prototypes
+  //   Warn if a function declaration is without a prototype.
+  //   This warning is issued for all kinds of unprototyped function
+  //   declarations (i.e. function type typedef, function pointer etc.)
+  //   C99 6.7.5.3p14:
+  //   The empty list in a function declarator that is not part of a definition
+  //   of that function specifies that no information about the number or types
+  //   of the parameters is supplied.
+  if (!LangOpts.CPlusPlus &&
+      D.getFunctionDefinitionKind() == FunctionDefinitionKind::Declaration) {
+    bool IsBlock = false;
+    for (const DeclaratorChunk &DeclType : D.type_objects()) {
+      switch (DeclType.Kind) {
+      case DeclaratorChunk::BlockPointer:
+        IsBlock = true;
+        break;
+      case DeclaratorChunk::Function: {
+        const DeclaratorChunk::FunctionTypeInfo &FTI = DeclType.Fun;
+        // We supress the warning when there's no LParen location, as this
+        // indicates the declaration was an implicit declaration, which gets
+        // warned about separately via -Wimplicit-function-declaration.
+        if (FTI.NumParams == 0 && !FTI.isVariadic && FTI.getLParenLoc().isValid())
+          S.Diag(DeclType.Loc, diag::warn_strict_prototypes)
+              << IsBlock
+              << FixItHint::CreateInsertion(FTI.getRParenLoc(), "void");
+        IsBlock = false;
+        break;
+      }
+      default:
+        break;
+      }
+    }
   }
 
   assert(!T.isNull() && "T must not be null after this point");
@@ -3084,14 +5513,18 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     //
     // Core issue 547 also allows cv-qualifiers on function types that are
     // top-level template type arguments.
-    bool FreeFunction;
-    if (!D.getCXXScopeSpec().isSet()) {
-      FreeFunction = ((D.getContext() != Declarator::MemberContext &&
-                       D.getContext() != Declarator::LambdaExprContext) ||
-                      D.getDeclSpec().isFriendSpecified());
+    enum { NonMember, Member, DeductionGuide } Kind = NonMember;
+    if (D.getName().getKind() == UnqualifiedIdKind::IK_DeductionGuideName)
+      Kind = DeductionGuide;
+    else if (!D.getCXXScopeSpec().isSet()) {
+      if ((D.getContext() == DeclaratorContext::Member ||
+           D.getContext() == DeclaratorContext::LambdaExpr) &&
+          !D.getDeclSpec().isFriendSpecified())
+        Kind = Member;
     } else {
       DeclContext *DC = S.computeDeclContext(D.getCXXScopeSpec());
-      FreeFunction = (DC && !DC->isRecord());
+      if (!DC || DC->isRecord())
+        Kind = Member;
     }
 
     // C++11 [dcl.fct]p6 (w/DR1417):
@@ -3111,41 +5544,42 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     //
     // ... for instance.
     if (IsQualifiedFunction &&
-        !(!FreeFunction &&
+        !(Kind == Member &&
           D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_static) &&
-        !IsTypedefName &&
-        D.getContext() != Declarator::TemplateTypeArgContext) {
-      SourceLocation Loc = D.getLocStart();
+        !IsTypedefName && D.getContext() != DeclaratorContext::TemplateArg &&
+        D.getContext() != DeclaratorContext::TemplateTypeArg) {
+      SourceLocation Loc = D.getBeginLoc();
       SourceRange RemovalRange;
       unsigned I;
       if (D.isFunctionDeclarator(I)) {
         SmallVector<SourceLocation, 4> RemovalLocs;
         const DeclaratorChunk &Chunk = D.getTypeObject(I);
         assert(Chunk.Kind == DeclaratorChunk::Function);
+
         if (Chunk.Fun.hasRefQualifier())
           RemovalLocs.push_back(Chunk.Fun.getRefQualifierLoc());
-        if (Chunk.Fun.TypeQuals & Qualifiers::Const)
-          RemovalLocs.push_back(Chunk.Fun.getConstQualifierLoc());
-        if (Chunk.Fun.TypeQuals & Qualifiers::Volatile)
-          RemovalLocs.push_back(Chunk.Fun.getVolatileQualifierLoc());
-        if (Chunk.Fun.TypeQuals & Qualifiers::Restrict)
-          RemovalLocs.push_back(Chunk.Fun.getRestrictQualifierLoc());
+
+        if (Chunk.Fun.hasMethodTypeQualifiers())
+          Chunk.Fun.MethodQualifiers->forEachQualifier(
+              [&](DeclSpec::TQ TypeQual, StringRef QualName,
+                  SourceLocation SL) { RemovalLocs.push_back(SL); });
+
         if (!RemovalLocs.empty()) {
-          std::sort(RemovalLocs.begin(), RemovalLocs.end(),
-                    BeforeThanCompare<SourceLocation>(S.getSourceManager()));
+          llvm::sort(RemovalLocs,
+                     BeforeThanCompare<SourceLocation>(S.getSourceManager()));
           RemovalRange = SourceRange(RemovalLocs.front(), RemovalLocs.back());
           Loc = RemovalLocs.front();
         }
       }
 
       S.Diag(Loc, diag::err_invalid_qualified_function_type)
-        << FreeFunction << D.isFunctionDeclarator() << T
+        << Kind << D.isFunctionDeclarator() << T
         << getFunctionQualifiersAsString(FnTy)
         << FixItHint::CreateRemoval(RemovalRange);
 
       // Strip the cv-qualifiers and ref-qualifiers from the type.
       FunctionProtoType::ExtProtoInfo EPI = FnTy->getExtProtoInfo();
-      EPI.TypeQuals = 0;
+      EPI.TypeQuals.removeCVRQualifiers();
       EPI.RefQualifier = RQ_None;
 
       T = Context.getFunctionType(FnTy->getReturnType(), FnTy->getParamTypes(),
@@ -3160,8 +5594,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
   }
 
   // Apply any undistributed attributes from the declarator.
-  if (AttributeList *attrs = D.getAttributes())
-    processTypeAttrs(state, T, TAL_DeclName, attrs);
+  processTypeAttrs(state, T, TAL_DeclName, D.getAttributes());
 
   // Diagnose any ignored type attributes.
   state.diagnoseIgnoredTypeAttrs(T);
@@ -3169,9 +5602,16 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
   // C++0x [dcl.constexpr]p9:
   //  A constexpr specifier used in an object declaration declares the object
   //  as const.
-  if (D.getDeclSpec().isConstexprSpecified() && T->isObjectType()) {
+  if (D.getDeclSpec().getConstexprSpecifier() == ConstexprSpecKind::Constexpr &&
+      T->isObjectType())
     T.addConst();
-  }
+
+  // C++2a [dcl.fct]p4:
+  //   A parameter with volatile-qualified type is deprecated
+  if (T.isVolatileQualified() && S.getLangOpts().CPlusPlus20 &&
+      (D.getContext() == DeclaratorContext::Prototype ||
+       D.getContext() == DeclaratorContext::LambdaExprParameter))
+    S.Diag(D.getIdentifierLoc(), diag::warn_deprecated_volatile_param) << T;
 
   // If there was an ellipsis in the declarator, the declaration declares a
   // parameter pack whose type may be a pack expansion type.
@@ -3181,8 +5621,9 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
     //   only be used in a parameter-declaration. Such a parameter-declaration
     //   is a parameter pack (14.5.3). [...]
     switch (D.getContext()) {
-    case Declarator::PrototypeContext:
-    case Declarator::LambdaExprParameterContext:
+    case DeclaratorContext::Prototype:
+    case DeclaratorContext::LambdaExprParameter:
+    case DeclaratorContext::RequiresExpr:
       // C++0x [dcl.fct]p13:
       //   [...] When it is part of a parameter-declaration-clause, the
       //   parameter pack is a function parameter pack (14.5.3). The type T
@@ -3192,16 +5633,17 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       //
       // We represent function parameter packs as function parameters whose
       // type is a pack expansion.
-      if (!T->containsUnexpandedParameterPack()) {
+      if (!T->containsUnexpandedParameterPack() &&
+          (!LangOpts.CPlusPlus20 || !T->getContainedAutoType())) {
         S.Diag(D.getEllipsisLoc(),
              diag::err_function_parameter_pack_without_parameter_packs)
           << T <<  D.getSourceRange();
         D.setEllipsisLoc(SourceLocation());
       } else {
-        T = Context.getPackExpansionType(T, None);
+        T = Context.getPackExpansionType(T, None, /*ExpectPackInType=*/false);
       }
       break;
-    case Declarator::TemplateParamContext:
+    case DeclaratorContext::TemplateParam:
       // C++0x [temp.param]p15:
       //   If a template-parameter is a [...] is a parameter-declaration that
       //   declares a parameter pack (8.3.5), then the template-parameter is a
@@ -3219,25 +5661,29 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                  : diag::ext_variadic_templates);
       break;
 
-    case Declarator::FileContext:
-    case Declarator::KNRTypeListContext:
-    case Declarator::ObjCParameterContext:  // FIXME: special diagnostic here?
-    case Declarator::ObjCResultContext:     // FIXME: special diagnostic here?
-    case Declarator::TypeNameContext:
-    case Declarator::CXXNewContext:
-    case Declarator::AliasDeclContext:
-    case Declarator::AliasTemplateContext:
-    case Declarator::MemberContext:
-    case Declarator::BlockContext:
-    case Declarator::ForContext:
-    case Declarator::ConditionContext:
-    case Declarator::CXXCatchContext:
-    case Declarator::ObjCCatchContext:
-    case Declarator::BlockLiteralContext:
-    case Declarator::LambdaExprContext:
-    case Declarator::ConversionIdContext:
-    case Declarator::TrailingReturnContext:
-    case Declarator::TemplateTypeArgContext:
+    case DeclaratorContext::File:
+    case DeclaratorContext::KNRTypeList:
+    case DeclaratorContext::ObjCParameter: // FIXME: special diagnostic here?
+    case DeclaratorContext::ObjCResult:    // FIXME: special diagnostic here?
+    case DeclaratorContext::TypeName:
+    case DeclaratorContext::FunctionalCast:
+    case DeclaratorContext::CXXNew:
+    case DeclaratorContext::AliasDecl:
+    case DeclaratorContext::AliasTemplate:
+    case DeclaratorContext::Member:
+    case DeclaratorContext::Block:
+    case DeclaratorContext::ForInit:
+    case DeclaratorContext::SelectionInit:
+    case DeclaratorContext::Condition:
+    case DeclaratorContext::CXXCatch:
+    case DeclaratorContext::ObjCCatch:
+    case DeclaratorContext::BlockLiteral:
+    case DeclaratorContext::LambdaExpr:
+    case DeclaratorContext::ConversionId:
+    case DeclaratorContext::TrailingReturn:
+    case DeclaratorContext::TrailingReturnVar:
+    case DeclaratorContext::TemplateArg:
+    case DeclaratorContext::TemplateTypeArg:
       // FIXME: We may want to allow parameter packs in block-literal contexts
       // in the future.
       S.Diag(D.getEllipsisLoc(),
@@ -3251,7 +5697,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
   if (D.isInvalidType())
     return Context.getTrivialTypeSourceInfo(T);
 
-  return S.GetTypeSourceInfoForDeclarator(D, T, TInfo);
+  return GetTypeSourceInfoForDeclarator(state, T, TInfo);
 }
 
 /// GetTypeForDeclarator - Convert the type for the specified
@@ -3267,7 +5713,6 @@ TypeSourceInfo *Sema::GetTypeForDeclarator(Declarator &D, Scope *S) {
 
   TypeSourceInfo *ReturnTypeInfo = nullptr;
   QualType T = GetDeclSpecTypeForDeclarator(state, ReturnTypeInfo);
-
   if (D.isPrototypeContext() && getLangOpts().ObjCAutoRefCount)
     inferARCWriteback(state, T);
 
@@ -3293,10 +5738,8 @@ static void transferARCOwnershipToDeclaratorChunk(TypeProcessingState &state,
 
   // Look for an explicit lifetime attribute.
   DeclaratorChunk &chunk = D.getTypeObject(chunkIndex);
-  for (const AttributeList *attr = chunk.getAttrs(); attr;
-         attr = attr->getNext())
-    if (attr->getKind() == AttributeList::AT_ObjCOwnership)
-      return;
+  if (chunk.getAttrs().hasAttribute(ParsedAttr::AT_ObjCOwnership))
+    return;
 
   const char *attrStr = nullptr;
   switch (ownership) {
@@ -3315,16 +5758,15 @@ static void transferARCOwnershipToDeclaratorChunk(TypeProcessingState &state,
 
   // If there wasn't one, add one (with an invalid source location
   // so that we don't make an AttributedType for it).
-  AttributeList *attr = D.getAttributePool()
-    .create(&S.Context.Idents.get("objc_ownership"), SourceLocation(),
-            /*scope*/ nullptr, SourceLocation(),
-            /*args*/ &Args, 1, AttributeList::AS_GNU);
-  spliceAttrIntoList(*attr, chunk.getAttrListRef());
-
+  ParsedAttr *attr = D.getAttributePool().create(
+      &S.Context.Idents.get("objc_ownership"), SourceLocation(),
+      /*scope*/ nullptr, SourceLocation(),
+      /*args*/ &Args, 1, ParsedAttr::AS_GNU);
+  chunk.getAttrs().addAtEnd(attr);
   // TODO: mark whether we did this inference?
 }
 
-/// \brief Used for transferring ownership in casts resulting in l-values.
+/// Used for transferring ownership in casts resulting in l-values.
 static void transferARCOwnership(TypeProcessingState &state,
                                  QualType &declSpecTy,
                                  Qualifiers::ObjCLifetime ownership) {
@@ -3355,6 +5797,7 @@ static void transferARCOwnership(TypeProcessingState &state,
 
     case DeclaratorChunk::Function:
     case DeclaratorChunk::MemberPointer:
+    case DeclaratorChunk::Pipe:
       return;
     }
   }
@@ -3381,7 +5824,7 @@ TypeSourceInfo *Sema::GetTypeForDeclaratorCast(Declarator &D, QualType FromTy) {
   TypeSourceInfo *ReturnTypeInfo = nullptr;
   QualType declSpecTy = GetDeclSpecTypeForDeclarator(state, ReturnTypeInfo);
 
-  if (getLangOpts().ObjCAutoRefCount) {
+  if (getLangOpts().ObjC) {
     Qualifiers::ObjCLifetime ownership = Context.getInnerObjCOwnership(FromTy);
     if (ownership != Qualifiers::OCL_None)
       transferARCOwnership(state, declSpecTy, ownership);
@@ -3390,101 +5833,31 @@ TypeSourceInfo *Sema::GetTypeForDeclaratorCast(Declarator &D, QualType FromTy) {
   return GetFullTypeForDeclarator(state, declSpecTy, ReturnTypeInfo);
 }
 
-/// Map an AttributedType::Kind to an AttributeList::Kind.
-static AttributeList::Kind getAttrListKind(AttributedType::Kind kind) {
-  switch (kind) {
-  case AttributedType::attr_address_space:
-    return AttributeList::AT_AddressSpace;
-  case AttributedType::attr_regparm:
-    return AttributeList::AT_Regparm;
-  case AttributedType::attr_vector_size:
-    return AttributeList::AT_VectorSize;
-  case AttributedType::attr_neon_vector_type:
-    return AttributeList::AT_NeonVectorType;
-  case AttributedType::attr_neon_polyvector_type:
-    return AttributeList::AT_NeonPolyVectorType;
-  case AttributedType::attr_objc_gc:
-    return AttributeList::AT_ObjCGC;
-  case AttributedType::attr_objc_ownership:
-    return AttributeList::AT_ObjCOwnership;
-  case AttributedType::attr_noreturn:
-    return AttributeList::AT_NoReturn;
-  case AttributedType::attr_cdecl:
-    return AttributeList::AT_CDecl;
-  case AttributedType::attr_fastcall:
-    return AttributeList::AT_FastCall;
-  case AttributedType::attr_stdcall:
-    return AttributeList::AT_StdCall;
-  case AttributedType::attr_thiscall:
-    return AttributeList::AT_ThisCall;
-  case AttributedType::attr_pascal:
-    return AttributeList::AT_Pascal;
-  case AttributedType::attr_vectorcall:
-    return AttributeList::AT_VectorCall;
-  case AttributedType::attr_pcs:
-  case AttributedType::attr_pcs_vfp:
-    return AttributeList::AT_Pcs;
-  case AttributedType::attr_pnaclcall:
-    return AttributeList::AT_PnaclCall;
-  case AttributedType::attr_inteloclbicc:
-    return AttributeList::AT_IntelOclBicc;
-  case AttributedType::attr_ms_abi:
-    return AttributeList::AT_MSABI;
-  case AttributedType::attr_sysv_abi:
-    return AttributeList::AT_SysVABI;
-  case AttributedType::attr_ptr32:
-    return AttributeList::AT_Ptr32;
-  case AttributedType::attr_ptr64:
-    return AttributeList::AT_Ptr64;
-  case AttributedType::attr_sptr:
-    return AttributeList::AT_SPtr;
-  case AttributedType::attr_uptr:
-    return AttributeList::AT_UPtr;
-  }
-  llvm_unreachable("unexpected attribute kind!");
-}
-
 static void fillAttributedTypeLoc(AttributedTypeLoc TL,
-                                  const AttributeList *attrs) {
-  AttributedType::Kind kind = TL.getAttrKind();
-
-  assert(attrs && "no type attributes in the expected location!");
-  AttributeList::Kind parsedKind = getAttrListKind(kind);
-  while (attrs->getKind() != parsedKind) {
-    attrs = attrs->getNext();
-    assert(attrs && "no matching attribute in expected location!");
-  }
-
-  TL.setAttrNameLoc(attrs->getLoc());
-  if (TL.hasAttrExprOperand()) {
-    assert(attrs->isArgExpr(0) && "mismatched attribute operand kind");
-    TL.setAttrExprOperand(attrs->getArgAsExpr(0));
-  } else if (TL.hasAttrEnumOperand()) {
-    assert((attrs->isArgIdent(0) || attrs->isArgExpr(0)) &&
-           "unexpected attribute operand kind");
-    if (attrs->isArgIdent(0))
-      TL.setAttrEnumOperandLoc(attrs->getArgAsIdent(0)->Loc);
-    else
-      TL.setAttrEnumOperandLoc(attrs->getArgAsExpr(0)->getExprLoc());
-  }
-
-  // FIXME: preserve this information to here.
-  if (TL.hasAttrOperand())
-    TL.setAttrOperandParensRange(SourceRange());
+                                  TypeProcessingState &State) {
+  TL.setAttr(State.takeAttrForAttributedType(TL.getTypePtr()));
 }
 
 namespace {
   class TypeSpecLocFiller : public TypeLocVisitor<TypeSpecLocFiller> {
+    Sema &SemaRef;
     ASTContext &Context;
+    TypeProcessingState &State;
     const DeclSpec &DS;
 
   public:
-    TypeSpecLocFiller(ASTContext &Context, const DeclSpec &DS)
-      : Context(Context), DS(DS) {}
+    TypeSpecLocFiller(Sema &S, ASTContext &Context, TypeProcessingState &State,
+                      const DeclSpec &DS)
+        : SemaRef(S), Context(Context), State(State), DS(DS) {}
 
     void VisitAttributedTypeLoc(AttributedTypeLoc TL) {
-      fillAttributedTypeLoc(TL, DS.getAttributes().getList());
       Visit(TL.getModifiedLoc());
+      fillAttributedTypeLoc(TL, State);
+    }
+    void VisitMacroQualifiedTypeLoc(MacroQualifiedTypeLoc TL) {
+      Visit(TL.getInnerLoc());
+      TL.setExpansionLoc(
+          State.getExpansionLocForMacroQualifiedType(TL.getTypePtr()));
     }
     void VisitQualifiedTypeLoc(QualifiedTypeLoc TL) {
       Visit(TL.getUnqualifiedLoc());
@@ -3497,35 +5870,17 @@ namespace {
       // FIXME. We should have DS.getTypeSpecTypeEndLoc(). But, it requires
       // addition field. What we have is good enough for dispay of location
       // of 'fixit' on interface name.
-      TL.setNameEndLoc(DS.getLocEnd());
+      TL.setNameEndLoc(DS.getEndLoc());
     }
     void VisitObjCObjectTypeLoc(ObjCObjectTypeLoc TL) {
-      // Handle the base type, which might not have been written explicitly.
-      if (DS.getTypeSpecType() == DeclSpec::TST_unspecified) {
-        TL.setHasBaseTypeAsWritten(false);
-        TL.getBaseLoc().initialize(Context, SourceLocation());
-      } else {
-        TL.setHasBaseTypeAsWritten(true);
-        Visit(TL.getBaseLoc());
-      }
-
-      // Protocol qualifiers.
-      if (DS.getProtocolQualifiers()) {
-        assert(TL.getNumProtocols() > 0);
-        assert(TL.getNumProtocols() == DS.getNumProtocolQualifiers());
-        TL.setLAngleLoc(DS.getProtocolLAngleLoc());
-        TL.setRAngleLoc(DS.getSourceRange().getEnd());
-        for (unsigned i = 0, e = DS.getNumProtocolQualifiers(); i != e; ++i)
-          TL.setProtocolLoc(i, DS.getProtocolLocs()[i]);
-      } else {
-        assert(TL.getNumProtocols() == 0);
-        TL.setLAngleLoc(SourceLocation());
-        TL.setRAngleLoc(SourceLocation());
-      }
+      TypeSourceInfo *RepTInfo = nullptr;
+      Sema::GetTypeFromParser(DS.getRepAsType(), &RepTInfo);
+      TL.copy(RepTInfo->getTypeLoc());
     }
     void VisitObjCObjectPointerTypeLoc(ObjCObjectPointerTypeLoc TL) {
-      TL.setStarLoc(SourceLocation());
-      Visit(TL.getPointeeLoc());
+      TypeSourceInfo *RepTInfo = nullptr;
+      Sema::GetTypeFromParser(DS.getRepAsType(), &RepTInfo);
+      TL.copy(RepTInfo->getTypeLoc());
     }
     void VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc TL) {
       TypeSourceInfo *TInfo = nullptr;
@@ -3548,7 +5903,7 @@ namespace {
         TL.copy(OldTL.castAs<TemplateSpecializationTypeLoc>());
         assert(TL.getRAngleLoc() == OldTL.castAs<TemplateSpecializationTypeLoc>().getRAngleLoc());
       }
-        
+
     }
     void VisitTypeOfExprTypeLoc(TypeOfExprTypeLoc TL) {
       assert(DS.getTypeSpecType() == DeclSpec::TST_typeofExpr);
@@ -3581,12 +5936,10 @@ namespace {
         // Set info for the written builtin specifiers.
         TL.getWrittenBuiltinSpecs() = DS.getWrittenBuiltinSpecs();
         // Try to have a meaningful source location.
-        if (TL.getWrittenSignSpec() != TSS_unspecified)
-          // Sign spec loc overrides the others (e.g., 'unsigned long').
-          TL.setBuiltinLoc(DS.getTypeSpecSignLoc());
-        else if (TL.getWrittenWidthSpec() != TSW_unspecified)
-          // Width spec loc overrides type spec loc (e.g., 'short int').
-          TL.setBuiltinLoc(DS.getTypeSpecWidthLoc());
+        if (TL.getWrittenSignSpec() != TypeSpecifierSign::Unspecified)
+          TL.expandBuiltinRange(DS.getTypeSpecSignLoc());
+        if (TL.getWrittenWidthSpec() != TypeSpecifierWidth::Unspecified)
+          TL.expandBuiltinRange(DS.getTypeSpecWidthRange());
       }
     }
     void VisitElaboratedTypeLoc(ElaboratedTypeLoc TL) {
@@ -3623,6 +5976,36 @@ namespace {
       TL.copy(
           TInfo->getTypeLoc().castAs<DependentTemplateSpecializationTypeLoc>());
     }
+    void VisitAutoTypeLoc(AutoTypeLoc TL) {
+      assert(DS.getTypeSpecType() == TST_auto ||
+             DS.getTypeSpecType() == TST_decltype_auto ||
+             DS.getTypeSpecType() == TST_auto_type ||
+             DS.getTypeSpecType() == TST_unspecified);
+      TL.setNameLoc(DS.getTypeSpecTypeLoc());
+      if (!DS.isConstrainedAuto())
+        return;
+      TemplateIdAnnotation *TemplateId = DS.getRepAsTemplateId();
+      if (!TemplateId)
+        return;
+      if (DS.getTypeSpecScope().isNotEmpty())
+        TL.setNestedNameSpecifierLoc(
+            DS.getTypeSpecScope().getWithLocInContext(Context));
+      else
+        TL.setNestedNameSpecifierLoc(NestedNameSpecifierLoc());
+      TL.setTemplateKWLoc(TemplateId->TemplateKWLoc);
+      TL.setConceptNameLoc(TemplateId->TemplateNameLoc);
+      TL.setFoundDecl(nullptr);
+      TL.setLAngleLoc(TemplateId->LAngleLoc);
+      TL.setRAngleLoc(TemplateId->RAngleLoc);
+      if (TemplateId->NumArgs == 0)
+        return;
+      TemplateArgumentListInfo TemplateArgsInfo;
+      ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
+                                         TemplateId->NumArgs);
+      SemaRef.translateTemplateArguments(TemplateArgsPtr, TemplateArgsInfo);
+      for (unsigned I = 0; I < TemplateId->NumArgs; ++I)
+        TL.setArgLocInfo(I, TemplateArgsInfo.arguments()[I].getLocInfo());
+    }
     void VisitTagTypeLoc(TagTypeLoc TL) {
       TL.setNameLoc(DS.getTypeSpecTypeNameLoc());
     }
@@ -3645,6 +6028,22 @@ namespace {
       }
     }
 
+    void VisitPipeTypeLoc(PipeTypeLoc TL) {
+      TL.setKWLoc(DS.getTypeSpecTypeLoc());
+
+      TypeSourceInfo *TInfo = nullptr;
+      Sema::GetTypeFromParser(DS.getRepAsType(), &TInfo);
+      TL.getValueLoc().initializeFullCopy(TInfo->getTypeLoc());
+    }
+
+    void VisitExtIntTypeLoc(ExtIntTypeLoc TL) {
+      TL.setNameLoc(DS.getTypeSpecTypeLoc());
+    }
+
+    void VisitDependentExtIntTypeLoc(DependentExtIntTypeLoc TL) {
+      TL.setNameLoc(DS.getTypeSpecTypeLoc());
+    }
+
     void VisitTypeLoc(TypeLoc TL) {
       // FIXME: add other typespec types and change this to an assert.
       TL.initialize(Context, DS.getTypeSpecTypeLoc());
@@ -3653,11 +6052,13 @@ namespace {
 
   class DeclaratorLocFiller : public TypeLocVisitor<DeclaratorLocFiller> {
     ASTContext &Context;
+    TypeProcessingState &State;
     const DeclaratorChunk &Chunk;
 
   public:
-    DeclaratorLocFiller(ASTContext &Context, const DeclaratorChunk &Chunk)
-      : Context(Context), Chunk(Chunk) {}
+    DeclaratorLocFiller(ASTContext &Context, TypeProcessingState &State,
+                        const DeclaratorChunk &Chunk)
+        : Context(Context), State(State), Chunk(Chunk) {}
 
     void VisitQualifiedTypeLoc(QualifiedTypeLoc TL) {
       llvm_unreachable("qualified type locs not expected here!");
@@ -3667,7 +6068,7 @@ namespace {
     }
 
     void VisitAttributedTypeLoc(AttributedTypeLoc TL) {
-      fillAttributedTypeLoc(TL, Chunk.getAttrs());
+      fillAttributedTypeLoc(TL, State);
     }
     void VisitAdjustedTypeLoc(AdjustedTypeLoc TL) {
       // nothing
@@ -3726,7 +6127,7 @@ namespace {
       }
 
       // Finally fill in MemberPointerLocInfo fields.
-      TL.setStarLoc(Chunk.Loc);
+      TL.setStarLoc(Chunk.Mem.StarLoc);
       TL.setClassTInfo(ClsTInfo);
     }
     void VisitLValueReferenceTypeLoc(LValueReferenceTypeLoc TL) {
@@ -3758,19 +6159,40 @@ namespace {
         ParmVarDecl *Param = cast<ParmVarDecl>(FTI.Params[i].Param);
         TL.setParam(tpi++, Param);
       }
-      // FIXME: exception specs
+      TL.setExceptionSpecRange(FTI.getExceptionSpecRange());
     }
     void VisitParenTypeLoc(ParenTypeLoc TL) {
       assert(Chunk.Kind == DeclaratorChunk::Paren);
       TL.setLParenLoc(Chunk.Loc);
       TL.setRParenLoc(Chunk.EndLoc);
     }
+    void VisitPipeTypeLoc(PipeTypeLoc TL) {
+      assert(Chunk.Kind == DeclaratorChunk::Pipe);
+      TL.setKWLoc(Chunk.Loc);
+    }
+    void VisitExtIntTypeLoc(ExtIntTypeLoc TL) {
+      TL.setNameLoc(Chunk.Loc);
+    }
+    void VisitMacroQualifiedTypeLoc(MacroQualifiedTypeLoc TL) {
+      TL.setExpansionLoc(Chunk.Loc);
+    }
+    void VisitVectorTypeLoc(VectorTypeLoc TL) { TL.setNameLoc(Chunk.Loc); }
+    void VisitDependentVectorTypeLoc(DependentVectorTypeLoc TL) {
+      TL.setNameLoc(Chunk.Loc);
+    }
+    void VisitExtVectorTypeLoc(ExtVectorTypeLoc TL) {
+      TL.setNameLoc(Chunk.Loc);
+    }
+    void
+    VisitDependentSizedExtVectorTypeLoc(DependentSizedExtVectorTypeLoc TL) {
+      TL.setNameLoc(Chunk.Loc);
+    }
 
     void VisitTypeLoc(TypeLoc TL) {
       llvm_unreachable("unsupported TypeLoc kind in declarator!");
     }
   };
-}
+} // end anonymous namespace
 
 static void fillAtomicQualLoc(AtomicTypeLoc ATL, const DeclaratorChunk &Chunk) {
   SourceLocation Loc;
@@ -3778,10 +6200,11 @@ static void fillAtomicQualLoc(AtomicTypeLoc ATL, const DeclaratorChunk &Chunk) {
   case DeclaratorChunk::Function:
   case DeclaratorChunk::Array:
   case DeclaratorChunk::Paren:
+  case DeclaratorChunk::Pipe:
     llvm_unreachable("cannot be _Atomic qualified");
 
   case DeclaratorChunk::Pointer:
-    Loc = SourceLocation::getFromRawEncoding(Chunk.Ptr.AtomicQualLoc);
+    Loc = Chunk.Ptr.AtomicQualLoc;
     break;
 
   case DeclaratorChunk::BlockPointer:
@@ -3795,7 +6218,38 @@ static void fillAtomicQualLoc(AtomicTypeLoc ATL, const DeclaratorChunk &Chunk) {
   ATL.setParensRange(SourceRange());
 }
 
-/// \brief Create and instantiate a TypeSourceInfo with type source information.
+static void
+fillDependentAddressSpaceTypeLoc(DependentAddressSpaceTypeLoc DASTL,
+                                 const ParsedAttributesView &Attrs) {
+  for (const ParsedAttr &AL : Attrs) {
+    if (AL.getKind() == ParsedAttr::AT_AddressSpace) {
+      DASTL.setAttrNameLoc(AL.getLoc());
+      DASTL.setAttrExprOperand(AL.getArgAsExpr(0));
+      DASTL.setAttrOperandParensRange(SourceRange());
+      return;
+    }
+  }
+
+  llvm_unreachable(
+      "no address_space attribute found at the expected location!");
+}
+
+static void fillMatrixTypeLoc(MatrixTypeLoc MTL,
+                              const ParsedAttributesView &Attrs) {
+  for (const ParsedAttr &AL : Attrs) {
+    if (AL.getKind() == ParsedAttr::AT_MatrixType) {
+      MTL.setAttrNameLoc(AL.getLoc());
+      MTL.setAttrRowOperand(AL.getArgAsExpr(0));
+      MTL.setAttrColumnOperand(AL.getArgAsExpr(1));
+      MTL.setAttrOperandParensRange(SourceRange());
+      return;
+    }
+  }
+
+  llvm_unreachable("no matrix_type attribute found at the expected location!");
+}
+
+/// Create and instantiate a TypeSourceInfo with type source information.
 ///
 /// \param T QualType referring to the type as written in source code.
 ///
@@ -3803,10 +6257,13 @@ static void fillAtomicQualLoc(AtomicTypeLoc ATL, const DeclaratorChunk &Chunk) {
 /// up in the normal place in the declaration specifiers (such as a C++
 /// conversion function), this pointer will refer to a type source information
 /// for that return type.
-TypeSourceInfo *
-Sema::GetTypeSourceInfoForDeclarator(Declarator &D, QualType T,
-                                     TypeSourceInfo *ReturnTypeInfo) {
-  TypeSourceInfo *TInfo = Context.CreateTypeSourceInfo(T);
+static TypeSourceInfo *
+GetTypeSourceInfoForDeclarator(TypeProcessingState &State,
+                               QualType T, TypeSourceInfo *ReturnTypeInfo) {
+  Sema &S = State.getSema();
+  Declarator &D = State.getDeclarator();
+
+  TypeSourceInfo *TInfo = S.Context.CreateTypeSourceInfo(T);
   UnqualTypeLoc CurrTL = TInfo->getTypeLoc().getUnqualifiedLoc();
 
   // Handle parameter packs whose type is a pack expansion.
@@ -3823,16 +6280,31 @@ Sema::GetTypeSourceInfoForDeclarator(Declarator &D, QualType T,
       CurrTL = ATL.getValueLoc().getUnqualifiedLoc();
     }
 
-    while (AttributedTypeLoc TL = CurrTL.getAs<AttributedTypeLoc>()) {
-      fillAttributedTypeLoc(TL, D.getTypeObject(i).getAttrs());
+    while (MacroQualifiedTypeLoc TL = CurrTL.getAs<MacroQualifiedTypeLoc>()) {
+      TL.setExpansionLoc(
+          State.getExpansionLocForMacroQualifiedType(TL.getTypePtr()));
       CurrTL = TL.getNextTypeLoc().getUnqualifiedLoc();
     }
+
+    while (AttributedTypeLoc TL = CurrTL.getAs<AttributedTypeLoc>()) {
+      fillAttributedTypeLoc(TL, State);
+      CurrTL = TL.getNextTypeLoc().getUnqualifiedLoc();
+    }
+
+    while (DependentAddressSpaceTypeLoc TL =
+               CurrTL.getAs<DependentAddressSpaceTypeLoc>()) {
+      fillDependentAddressSpaceTypeLoc(TL, D.getTypeObject(i).getAttrs());
+      CurrTL = TL.getPointeeTypeLoc().getUnqualifiedLoc();
+    }
+
+    if (MatrixTypeLoc TL = CurrTL.getAs<MatrixTypeLoc>())
+      fillMatrixTypeLoc(TL, D.getTypeObject(i).getAttrs());
 
     // FIXME: Ordering here?
     while (AdjustedTypeLoc TL = CurrTL.getAs<AdjustedTypeLoc>())
       CurrTL = TL.getNextTypeLoc().getUnqualifiedLoc();
 
-    DeclaratorLocFiller(Context, D.getTypeObject(i)).Visit(CurrTL);
+    DeclaratorLocFiller(S.Context, State, D.getTypeObject(i)).Visit(CurrTL);
     CurrTL = CurrTL.getNextTypeLoc().getUnqualifiedLoc();
   }
 
@@ -3843,13 +6315,13 @@ Sema::GetTypeSourceInfoForDeclarator(Declarator &D, QualType T,
     assert(TL.getFullDataSize() == CurrTL.getFullDataSize());
     memcpy(CurrTL.getOpaqueData(), TL.getOpaqueData(), TL.getFullDataSize());
   } else {
-    TypeSpecLocFiller(Context, D.getDeclSpec()).Visit(CurrTL);
+    TypeSpecLocFiller(S, S.Context, State, D.getDeclSpec()).Visit(CurrTL);
   }
 
   return TInfo;
 }
 
-/// \brief Create a LocInfoType to hold the given QualType and TypeSourceInfo.
+/// Create a LocInfoType to hold the given QualType and TypeSourceInfo.
 ParsedType Sema::CreateParsedType(QualType T, TypeSourceInfo *TInfo) {
   // FIXME: LocInfoTypes are "transient", only needed for passing to/from Parser
   // and Sema during declaration parsing. Try deallocating/caching them when
@@ -3885,9 +6357,9 @@ TypeResult Sema::ActOnTypeName(Scope *S, Declarator &D) {
   // to apply them to the actual parameter declaration.
   // Likewise, we don't want to do this for alias declarations, because
   // we are actually going to build a declaration from this eventually.
-  if (D.getContext() != Declarator::ObjCParameterContext &&
-      D.getContext() != Declarator::AliasDeclContext &&
-      D.getContext() != Declarator::AliasTemplateContext)
+  if (D.getContext() != DeclaratorContext::ObjCParameter &&
+      D.getContext() != DeclaratorContext::AliasDecl &&
+      D.getContext() != DeclaratorContext::AliasTemplate)
     checkUnusedDeclAttributes(D);
 
   if (getLangOpts().CPlusPlus) {
@@ -3904,25 +6376,99 @@ ParsedType Sema::ActOnObjCInstanceType(SourceLocation Loc) {
   return CreateParsedType(T, TInfo);
 }
 
-
 //===----------------------------------------------------------------------===//
 // Type Attribute Processing
 //===----------------------------------------------------------------------===//
+
+/// Build an AddressSpace index from a constant expression and diagnose any
+/// errors related to invalid address_spaces. Returns true on successfully
+/// building an AddressSpace index.
+static bool BuildAddressSpaceIndex(Sema &S, LangAS &ASIdx,
+                                   const Expr *AddrSpace,
+                                   SourceLocation AttrLoc) {
+  if (!AddrSpace->isValueDependent()) {
+    Optional<llvm::APSInt> OptAddrSpace =
+        AddrSpace->getIntegerConstantExpr(S.Context);
+    if (!OptAddrSpace) {
+      S.Diag(AttrLoc, diag::err_attribute_argument_type)
+          << "'address_space'" << AANT_ArgumentIntegerConstant
+          << AddrSpace->getSourceRange();
+      return false;
+    }
+    llvm::APSInt &addrSpace = *OptAddrSpace;
+
+    // Bounds checking.
+    if (addrSpace.isSigned()) {
+      if (addrSpace.isNegative()) {
+        S.Diag(AttrLoc, diag::err_attribute_address_space_negative)
+            << AddrSpace->getSourceRange();
+        return false;
+      }
+      addrSpace.setIsSigned(false);
+    }
+
+    llvm::APSInt max(addrSpace.getBitWidth());
+    max =
+        Qualifiers::MaxAddressSpace - (unsigned)LangAS::FirstTargetAddressSpace;
+
+    if (addrSpace > max) {
+      S.Diag(AttrLoc, diag::err_attribute_address_space_too_high)
+          << (unsigned)max.getZExtValue() << AddrSpace->getSourceRange();
+      return false;
+    }
+
+    ASIdx =
+        getLangASFromTargetAS(static_cast<unsigned>(addrSpace.getZExtValue()));
+    return true;
+  }
+
+  // Default value for DependentAddressSpaceTypes
+  ASIdx = LangAS::Default;
+  return true;
+}
+
+/// BuildAddressSpaceAttr - Builds a DependentAddressSpaceType if an expression
+/// is uninstantiated. If instantiated it will apply the appropriate address
+/// space to the type. This function allows dependent template variables to be
+/// used in conjunction with the address_space attribute
+QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
+                                     SourceLocation AttrLoc) {
+  if (!AddrSpace->isValueDependent()) {
+    if (DiagnoseMultipleAddrSpaceAttributes(*this, T.getAddressSpace(), ASIdx,
+                                            AttrLoc))
+      return QualType();
+
+    return Context.getAddrSpaceQualType(T, ASIdx);
+  }
+
+  // A check with similar intentions as checking if a type already has an
+  // address space except for on a dependent types, basically if the
+  // current type is already a DependentAddressSpaceType then its already
+  // lined up to have another address space on it and we can't have
+  // multiple address spaces on the one pointer indirection
+  if (T->getAs<DependentAddressSpaceType>()) {
+    Diag(AttrLoc, diag::err_attribute_address_multiple_qualifiers);
+    return QualType();
+  }
+
+  return Context.getDependentAddressSpaceType(T, AddrSpace, AttrLoc);
+}
+
+QualType Sema::BuildAddressSpaceAttr(QualType &T, Expr *AddrSpace,
+                                     SourceLocation AttrLoc) {
+  LangAS ASIdx;
+  if (!BuildAddressSpaceIndex(*this, ASIdx, AddrSpace, AttrLoc))
+    return QualType();
+  return BuildAddressSpaceAttr(T, ASIdx, AddrSpace, AttrLoc);
+}
 
 /// HandleAddressSpaceTypeAttribute - Process an address_space attribute on the
 /// specified type.  The attribute contains 1 argument, the id of the address
 /// space for the type.
 static void HandleAddressSpaceTypeAttribute(QualType &Type,
-                                            const AttributeList &Attr, Sema &S){
-
-  // If this type is already address space qualified, reject it.
-  // ISO/IEC TR 18037 S5.3 (amending C99 6.7.3): "No type shall be qualified by
-  // qualifiers for two or more different address spaces."
-  if (Type.getAddressSpace()) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_address_multiple_qualifiers);
-    Attr.setInvalid();
-    return;
-  }
+                                            const ParsedAttr &Attr,
+                                            TypeProcessingState &State) {
+  Sema &S = State.getSema();
 
   // ISO/IEC TR 18037 S5.3 (amending C99 6.7.3): "A function type shall not be
   // qualified by an address-space qualifier."
@@ -3932,92 +6478,67 @@ static void HandleAddressSpaceTypeAttribute(QualType &Type,
     return;
   }
 
-  unsigned ASIdx;
-  if (Attr.getKind() == AttributeList::AT_AddressSpace) {
+  LangAS ASIdx;
+  if (Attr.getKind() == ParsedAttr::AT_AddressSpace) {
+
     // Check the attribute arguments.
     if (Attr.getNumArgs() != 1) {
-      S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
-        << Attr.getName() << 1;
-      Attr.setInvalid();
-      return;
-    }
-    Expr *ASArgExpr = static_cast<Expr *>(Attr.getArgAsExpr(0));
-    llvm::APSInt addrSpace(32);
-    if (ASArgExpr->isTypeDependent() || ASArgExpr->isValueDependent() ||
-        !ASArgExpr->isIntegerConstantExpr(addrSpace, S.Context)) {
-      S.Diag(Attr.getLoc(), diag::err_attribute_argument_type)
-        << Attr.getName() << AANT_ArgumentIntegerConstant
-        << ASArgExpr->getSourceRange();
+      S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << Attr
+                                                                        << 1;
       Attr.setInvalid();
       return;
     }
 
-    // Bounds checking.
-    if (addrSpace.isSigned()) {
-      if (addrSpace.isNegative()) {
-        S.Diag(Attr.getLoc(), diag::err_attribute_address_space_negative)
-          << ASArgExpr->getSourceRange();
+    Expr *ASArgExpr = static_cast<Expr *>(Attr.getArgAsExpr(0));
+    LangAS ASIdx;
+    if (!BuildAddressSpaceIndex(S, ASIdx, ASArgExpr, Attr.getLoc())) {
+      Attr.setInvalid();
+      return;
+    }
+
+    ASTContext &Ctx = S.Context;
+    auto *ASAttr =
+        ::new (Ctx) AddressSpaceAttr(Ctx, Attr, static_cast<unsigned>(ASIdx));
+
+    // If the expression is not value dependent (not templated), then we can
+    // apply the address space qualifiers just to the equivalent type.
+    // Otherwise, we make an AttributedType with the modified and equivalent
+    // type the same, and wrap it in a DependentAddressSpaceType. When this
+    // dependent type is resolved, the qualifier is added to the equivalent type
+    // later.
+    QualType T;
+    if (!ASArgExpr->isValueDependent()) {
+      QualType EquivType =
+          S.BuildAddressSpaceAttr(Type, ASIdx, ASArgExpr, Attr.getLoc());
+      if (EquivType.isNull()) {
         Attr.setInvalid();
         return;
       }
-      addrSpace.setIsSigned(false);
+      T = State.getAttributedType(ASAttr, Type, EquivType);
+    } else {
+      T = State.getAttributedType(ASAttr, Type, Type);
+      T = S.BuildAddressSpaceAttr(T, ASIdx, ASArgExpr, Attr.getLoc());
     }
-    llvm::APSInt max(addrSpace.getBitWidth());
-    max = Qualifiers::MaxAddressSpace;
-    if (addrSpace > max) {
-      S.Diag(Attr.getLoc(), diag::err_attribute_address_space_too_high)
-        << int(Qualifiers::MaxAddressSpace) << ASArgExpr->getSourceRange();
+
+    if (!T.isNull())
+      Type = T;
+    else
+      Attr.setInvalid();
+  } else {
+    // The keyword-based type attributes imply which address space to use.
+    ASIdx = S.getLangOpts().SYCLIsDevice ? Attr.asSYCLLangAS()
+                                         : Attr.asOpenCLLangAS();
+
+    if (ASIdx == LangAS::Default)
+      llvm_unreachable("Invalid address space");
+
+    if (DiagnoseMultipleAddrSpaceAttributes(S, Type.getAddressSpace(), ASIdx,
+                                            Attr.getLoc())) {
       Attr.setInvalid();
       return;
     }
-    ASIdx = static_cast<unsigned>(addrSpace.getZExtValue());
-  } else {
-    // The keyword-based type attributes imply which address space to use.
-    switch (Attr.getKind()) {
-    case AttributeList::AT_OpenCLGlobalAddressSpace:
-      ASIdx = LangAS::opencl_global; break;
-    case AttributeList::AT_OpenCLLocalAddressSpace:
-      ASIdx = LangAS::opencl_local; break;
-    case AttributeList::AT_OpenCLConstantAddressSpace:
-      ASIdx = LangAS::opencl_constant; break;
-    case AttributeList::AT_OpenCLGenericAddressSpace:
-      ASIdx = LangAS::opencl_generic; break;
-    default:
-      assert(Attr.getKind() == AttributeList::AT_OpenCLPrivateAddressSpace);
-      ASIdx = 0; break;
-    }
-  }
-  
-  Type = S.Context.getAddrSpaceQualType(Type, ASIdx);
-}
 
-/// Does this type have a "direct" ownership qualifier?  That is,
-/// is it written like "__strong id", as opposed to something like
-/// "typeof(foo)", where that happens to be strong?
-static bool hasDirectOwnershipQualifier(QualType type) {
-  // Fast path: no qualifier at all.
-  assert(type.getQualifiers().hasObjCLifetime());
-
-  while (true) {
-    // __strong id
-    if (const AttributedType *attr = dyn_cast<AttributedType>(type)) {
-      if (attr->getAttrKind() == AttributedType::attr_objc_ownership)
-        return true;
-
-      type = attr->getModifiedType();
-
-    // X *__strong (...)
-    } else if (const ParenType *paren = dyn_cast<ParenType>(type)) {
-      type = paren->getInnerType();
-
-    // That's it for things we want to complain about.  In particular,
-    // we do not want to look through typedefs, typeof(expr),
-    // typeof(type), or any other way that the type is somehow
-    // abstracted.
-    } else {
-
-      return false;
-    }
+    Type = S.Context.getAddrSpaceQualType(Type, ASIdx);
   }
 }
 
@@ -4026,8 +6547,7 @@ static bool hasDirectOwnershipQualifier(QualType type) {
 ///
 /// Returns 'true' if the attribute was handled.
 static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
-                                       AttributeList &attr,
-                                       QualType &type) {
+                                        ParsedAttr &attr, QualType &type) {
   bool NonObjCPointer = false;
 
   if (!type->isDependentType() && !type->isUndeducedType()) {
@@ -4047,7 +6567,8 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
     // just be the return type of a block pointer.
     if (state.isProcessingDeclSpec()) {
       Declarator &D = state.getDeclarator();
-      if (maybeMovePastReturnType(D, D.getNumTypeObjects()))
+      if (maybeMovePastReturnType(D, D.getNumTypeObjects(),
+                                  /*onlyBlockPointers=*/true))
         return false;
     }
   }
@@ -4055,19 +6576,15 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
   Sema &S = state.getSema();
   SourceLocation AttrLoc = attr.getLoc();
   if (AttrLoc.isMacroID())
-    AttrLoc = S.getSourceManager().getImmediateExpansionRange(AttrLoc).first;
+    AttrLoc =
+        S.getSourceManager().getImmediateExpansionRange(AttrLoc).getBegin();
 
   if (!attr.isArgIdent(0)) {
-    S.Diag(AttrLoc, diag::err_attribute_argument_type)
-      << attr.getName() << AANT_ArgumentString;
+    S.Diag(AttrLoc, diag::err_attribute_argument_type) << attr
+                                                       << AANT_ArgumentString;
     attr.setInvalid();
     return true;
   }
-
-  // Consume lifetime attributes without further comment outside of
-  // ARC mode.
-  if (!S.getLangOpts().ObjCAutoRefCount)
-    return true;
 
   IdentifierInfo *II = attr.getArgAsIdent(0)->Ident;
   Qualifiers::ObjCLifetime lifetime;
@@ -4080,9 +6597,16 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
   else if (II->isStr("autoreleasing"))
     lifetime = Qualifiers::OCL_Autoreleasing;
   else {
-    S.Diag(AttrLoc, diag::warn_attribute_type_not_supported)
-      << attr.getName() << II;
+    S.Diag(AttrLoc, diag::warn_attribute_type_not_supported) << attr << II;
     attr.setInvalid();
+    return true;
+  }
+
+  // Just ignore lifetime attributes other than __weak and __unsafe_unretained
+  // outside of ARC mode.
+  if (!S.getLangOpts().ObjCAutoRefCount &&
+      lifetime != Qualifiers::OCL_Weak &&
+      lifetime != Qualifiers::OCL_ExplicitNone) {
     return true;
   }
 
@@ -4092,18 +6616,20 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
   if (Qualifiers::ObjCLifetime previousLifetime
         = type.getQualifiers().getObjCLifetime()) {
     // If it's written directly, that's an error.
-    if (hasDirectOwnershipQualifier(type)) {
+    if (S.Context.hasDirectOwnershipQualifier(type)) {
       S.Diag(AttrLoc, diag::err_attr_objc_ownership_redundant)
         << type;
       return true;
     }
 
     // Otherwise, if the qualifiers actually conflict, pull sugar off
-    // until we reach a type that is directly qualified.
+    // and remove the ObjCLifetime qualifiers.
     if (previousLifetime != lifetime) {
-      // This should always terminate: the canonical type is
-      // qualified, so some bit of sugar must be hiding it.
-      while (!underlyingType.Quals.hasObjCLifetime()) {
+      // It's possible to have multiple local ObjCLifetime qualifiers. We
+      // can't stop after we reach a type that is directly qualified.
+      const Type *prevTy = nullptr;
+      while (!prevTy || prevTy != underlyingType.Ty) {
+        prevTy = underlyingType.Ty;
         underlyingType = underlyingType.getSingleStepDesugaredType();
       }
       underlyingType.Quals.removeObjCLifetime();
@@ -4113,7 +6639,7 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
   underlyingType.Quals.addObjCLifetime(lifetime);
 
   if (NonObjCPointer) {
-    StringRef name = attr.getName()->getName();
+    StringRef name = attr.getAttrName()->getName();
     switch (lifetime) {
     case Qualifiers::OCL_None:
     case Qualifiers::OCL_ExplicitNone:
@@ -4126,29 +6652,60 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
       << TDS_ObjCObjOrBlock << type;
   }
 
+  // Don't actually add the __unsafe_unretained qualifier in non-ARC files,
+  // because having both 'T' and '__unsafe_unretained T' exist in the type
+  // system causes unfortunate widespread consistency problems.  (For example,
+  // they're not considered compatible types, and we mangle them identicially
+  // as template arguments.)  These problems are all individually fixable,
+  // but it's easier to just not add the qualifier and instead sniff it out
+  // in specific places using isObjCInertUnsafeUnretainedType().
+  //
+  // Doing this does means we miss some trivial consistency checks that
+  // would've triggered in ARC, but that's better than trying to solve all
+  // the coexistence problems with __unsafe_unretained.
+  if (!S.getLangOpts().ObjCAutoRefCount &&
+      lifetime == Qualifiers::OCL_ExplicitNone) {
+    type = state.getAttributedType(
+        createSimpleAttr<ObjCInertUnsafeUnretainedAttr>(S.Context, attr),
+        type, type);
+    return true;
+  }
+
   QualType origType = type;
   if (!NonObjCPointer)
     type = S.Context.getQualifiedType(underlyingType);
 
   // If we have a valid source location for the attribute, use an
   // AttributedType instead.
-  if (AttrLoc.isValid())
-    type = S.Context.getAttributedType(AttributedType::attr_objc_ownership,
-                                       origType, type);
+  if (AttrLoc.isValid()) {
+    type = state.getAttributedType(::new (S.Context)
+                                       ObjCOwnershipAttr(S.Context, attr, II),
+                                   origType, type);
+  }
 
-  // Forbid __weak if the runtime doesn't support it.
-  if (lifetime == Qualifiers::OCL_Weak &&
-      !S.getLangOpts().ObjCARCWeak && !NonObjCPointer) {
-
-    // Actually, delay this until we know what we're parsing.
+  auto diagnoseOrDelay = [](Sema &S, SourceLocation loc,
+                            unsigned diagnostic, QualType type) {
     if (S.DelayedDiagnostics.shouldDelayDiagnostics()) {
       S.DelayedDiagnostics.add(
           sema::DelayedDiagnostic::makeForbiddenType(
-              S.getSourceManager().getExpansionLoc(AttrLoc),
-              diag::err_arc_weak_no_runtime, type, /*ignored*/ 0));
+              S.getSourceManager().getExpansionLoc(loc),
+              diagnostic, type, /*ignored*/ 0));
     } else {
-      S.Diag(AttrLoc, diag::err_arc_weak_no_runtime);
+      S.Diag(loc, diagnostic);
     }
+  };
+
+  // Sometimes, __weak isn't allowed.
+  if (lifetime == Qualifiers::OCL_Weak &&
+      !S.getLangOpts().ObjCWeak && !NonObjCPointer) {
+
+    // Use a specialized diagnostic if the runtime just doesn't support them.
+    unsigned diagnostic =
+      (S.getLangOpts().ObjCWeakRuntime ? diag::err_arc_weak_disabled
+                                       : diag::err_arc_weak_no_runtime);
+
+    // In any case, delay the diagnostic until we know what we're parsing.
+    diagnoseOrDelay(S, AttrLoc, diagnostic, type);
 
     attr.setInvalid();
     return true;
@@ -4161,9 +6718,9 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
           type->getAs<ObjCObjectPointerType>()) {
       if (ObjCInterfaceDecl *Class = ObjT->getInterfaceDecl()) {
         if (Class->isArcWeakrefUnavailable()) {
-            S.Diag(AttrLoc, diag::err_arc_unsupported_weak_class);
-            S.Diag(ObjT->getInterfaceDecl()->getLocation(),
-                   diag::note_class_declared);
+          S.Diag(AttrLoc, diag::err_arc_unsupported_weak_class);
+          S.Diag(ObjT->getInterfaceDecl()->getLocation(),
+                 diag::note_class_declared);
         }
       }
     }
@@ -4176,8 +6733,7 @@ static bool handleObjCOwnershipTypeAttr(TypeProcessingState &state,
 /// attribute on the specified type.  Returns true to indicate that
 /// the attribute was handled, false to indicate that the type does
 /// not permit the attribute.
-static bool handleObjCGCTypeAttr(TypeProcessingState &state,
-                                 AttributeList &attr,
+static bool handleObjCGCTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
                                  QualType &type) {
   Sema &S = state.getSema();
 
@@ -4192,18 +6748,18 @@ static bool handleObjCGCTypeAttr(TypeProcessingState &state,
     attr.setInvalid();
     return true;
   }
-  
+
   // Check the attribute arguments.
   if (!attr.isArgIdent(0)) {
     S.Diag(attr.getLoc(), diag::err_attribute_argument_type)
-      << attr.getName() << AANT_ArgumentString;
+        << attr << AANT_ArgumentString;
     attr.setInvalid();
     return true;
   }
   Qualifiers::GC GCAttr;
   if (attr.getNumArgs() > 1) {
-    S.Diag(attr.getLoc(), diag::err_attribute_wrong_number_arguments)
-      << attr.getName() << 1;
+    S.Diag(attr.getLoc(), diag::err_attribute_wrong_number_arguments) << attr
+                                                                      << 1;
     attr.setInvalid();
     return true;
   }
@@ -4215,7 +6771,7 @@ static bool handleObjCGCTypeAttr(TypeProcessingState &state,
     GCAttr = Qualifiers::Strong;
   else {
     S.Diag(attr.getLoc(), diag::warn_attribute_type_not_supported)
-      << attr.getName() << II;
+        << attr << II;
     attr.setInvalid();
     return true;
   }
@@ -4225,8 +6781,8 @@ static bool handleObjCGCTypeAttr(TypeProcessingState &state,
 
   // Make an attributed type to preserve the source information.
   if (attr.getLoc().isValid())
-    type = S.Context.getAttributedType(AttributedType::attr_objc_gc,
-                                       origType, type);
+    type = state.getAttributedType(
+        ::new (S.Context) ObjCGCAttr(S.Context, attr, II), origType, type);
 
   return true;
 }
@@ -4245,11 +6801,14 @@ namespace {
   struct FunctionTypeUnwrapper {
     enum WrapKind {
       Desugar,
+      Attributed,
       Parens,
+      Array,
       Pointer,
       BlockPointer,
       Reference,
-      MemberPointer
+      MemberPointer,
+      MacroQualified,
     };
 
     QualType Original;
@@ -4265,6 +6824,10 @@ namespace {
         } else if (isa<ParenType>(Ty)) {
           T = cast<ParenType>(Ty)->getInnerType();
           Stack.push_back(Parens);
+        } else if (isa<ConstantArrayType>(Ty) || isa<VariableArrayType>(Ty) ||
+                   isa<IncompleteArrayType>(Ty)) {
+          T = cast<ArrayType>(Ty)->getElementType();
+          Stack.push_back(Array);
         } else if (isa<PointerType>(Ty)) {
           T = cast<PointerType>(Ty)->getPointeeType();
           Stack.push_back(Pointer);
@@ -4277,6 +6840,12 @@ namespace {
         } else if (isa<ReferenceType>(Ty)) {
           T = cast<ReferenceType>(Ty)->getPointeeType();
           Stack.push_back(Reference);
+        } else if (isa<AttributedType>(Ty)) {
+          T = cast<AttributedType>(Ty)->getEquivalentType();
+          Stack.push_back(Attributed);
+        } else if (isa<MacroQualifiedType>(Ty)) {
+          T = cast<MacroQualifiedType>(Ty)->getUnderlyingType();
+          Stack.push_back(MacroQualified);
         } else {
           const Type *DTy = Ty->getUnqualifiedDesugaredType();
           if (Ty == DTy) {
@@ -4325,9 +6894,36 @@ namespace {
         // information.
         return wrap(C, Old->getUnqualifiedDesugaredType(), I);
 
+      case Attributed:
+        return wrap(C, cast<AttributedType>(Old)->getEquivalentType(), I);
+
       case Parens: {
         QualType New = wrap(C, cast<ParenType>(Old)->getInnerType(), I);
         return C.getParenType(New);
+      }
+
+      case MacroQualified:
+        return wrap(C, cast<MacroQualifiedType>(Old)->getUnderlyingType(), I);
+
+      case Array: {
+        if (const auto *CAT = dyn_cast<ConstantArrayType>(Old)) {
+          QualType New = wrap(C, CAT->getElementType(), I);
+          return C.getConstantArrayType(New, CAT->getSize(), CAT->getSizeExpr(),
+                                        CAT->getSizeModifier(),
+                                        CAT->getIndexTypeCVRQualifiers());
+        }
+
+        if (const auto *VAT = dyn_cast<VariableArrayType>(Old)) {
+          QualType New = wrap(C, VAT->getElementType(), I);
+          return C.getVariableArrayType(
+              New, VAT->getSizeExpr(), VAT->getSizeModifier(),
+              VAT->getIndexTypeCVRQualifiers(), VAT->getBracketsRange());
+        }
+
+        const auto *IAT = cast<IncompleteArrayType>(Old);
+        QualType New = wrap(C, IAT->getElementType(), I);
+        return C.getIncompleteArrayType(New, IAT->getSizeModifier(),
+                                        IAT->getIndexTypeCVRQualifiers());
       }
 
       case Pointer: {
@@ -4359,89 +6955,399 @@ namespace {
       llvm_unreachable("unknown wrapping kind");
     }
   };
-}
+} // end anonymous namespace
 
 static bool handleMSPointerTypeQualifierAttr(TypeProcessingState &State,
-                                             AttributeList &Attr,
-                                             QualType &Type) {
+                                             ParsedAttr &PAttr, QualType &Type) {
   Sema &S = State.getSema();
 
-  AttributeList::Kind Kind = Attr.getKind();
+  Attr *A;
+  switch (PAttr.getKind()) {
+  default: llvm_unreachable("Unknown attribute kind");
+  case ParsedAttr::AT_Ptr32:
+    A = createSimpleAttr<Ptr32Attr>(S.Context, PAttr);
+    break;
+  case ParsedAttr::AT_Ptr64:
+    A = createSimpleAttr<Ptr64Attr>(S.Context, PAttr);
+    break;
+  case ParsedAttr::AT_SPtr:
+    A = createSimpleAttr<SPtrAttr>(S.Context, PAttr);
+    break;
+  case ParsedAttr::AT_UPtr:
+    A = createSimpleAttr<UPtrAttr>(S.Context, PAttr);
+    break;
+  }
+
+  std::bitset<attr::LastAttr> Attrs;
+  attr::Kind NewAttrKind = A->getKind();
   QualType Desugared = Type;
   const AttributedType *AT = dyn_cast<AttributedType>(Type);
   while (AT) {
-    AttributedType::Kind CurAttrKind = AT->getAttrKind();
-
-    // You cannot specify duplicate type attributes, so if the attribute has
-    // already been applied, flag it.
-    if (getAttrListKind(CurAttrKind) == Kind) {
-      S.Diag(Attr.getLoc(), diag::warn_duplicate_attribute_exact)
-        << Attr.getName();
-      return true;
-    }
-
-    // You cannot have both __sptr and __uptr on the same type, nor can you
-    // have __ptr32 and __ptr64.
-    if ((CurAttrKind == AttributedType::attr_ptr32 &&
-         Kind == AttributeList::AT_Ptr64) ||
-        (CurAttrKind == AttributedType::attr_ptr64 &&
-         Kind == AttributeList::AT_Ptr32)) {
-      S.Diag(Attr.getLoc(), diag::err_attributes_are_not_compatible)
-        << "'__ptr32'" << "'__ptr64'";
-      return true;
-    } else if ((CurAttrKind == AttributedType::attr_sptr &&
-                Kind == AttributeList::AT_UPtr) ||
-               (CurAttrKind == AttributedType::attr_uptr &&
-                Kind == AttributeList::AT_SPtr)) {
-      S.Diag(Attr.getLoc(), diag::err_attributes_are_not_compatible)
-        << "'__sptr'" << "'__uptr'";
-      return true;
-    }
-    
-    Desugared = AT->getEquivalentType();
+    Attrs[AT->getAttrKind()] = true;
+    Desugared = AT->getModifiedType();
     AT = dyn_cast<AttributedType>(Desugared);
+  }
+
+  // You cannot specify duplicate type attributes, so if the attribute has
+  // already been applied, flag it.
+  if (Attrs[NewAttrKind]) {
+    S.Diag(PAttr.getLoc(), diag::warn_duplicate_attribute_exact) << PAttr;
+    return true;
+  }
+  Attrs[NewAttrKind] = true;
+
+  // You cannot have both __sptr and __uptr on the same type, nor can you
+  // have __ptr32 and __ptr64.
+  if (Attrs[attr::Ptr32] && Attrs[attr::Ptr64]) {
+    S.Diag(PAttr.getLoc(), diag::err_attributes_are_not_compatible)
+        << "'__ptr32'"
+        << "'__ptr64'";
+    return true;
+  } else if (Attrs[attr::SPtr] && Attrs[attr::UPtr]) {
+    S.Diag(PAttr.getLoc(), diag::err_attributes_are_not_compatible)
+        << "'__sptr'"
+        << "'__uptr'";
+    return true;
   }
 
   // Pointer type qualifiers can only operate on pointer types, but not
   // pointer-to-member types.
+  //
+  // FIXME: Should we really be disallowing this attribute if there is any
+  // type sugar between it and the pointer (other than attributes)? Eg, this
+  // disallows the attribute on a parenthesized pointer.
+  // And if so, should we really allow *any* type attribute?
   if (!isa<PointerType>(Desugared)) {
-    S.Diag(Attr.getLoc(), Type->isMemberPointerType() ?
-                          diag::err_attribute_no_member_pointers :
-                          diag::err_attribute_pointers_only) << Attr.getName();
+    if (Type->isMemberPointerType())
+      S.Diag(PAttr.getLoc(), diag::err_attribute_no_member_pointers) << PAttr;
+    else
+      S.Diag(PAttr.getLoc(), diag::err_attribute_pointers_only) << PAttr << 0;
     return true;
   }
 
-  AttributedType::Kind TAK;
-  switch (Kind) {
-  default: llvm_unreachable("Unknown attribute kind");
-  case AttributeList::AT_Ptr32: TAK = AttributedType::attr_ptr32; break;
-  case AttributeList::AT_Ptr64: TAK = AttributedType::attr_ptr64; break;
-  case AttributeList::AT_SPtr: TAK = AttributedType::attr_sptr; break;
-  case AttributeList::AT_UPtr: TAK = AttributedType::attr_uptr; break;
+  // Add address space to type based on its attributes.
+  LangAS ASIdx = LangAS::Default;
+  uint64_t PtrWidth = S.Context.getTargetInfo().getPointerWidth(0);
+  if (PtrWidth == 32) {
+    if (Attrs[attr::Ptr64])
+      ASIdx = LangAS::ptr64;
+    else if (Attrs[attr::UPtr])
+      ASIdx = LangAS::ptr32_uptr;
+  } else if (PtrWidth == 64 && Attrs[attr::Ptr32]) {
+    if (Attrs[attr::UPtr])
+      ASIdx = LangAS::ptr32_uptr;
+    else
+      ASIdx = LangAS::ptr32_sptr;
   }
 
-  Type = S.Context.getAttributedType(TAK, Type, Type);
+  QualType Pointee = Type->getPointeeType();
+  if (ASIdx != LangAS::Default)
+    Pointee = S.Context.getAddrSpaceQualType(
+        S.Context.removeAddrSpaceQualType(Pointee), ASIdx);
+  Type = State.getAttributedType(A, Type, S.Context.getPointerType(Pointee));
   return false;
 }
 
-static AttributedType::Kind getCCTypeAttrKind(AttributeList &Attr) {
+/// Map a nullability attribute kind to a nullability kind.
+static NullabilityKind mapNullabilityAttrKind(ParsedAttr::Kind kind) {
+  switch (kind) {
+  case ParsedAttr::AT_TypeNonNull:
+    return NullabilityKind::NonNull;
+
+  case ParsedAttr::AT_TypeNullable:
+    return NullabilityKind::Nullable;
+
+  case ParsedAttr::AT_TypeNullableResult:
+    return NullabilityKind::NullableResult;
+
+  case ParsedAttr::AT_TypeNullUnspecified:
+    return NullabilityKind::Unspecified;
+
+  default:
+    llvm_unreachable("not a nullability attribute kind");
+  }
+}
+
+/// Applies a nullability type specifier to the given type, if possible.
+///
+/// \param state The type processing state.
+///
+/// \param type The type to which the nullability specifier will be
+/// added. On success, this type will be updated appropriately.
+///
+/// \param attr The attribute as written on the type.
+///
+/// \param allowOnArrayType Whether to accept nullability specifiers on an
+/// array type (e.g., because it will decay to a pointer).
+///
+/// \returns true if a problem has been diagnosed, false on success.
+static bool checkNullabilityTypeSpecifier(TypeProcessingState &state,
+                                          QualType &type,
+                                          ParsedAttr &attr,
+                                          bool allowOnArrayType) {
+  Sema &S = state.getSema();
+
+  NullabilityKind nullability = mapNullabilityAttrKind(attr.getKind());
+  SourceLocation nullabilityLoc = attr.getLoc();
+  bool isContextSensitive = attr.isContextSensitiveKeywordAttribute();
+
+  recordNullabilitySeen(S, nullabilityLoc);
+
+  // Check for existing nullability attributes on the type.
+  QualType desugared = type;
+  while (auto attributed = dyn_cast<AttributedType>(desugared.getTypePtr())) {
+    // Check whether there is already a null
+    if (auto existingNullability = attributed->getImmediateNullability()) {
+      // Duplicated nullability.
+      if (nullability == *existingNullability) {
+        S.Diag(nullabilityLoc, diag::warn_nullability_duplicate)
+          << DiagNullabilityKind(nullability, isContextSensitive)
+          << FixItHint::CreateRemoval(nullabilityLoc);
+
+        break;
+      }
+
+      // Conflicting nullability.
+      S.Diag(nullabilityLoc, diag::err_nullability_conflicting)
+        << DiagNullabilityKind(nullability, isContextSensitive)
+        << DiagNullabilityKind(*existingNullability, false);
+      return true;
+    }
+
+    desugared = attributed->getModifiedType();
+  }
+
+  // If there is already a different nullability specifier, complain.
+  // This (unlike the code above) looks through typedefs that might
+  // have nullability specifiers on them, which means we cannot
+  // provide a useful Fix-It.
+  if (auto existingNullability = desugared->getNullability(S.Context)) {
+    if (nullability != *existingNullability) {
+      S.Diag(nullabilityLoc, diag::err_nullability_conflicting)
+        << DiagNullabilityKind(nullability, isContextSensitive)
+        << DiagNullabilityKind(*existingNullability, false);
+
+      // Try to find the typedef with the existing nullability specifier.
+      if (auto typedefType = desugared->getAs<TypedefType>()) {
+        TypedefNameDecl *typedefDecl = typedefType->getDecl();
+        QualType underlyingType = typedefDecl->getUnderlyingType();
+        if (auto typedefNullability
+              = AttributedType::stripOuterNullability(underlyingType)) {
+          if (*typedefNullability == *existingNullability) {
+            S.Diag(typedefDecl->getLocation(), diag::note_nullability_here)
+              << DiagNullabilityKind(*existingNullability, false);
+          }
+        }
+      }
+
+      return true;
+    }
+  }
+
+  // If this definitely isn't a pointer type, reject the specifier.
+  if (!desugared->canHaveNullability() &&
+      !(allowOnArrayType && desugared->isArrayType())) {
+    S.Diag(nullabilityLoc, diag::err_nullability_nonpointer)
+      << DiagNullabilityKind(nullability, isContextSensitive) << type;
+    return true;
+  }
+
+  // For the context-sensitive keywords/Objective-C property
+  // attributes, require that the type be a single-level pointer.
+  if (isContextSensitive) {
+    // Make sure that the pointee isn't itself a pointer type.
+    const Type *pointeeType = nullptr;
+    if (desugared->isArrayType())
+      pointeeType = desugared->getArrayElementTypeNoTypeQual();
+    else if (desugared->isAnyPointerType())
+      pointeeType = desugared->getPointeeType().getTypePtr();
+
+    if (pointeeType && (pointeeType->isAnyPointerType() ||
+                        pointeeType->isObjCObjectPointerType() ||
+                        pointeeType->isMemberPointerType())) {
+      S.Diag(nullabilityLoc, diag::err_nullability_cs_multilevel)
+        << DiagNullabilityKind(nullability, true)
+        << type;
+      S.Diag(nullabilityLoc, diag::note_nullability_type_specifier)
+        << DiagNullabilityKind(nullability, false)
+        << type
+        << FixItHint::CreateReplacement(nullabilityLoc,
+                                        getNullabilitySpelling(nullability));
+      return true;
+    }
+  }
+
+  // Form the attributed type.
+  type = state.getAttributedType(
+      createNullabilityAttr(S.Context, attr, nullability), type, type);
+  return false;
+}
+
+/// Check the application of the Objective-C '__kindof' qualifier to
+/// the given type.
+static bool checkObjCKindOfType(TypeProcessingState &state, QualType &type,
+                                ParsedAttr &attr) {
+  Sema &S = state.getSema();
+
+  if (isa<ObjCTypeParamType>(type)) {
+    // Build the attributed type to record where __kindof occurred.
+    type = state.getAttributedType(
+        createSimpleAttr<ObjCKindOfAttr>(S.Context, attr), type, type);
+    return false;
+  }
+
+  // Find out if it's an Objective-C object or object pointer type;
+  const ObjCObjectPointerType *ptrType = type->getAs<ObjCObjectPointerType>();
+  const ObjCObjectType *objType = ptrType ? ptrType->getObjectType()
+                                          : type->getAs<ObjCObjectType>();
+
+  // If not, we can't apply __kindof.
+  if (!objType) {
+    // FIXME: Handle dependent types that aren't yet object types.
+    S.Diag(attr.getLoc(), diag::err_objc_kindof_nonobject)
+      << type;
+    return true;
+  }
+
+  // Rebuild the "equivalent" type, which pushes __kindof down into
+  // the object type.
+  // There is no need to apply kindof on an unqualified id type.
+  QualType equivType = S.Context.getObjCObjectType(
+      objType->getBaseType(), objType->getTypeArgsAsWritten(),
+      objType->getProtocols(),
+      /*isKindOf=*/objType->isObjCUnqualifiedId() ? false : true);
+
+  // If we started with an object pointer type, rebuild it.
+  if (ptrType) {
+    equivType = S.Context.getObjCObjectPointerType(equivType);
+    if (auto nullability = type->getNullability(S.Context)) {
+      // We create a nullability attribute from the __kindof attribute.
+      // Make sure that will make sense.
+      assert(attr.getAttributeSpellingListIndex() == 0 &&
+             "multiple spellings for __kindof?");
+      Attr *A = createNullabilityAttr(S.Context, attr, *nullability);
+      A->setImplicit(true);
+      equivType = state.getAttributedType(A, equivType, equivType);
+    }
+  }
+
+  // Build the attributed type to record where __kindof occurred.
+  type = state.getAttributedType(
+      createSimpleAttr<ObjCKindOfAttr>(S.Context, attr), type, equivType);
+  return false;
+}
+
+/// Distribute a nullability type attribute that cannot be applied to
+/// the type specifier to a pointer, block pointer, or member pointer
+/// declarator, complaining if necessary.
+///
+/// \returns true if the nullability annotation was distributed, false
+/// otherwise.
+static bool distributeNullabilityTypeAttr(TypeProcessingState &state,
+                                          QualType type, ParsedAttr &attr) {
+  Declarator &declarator = state.getDeclarator();
+
+  /// Attempt to move the attribute to the specified chunk.
+  auto moveToChunk = [&](DeclaratorChunk &chunk, bool inFunction) -> bool {
+    // If there is already a nullability attribute there, don't add
+    // one.
+    if (hasNullabilityAttr(chunk.getAttrs()))
+      return false;
+
+    // Complain about the nullability qualifier being in the wrong
+    // place.
+    enum {
+      PK_Pointer,
+      PK_BlockPointer,
+      PK_MemberPointer,
+      PK_FunctionPointer,
+      PK_MemberFunctionPointer,
+    } pointerKind
+      = chunk.Kind == DeclaratorChunk::Pointer ? (inFunction ? PK_FunctionPointer
+                                                             : PK_Pointer)
+        : chunk.Kind == DeclaratorChunk::BlockPointer ? PK_BlockPointer
+        : inFunction? PK_MemberFunctionPointer : PK_MemberPointer;
+
+    auto diag = state.getSema().Diag(attr.getLoc(),
+                                     diag::warn_nullability_declspec)
+      << DiagNullabilityKind(mapNullabilityAttrKind(attr.getKind()),
+                             attr.isContextSensitiveKeywordAttribute())
+      << type
+      << static_cast<unsigned>(pointerKind);
+
+    // FIXME: MemberPointer chunks don't carry the location of the *.
+    if (chunk.Kind != DeclaratorChunk::MemberPointer) {
+      diag << FixItHint::CreateRemoval(attr.getLoc())
+           << FixItHint::CreateInsertion(
+                  state.getSema().getPreprocessor().getLocForEndOfToken(
+                      chunk.Loc),
+                  " " + attr.getAttrName()->getName().str() + " ");
+    }
+
+    moveAttrFromListToList(attr, state.getCurrentAttributes(),
+                           chunk.getAttrs());
+    return true;
+  };
+
+  // Move it to the outermost pointer, member pointer, or block
+  // pointer declarator.
+  for (unsigned i = state.getCurrentChunkIndex(); i != 0; --i) {
+    DeclaratorChunk &chunk = declarator.getTypeObject(i-1);
+    switch (chunk.Kind) {
+    case DeclaratorChunk::Pointer:
+    case DeclaratorChunk::BlockPointer:
+    case DeclaratorChunk::MemberPointer:
+      return moveToChunk(chunk, false);
+
+    case DeclaratorChunk::Paren:
+    case DeclaratorChunk::Array:
+      continue;
+
+    case DeclaratorChunk::Function:
+      // Try to move past the return type to a function/block/member
+      // function pointer.
+      if (DeclaratorChunk *dest = maybeMovePastReturnType(
+                                    declarator, i,
+                                    /*onlyBlockPointers=*/false)) {
+        return moveToChunk(*dest, true);
+      }
+
+      return false;
+
+    // Don't walk through these.
+    case DeclaratorChunk::Reference:
+    case DeclaratorChunk::Pipe:
+      return false;
+    }
+  }
+
+  return false;
+}
+
+static Attr *getCCTypeAttr(ASTContext &Ctx, ParsedAttr &Attr) {
   assert(!Attr.isInvalid());
   switch (Attr.getKind()) {
   default:
     llvm_unreachable("not a calling convention attribute");
-  case AttributeList::AT_CDecl:
-    return AttributedType::attr_cdecl;
-  case AttributeList::AT_FastCall:
-    return AttributedType::attr_fastcall;
-  case AttributeList::AT_StdCall:
-    return AttributedType::attr_stdcall;
-  case AttributeList::AT_ThisCall:
-    return AttributedType::attr_thiscall;
-  case AttributeList::AT_Pascal:
-    return AttributedType::attr_pascal;
-  case AttributeList::AT_VectorCall:
-    return AttributedType::attr_vectorcall;
-  case AttributeList::AT_Pcs: {
+  case ParsedAttr::AT_CDecl:
+    return createSimpleAttr<CDeclAttr>(Ctx, Attr);
+  case ParsedAttr::AT_FastCall:
+    return createSimpleAttr<FastCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_StdCall:
+    return createSimpleAttr<StdCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_ThisCall:
+    return createSimpleAttr<ThisCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_RegCall:
+    return createSimpleAttr<RegCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_Pascal:
+    return createSimpleAttr<PascalAttr>(Ctx, Attr);
+  case ParsedAttr::AT_SwiftCall:
+    return createSimpleAttr<SwiftCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_VectorCall:
+    return createSimpleAttr<VectorCallAttr>(Ctx, Attr);
+  case ParsedAttr::AT_AArch64VectorPcs:
+    return createSimpleAttr<AArch64VectorPcsAttr>(Ctx, Attr);
+  case ParsedAttr::AT_Pcs: {
     // The attribute may have had a fixit applied where we treated an
     // identifier as a string literal.  The contents of the string are valid,
     // but the form may not be.
@@ -4450,33 +7356,35 @@ static AttributedType::Kind getCCTypeAttrKind(AttributeList &Attr) {
       Str = cast<StringLiteral>(Attr.getArgAsExpr(0))->getString();
     else
       Str = Attr.getArgAsIdent(0)->Ident->getName();
-    return llvm::StringSwitch<AttributedType::Kind>(Str)
-        .Case("aapcs", AttributedType::attr_pcs)
-        .Case("aapcs-vfp", AttributedType::attr_pcs_vfp);
+    PcsAttr::PCSType Type;
+    if (!PcsAttr::ConvertStrToPCSType(Str, Type))
+      llvm_unreachable("already validated the attribute");
+    return ::new (Ctx) PcsAttr(Ctx, Attr, Type);
   }
-  case AttributeList::AT_PnaclCall:
-    return AttributedType::attr_pnaclcall;
-  case AttributeList::AT_IntelOclBicc:
-    return AttributedType::attr_inteloclbicc;
-  case AttributeList::AT_MSABI:
-    return AttributedType::attr_ms_abi;
-  case AttributeList::AT_SysVABI:
-    return AttributedType::attr_sysv_abi;
+  case ParsedAttr::AT_IntelOclBicc:
+    return createSimpleAttr<IntelOclBiccAttr>(Ctx, Attr);
+  case ParsedAttr::AT_MSABI:
+    return createSimpleAttr<MSABIAttr>(Ctx, Attr);
+  case ParsedAttr::AT_SysVABI:
+    return createSimpleAttr<SysVABIAttr>(Ctx, Attr);
+  case ParsedAttr::AT_PreserveMost:
+    return createSimpleAttr<PreserveMostAttr>(Ctx, Attr);
+  case ParsedAttr::AT_PreserveAll:
+    return createSimpleAttr<PreserveAllAttr>(Ctx, Attr);
   }
   llvm_unreachable("unexpected attribute kind!");
 }
 
 /// Process an individual function attribute.  Returns true to
 /// indicate that the attribute was handled, false if it wasn't.
-static bool handleFunctionTypeAttr(TypeProcessingState &state,
-                                   AttributeList &attr,
+static bool handleFunctionTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
                                    QualType &type) {
   Sema &S = state.getSema();
 
   FunctionTypeUnwrapper unwrapped(S, type);
 
-  if (attr.getKind() == AttributeList::AT_NoReturn) {
-    if (S.CheckNoReturnAttr(attr))
+  if (attr.getKind() == ParsedAttr::AT_NoReturn) {
+    if (S.CheckAttrNoArgs(attr))
       return true;
 
     // Delay if this is not a function type.
@@ -4489,24 +7397,88 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
     return true;
   }
 
+  if (attr.getKind() == ParsedAttr::AT_CmseNSCall) {
+    // Delay if this is not a function type.
+    if (!unwrapped.isFunctionType())
+      return false;
+
+    // Ignore if we don't have CMSE enabled.
+    if (!S.getLangOpts().Cmse) {
+      S.Diag(attr.getLoc(), diag::warn_attribute_ignored) << attr;
+      attr.setInvalid();
+      return true;
+    }
+
+    // Otherwise we can process right away.
+    FunctionType::ExtInfo EI =
+        unwrapped.get()->getExtInfo().withCmseNSCall(true);
+    type = unwrapped.wrap(S, S.Context.adjustFunctionType(unwrapped.get(), EI));
+    return true;
+  }
+
   // ns_returns_retained is not always a type attribute, but if we got
   // here, we're treating it as one right now.
-  if (attr.getKind() == AttributeList::AT_NSReturnsRetained) {
-    assert(S.getLangOpts().ObjCAutoRefCount &&
-           "ns_returns_retained treated as type attribute in non-ARC");
+  if (attr.getKind() == ParsedAttr::AT_NSReturnsRetained) {
     if (attr.getNumArgs()) return true;
 
     // Delay if this is not a function type.
     if (!unwrapped.isFunctionType())
       return false;
 
-    FunctionType::ExtInfo EI
-      = unwrapped.get()->getExtInfo().withProducesResult(true);
+    // Check whether the return type is reasonable.
+    if (S.checkNSReturnsRetainedReturnType(attr.getLoc(),
+                                           unwrapped.get()->getReturnType()))
+      return true;
+
+    // Only actually change the underlying type in ARC builds.
+    QualType origType = type;
+    if (state.getSema().getLangOpts().ObjCAutoRefCount) {
+      FunctionType::ExtInfo EI
+        = unwrapped.get()->getExtInfo().withProducesResult(true);
+      type = unwrapped.wrap(S, S.Context.adjustFunctionType(unwrapped.get(), EI));
+    }
+    type = state.getAttributedType(
+        createSimpleAttr<NSReturnsRetainedAttr>(S.Context, attr),
+        origType, type);
+    return true;
+  }
+
+  if (attr.getKind() == ParsedAttr::AT_AnyX86NoCallerSavedRegisters) {
+    if (S.CheckAttrTarget(attr) || S.CheckAttrNoArgs(attr))
+      return true;
+
+    // Delay if this is not a function type.
+    if (!unwrapped.isFunctionType())
+      return false;
+
+    FunctionType::ExtInfo EI =
+        unwrapped.get()->getExtInfo().withNoCallerSavedRegs(true);
     type = unwrapped.wrap(S, S.Context.adjustFunctionType(unwrapped.get(), EI));
     return true;
   }
 
-  if (attr.getKind() == AttributeList::AT_Regparm) {
+  if (attr.getKind() == ParsedAttr::AT_AnyX86NoCfCheck) {
+    if (!S.getLangOpts().CFProtectionBranch) {
+      S.Diag(attr.getLoc(), diag::warn_nocf_check_attribute_ignored);
+      attr.setInvalid();
+      return true;
+    }
+
+    if (S.CheckAttrTarget(attr) || S.CheckAttrNoArgs(attr))
+      return true;
+
+    // If this is not a function type, warning will be asserted by subject
+    // check.
+    if (!unwrapped.isFunctionType())
+      return true;
+
+    FunctionType::ExtInfo EI =
+      unwrapped.get()->getExtInfo().withNoCfCheck(true);
+    type = unwrapped.wrap(S, S.Context.adjustFunctionType(unwrapped.get(), EI));
+    return true;
+  }
+
+  if (attr.getKind() == ParsedAttr::AT_Regparm) {
     unsigned value;
     if (S.CheckRegparmAttr(attr, value))
       return true;
@@ -4532,6 +7504,57 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
     return true;
   }
 
+  if (attr.getKind() == ParsedAttr::AT_NoThrow) {
+    // Delay if this is not a function type.
+    if (!unwrapped.isFunctionType())
+      return false;
+
+    if (S.CheckAttrNoArgs(attr)) {
+      attr.setInvalid();
+      return true;
+    }
+
+    // Otherwise we can process right away.
+    auto *Proto = unwrapped.get()->castAs<FunctionProtoType>();
+
+    // MSVC ignores nothrow if it is in conflict with an explicit exception
+    // specification.
+    if (Proto->hasExceptionSpec()) {
+      switch (Proto->getExceptionSpecType()) {
+      case EST_None:
+        llvm_unreachable("This doesn't have an exception spec!");
+
+      case EST_DynamicNone:
+      case EST_BasicNoexcept:
+      case EST_NoexceptTrue:
+      case EST_NoThrow:
+        // Exception spec doesn't conflict with nothrow, so don't warn.
+        LLVM_FALLTHROUGH;
+      case EST_Unparsed:
+      case EST_Uninstantiated:
+      case EST_DependentNoexcept:
+      case EST_Unevaluated:
+        // We don't have enough information to properly determine if there is a
+        // conflict, so suppress the warning.
+        break;
+      case EST_Dynamic:
+      case EST_MSAny:
+      case EST_NoexceptFalse:
+        S.Diag(attr.getLoc(), diag::warn_nothrow_attribute_ignored);
+        break;
+      }
+      return true;
+    }
+
+    type = unwrapped.wrap(
+        S, S.Context
+               .getFunctionTypeWithExceptionSpec(
+                   QualType{Proto, 0},
+                   FunctionProtoType::ExceptionSpecInfo{EST_NoThrow})
+               ->getAs<FunctionType>());
+    return true;
+  }
+
   // Delay if the type didn't work out to a function.
   if (!unwrapped.isFunctionType()) return false;
 
@@ -4542,13 +7565,12 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
 
   const FunctionType *fn = unwrapped.get();
   CallingConv CCOld = fn->getCallConv();
-  AttributedType::Kind CCAttrKind = getCCTypeAttrKind(attr);
+  Attr *CCAttr = getCCTypeAttr(S.Context, attr);
 
   if (CCOld != CC) {
     // Error out on when there's already an attribute on the type
     // and the CCs don't match.
-    const AttributedType *AT = S.getCallingConvAttributedType(type);
-    if (AT && AT->getAttrKind() != CCAttrKind) {
+    if (S.getCallingConvAttributedType(type)) {
       S.Diag(attr.getLoc(), diag::err_attributes_are_not_compatible)
         << FunctionType::getNameForCallConv(CC)
         << FunctionType::getNameForCallConv(CCOld);
@@ -4557,19 +7579,26 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
     }
   }
 
-  // Diagnose use of callee-cleanup calling convention on variadic functions.
+  // Diagnose use of variadic functions with calling conventions that
+  // don't support them (e.g. because they're callee-cleanup).
+  // We delay warning about this on unprototyped function declarations
+  // until after redeclaration checking, just in case we pick up a
+  // prototype that way.  And apparently we also "delay" warning about
+  // unprototyped function types in general, despite not necessarily having
+  // much ability to diagnose it later.
   if (!supportsVariadicCall(CC)) {
     const FunctionProtoType *FnP = dyn_cast<FunctionProtoType>(fn);
     if (FnP && FnP->isVariadic()) {
-      unsigned DiagID = diag::err_cconv_varargs;
       // stdcall and fastcall are ignored with a warning for GCC and MS
       // compatibility.
       if (CC == CC_X86StdCall || CC == CC_X86FastCall)
-        DiagID = diag::warn_cconv_varargs;
+        return S.Diag(attr.getLoc(), diag::warn_cconv_unsupported)
+               << FunctionType::getNameForCallConv(CC)
+               << (int)Sema::CallingConventionIgnoredReason::VariadicFunction;
 
-      S.Diag(attr.getLoc(), DiagID) << FunctionType::getNameForCallConv(CC);
       attr.setInvalid();
-      return true;
+      return S.Diag(attr.getLoc(), diag::err_cconv_varargs)
+             << FunctionType::getNameForCallConv(CC);
     }
   }
 
@@ -4584,41 +7613,67 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state,
   // Modify the CC from the wrapped function type, wrap it all back, and then
   // wrap the whole thing in an AttributedType as written.  The modified type
   // might have a different CC if we ignored the attribute.
-  FunctionType::ExtInfo EI = unwrapped.get()->getExtInfo().withCallingConv(CC);
-  QualType Equivalent =
+  QualType Equivalent;
+  if (CCOld == CC) {
+    Equivalent = type;
+  } else {
+    auto EI = unwrapped.get()->getExtInfo().withCallingConv(CC);
+    Equivalent =
       unwrapped.wrap(S, S.Context.adjustFunctionType(unwrapped.get(), EI));
-  type = S.Context.getAttributedType(CCAttrKind, type, Equivalent);
+  }
+  type = state.getAttributedType(CCAttr, type, Equivalent);
   return true;
 }
 
-bool Sema::hasExplicitCallingConv(QualType &T) {
-  QualType R = T.IgnoreParens();
-  while (const AttributedType *AT = dyn_cast<AttributedType>(R)) {
+bool Sema::hasExplicitCallingConv(QualType T) {
+  const AttributedType *AT;
+
+  // Stop if we'd be stripping off a typedef sugar node to reach the
+  // AttributedType.
+  while ((AT = T->getAs<AttributedType>()) &&
+         AT->getAs<TypedefType>() == T->getAs<TypedefType>()) {
     if (AT->isCallingConv())
       return true;
-    R = AT->getModifiedType().IgnoreParens();
+    T = AT->getModifiedType();
   }
   return false;
 }
 
-void Sema::adjustMemberFunctionCC(QualType &T, bool IsStatic) {
+void Sema::adjustMemberFunctionCC(QualType &T, bool IsStatic, bool IsCtorOrDtor,
+                                  SourceLocation Loc) {
   FunctionTypeUnwrapper Unwrapped(*this, T);
   const FunctionType *FT = Unwrapped.get();
   bool IsVariadic = (isa<FunctionProtoType>(FT) &&
                      cast<FunctionProtoType>(FT)->isVariadic());
-
-  // Only adjust types with the default convention.  For example, on Windows we
-  // should adjust a __cdecl type to __thiscall for instance methods, and a
-  // __thiscall type to __cdecl for static methods.
   CallingConv CurCC = FT->getCallConv();
-  CallingConv FromCC =
-      Context.getDefaultCallingConvention(IsVariadic, IsStatic);
   CallingConv ToCC = Context.getDefaultCallingConvention(IsVariadic, !IsStatic);
-  if (CurCC != FromCC || FromCC == ToCC)
+
+  if (CurCC == ToCC)
     return;
 
-  if (hasExplicitCallingConv(T))
-    return;
+  // MS compiler ignores explicit calling convention attributes on structors. We
+  // should do the same.
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft() && IsCtorOrDtor) {
+    // Issue a warning on ignored calling convention -- except of __stdcall.
+    // Again, this is what MS compiler does.
+    if (CurCC != CC_X86StdCall)
+      Diag(Loc, diag::warn_cconv_unsupported)
+          << FunctionType::getNameForCallConv(CurCC)
+          << (int)Sema::CallingConventionIgnoredReason::ConstructorDestructor;
+  // Default adjustment.
+  } else {
+    // Only adjust types with the default convention.  For example, on Windows
+    // we should adjust a __cdecl type to __thiscall for instance methods, and a
+    // __thiscall type to __cdecl for static methods.
+    CallingConv DefaultCC =
+        Context.getDefaultCallingConvention(IsVariadic, IsStatic);
+
+    if (CurCC != DefaultCC || DefaultCC == ToCC)
+      return;
+
+    if (hasExplicitCallingConv(T))
+      return;
+  }
 
   FT = Context.adjustFunctionType(FT, FT->getExtInfo().withCallingConv(ToCC));
   QualType Wrapped = Unwrapped.wrap(*this, FT);
@@ -4632,96 +7687,37 @@ void Sema::adjustMemberFunctionCC(QualType &T, bool IsStatic) {
 /// The raw attribute should contain precisely 1 argument, the vector size for
 /// the variable, measured in bytes. If curType and rawAttr are well formed,
 /// this routine will return a new vector type.
-static void HandleVectorSizeAttr(QualType& CurType, const AttributeList &Attr,
+static void HandleVectorSizeAttr(QualType &CurType, const ParsedAttr &Attr,
                                  Sema &S) {
   // Check the attribute arguments.
   if (Attr.getNumArgs() != 1) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
-      << Attr.getName() << 1;
-    Attr.setInvalid();
-    return;
-  }
-  Expr *sizeExpr = static_cast<Expr *>(Attr.getArgAsExpr(0));
-  llvm::APSInt vecSize(32);
-  if (sizeExpr->isTypeDependent() || sizeExpr->isValueDependent() ||
-      !sizeExpr->isIntegerConstantExpr(vecSize, S.Context)) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_argument_type)
-      << Attr.getName() << AANT_ArgumentIntegerConstant
-      << sizeExpr->getSourceRange();
-    Attr.setInvalid();
-    return;
-  }
-  // The base type must be integer (not Boolean or enumeration) or float, and
-  // can't already be a vector.
-  if (!CurType->isBuiltinType() || CurType->isBooleanType() ||
-      (!CurType->isIntegerType() && !CurType->isRealFloatingType())) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_invalid_vector_type) << CurType;
-    Attr.setInvalid();
-    return;
-  }
-  unsigned typeSize = static_cast<unsigned>(S.Context.getTypeSize(CurType));
-  // vecSize is specified in bytes - convert to bits.
-  unsigned vectorSize = static_cast<unsigned>(vecSize.getZExtValue() * 8);
-
-  // the vector size needs to be an integral multiple of the type size.
-  if (vectorSize % typeSize) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_invalid_size)
-      << sizeExpr->getSourceRange();
-    Attr.setInvalid();
-    return;
-  }
-  if (VectorType::isVectorSizeTooLarge(vectorSize / typeSize)) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_size_too_large)
-      << sizeExpr->getSourceRange();
-    Attr.setInvalid();
-    return;
-  }
-  if (vectorSize == 0) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_zero_size)
-      << sizeExpr->getSourceRange();
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << Attr
+                                                                      << 1;
     Attr.setInvalid();
     return;
   }
 
-  // Success! Instantiate the vector type, the number of elements is > 0, and
-  // not required to be a power of 2, unlike GCC.
-  CurType = S.Context.getVectorType(CurType, vectorSize/typeSize,
-                                    VectorType::GenericVector);
+  Expr *SizeExpr = Attr.getArgAsExpr(0);
+  QualType T = S.BuildVectorType(CurType, SizeExpr, Attr.getLoc());
+  if (!T.isNull())
+    CurType = T;
+  else
+    Attr.setInvalid();
 }
 
-/// \brief Process the OpenCL-like ext_vector_type attribute when it occurs on
+/// Process the OpenCL-like ext_vector_type attribute when it occurs on
 /// a type.
-static void HandleExtVectorTypeAttr(QualType &CurType,
-                                    const AttributeList &Attr,
+static void HandleExtVectorTypeAttr(QualType &CurType, const ParsedAttr &Attr,
                                     Sema &S) {
   // check the attribute arguments.
   if (Attr.getNumArgs() != 1) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
-      << Attr.getName() << 1;
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << Attr
+                                                                      << 1;
     return;
   }
 
-  Expr *sizeExpr;
-
-  // Special case where the argument is a template id.
-  if (Attr.isArgIdent(0)) {
-    CXXScopeSpec SS;
-    SourceLocation TemplateKWLoc;
-    UnqualifiedId id;
-    id.setIdentifier(Attr.getArgAsIdent(0)->Ident, Attr.getLoc());
-
-    ExprResult Size = S.ActOnIdExpression(S.getCurScope(), SS, TemplateKWLoc,
-                                          id, false, false);
-    if (Size.isInvalid())
-      return;
-
-    sizeExpr = Size.get();
-  } else {
-    sizeExpr = Attr.getArgAsExpr(0);
-  }
-
-  // Create the vector type.
-  QualType T = S.BuildExtVectorType(CurType, sizeExpr, Attr.getLoc());
+  Expr *SizeExpr = Attr.getArgAsExpr(0);
+  QualType T = S.BuildExtVectorType(CurType, SizeExpr, Attr.getLoc());
   if (!T.isNull())
     CurType = T;
 }
@@ -4737,27 +7733,27 @@ static bool isPermittedNeonBaseType(QualType &Ty,
   // Signed poly is mathematically wrong, but has been baked into some ABIs by
   // now.
   bool IsPolyUnsigned = Triple.getArch() == llvm::Triple::aarch64 ||
+                        Triple.getArch() == llvm::Triple::aarch64_32 ||
                         Triple.getArch() == llvm::Triple::aarch64_be;
   if (VecKind == VectorType::NeonPolyVector) {
     if (IsPolyUnsigned) {
-      // AArch64 polynomial vectors are unsigned and support poly64.
+      // AArch64 polynomial vectors are unsigned.
       return BTy->getKind() == BuiltinType::UChar ||
              BTy->getKind() == BuiltinType::UShort ||
              BTy->getKind() == BuiltinType::ULong ||
              BTy->getKind() == BuiltinType::ULongLong;
     } else {
-      // AArch32 polynomial vector are signed.
+      // AArch32 polynomial vectors are signed.
       return BTy->getKind() == BuiltinType::SChar ||
-             BTy->getKind() == BuiltinType::Short;
+             BTy->getKind() == BuiltinType::Short ||
+             BTy->getKind() == BuiltinType::LongLong;
     }
   }
 
   // Non-polynomial vector types: the usual suspects are allowed, as well as
   // float64_t on AArch64.
-  bool Is64Bit = Triple.getArch() == llvm::Triple::aarch64 ||
-                 Triple.getArch() == llvm::Triple::aarch64_be;
-
-  if (Is64Bit && BTy->getKind() == BuiltinType::Double)
+  if ((Triple.isArch64Bit() || Triple.getArch() == llvm::Triple::aarch64_32) &&
+      BTy->getKind() == BuiltinType::Double)
     return true;
 
   return BTy->getKind() == BuiltinType::SChar ||
@@ -4771,7 +7767,24 @@ static bool isPermittedNeonBaseType(QualType &Ty,
          BTy->getKind() == BuiltinType::LongLong ||
          BTy->getKind() == BuiltinType::ULongLong ||
          BTy->getKind() == BuiltinType::Float ||
-         BTy->getKind() == BuiltinType::Half;
+         BTy->getKind() == BuiltinType::Half ||
+         BTy->getKind() == BuiltinType::BFloat16;
+}
+
+static bool verifyValidIntegerConstantExpr(Sema &S, const ParsedAttr &Attr,
+                                           llvm::APSInt &Result) {
+  const auto *AttrExpr = Attr.getArgAsExpr(0);
+  if (!AttrExpr->isTypeDependent() && !AttrExpr->isValueDependent()) {
+    if (Optional<llvm::APSInt> Res =
+            AttrExpr->getIntegerConstantExpr(S.Context)) {
+      Result = *Res;
+      return true;
+    }
+  }
+  S.Diag(Attr.getLoc(), diag::err_attribute_argument_type)
+      << Attr << AANT_ArgumentIntegerConstant << AttrExpr->getSourceRange();
+  Attr.setInvalid();
+  return false;
 }
 
 /// HandleNeonVectorTypeAttr - The "neon_vector_type" and
@@ -4781,33 +7794,29 @@ static bool isPermittedNeonBaseType(QualType &Ty,
 /// the argument to these Neon attributes is the number of vector elements,
 /// not the vector size in bytes.  The vector width and element type must
 /// match one of the standard Neon vector types.
-static void HandleNeonVectorTypeAttr(QualType& CurType,
-                                     const AttributeList &Attr, Sema &S,
-                                     VectorType::VectorKind VecKind) {
-  // Target must have NEON
-  if (!S.Context.getTargetInfo().hasFeature("neon")) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_unsupported) << Attr.getName();
+static void HandleNeonVectorTypeAttr(QualType &CurType, const ParsedAttr &Attr,
+                                     Sema &S, VectorType::VectorKind VecKind) {
+  // Target must have NEON (or MVE, whose vectors are similar enough
+  // not to need a separate attribute)
+  if (!S.Context.getTargetInfo().hasFeature("neon") &&
+      !S.Context.getTargetInfo().hasFeature("mve")) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_unsupported)
+        << Attr << "'neon' or 'mve'";
     Attr.setInvalid();
     return;
   }
   // Check the attribute arguments.
   if (Attr.getNumArgs() != 1) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
-      << Attr.getName() << 1;
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << Attr
+                                                                      << 1;
     Attr.setInvalid();
     return;
   }
   // The number of elements must be an ICE.
-  Expr *numEltsExpr = static_cast<Expr *>(Attr.getArgAsExpr(0));
   llvm::APSInt numEltsInt(32);
-  if (numEltsExpr->isTypeDependent() || numEltsExpr->isValueDependent() ||
-      !numEltsExpr->isIntegerConstantExpr(numEltsInt, S.Context)) {
-    S.Diag(Attr.getLoc(), diag::err_attribute_argument_type)
-      << Attr.getName() << AANT_ArgumentIntegerConstant
-      << numEltsExpr->getSourceRange();
-    Attr.setInvalid();
+  if (!verifyValidIntegerConstantExpr(S, Attr, numEltsInt))
     return;
-  }
+
   // Only certain element types are supported for Neon vectors.
   if (!isPermittedNeonBaseType(CurType, VecKind, S)) {
     S.Diag(Attr.getLoc(), diag::err_attribute_invalid_vector_type) << CurType;
@@ -4828,17 +7837,204 @@ static void HandleNeonVectorTypeAttr(QualType& CurType,
   CurType = S.Context.getVectorType(CurType, numElts, VecKind);
 }
 
+/// HandleArmSveVectorBitsTypeAttr - The "arm_sve_vector_bits" attribute is
+/// used to create fixed-length versions of sizeless SVE types defined by
+/// the ACLE, such as svint32_t and svbool_t.
+static void HandleArmSveVectorBitsTypeAttr(QualType &CurType, ParsedAttr &Attr,
+                                           Sema &S) {
+  // Target must have SVE.
+  if (!S.Context.getTargetInfo().hasFeature("sve")) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_unsupported) << Attr << "'sve'";
+    Attr.setInvalid();
+    return;
+  }
+
+  // Attribute is unsupported if '-msve-vector-bits=<bits>' isn't specified.
+  if (!S.getLangOpts().ArmSveVectorBits) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_arm_feature_sve_bits_unsupported)
+        << Attr;
+    Attr.setInvalid();
+    return;
+  }
+
+  // Check the attribute arguments.
+  if (Attr.getNumArgs() != 1) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
+        << Attr << 1;
+    Attr.setInvalid();
+    return;
+  }
+
+  // The vector size must be an integer constant expression.
+  llvm::APSInt SveVectorSizeInBits(32);
+  if (!verifyValidIntegerConstantExpr(S, Attr, SveVectorSizeInBits))
+    return;
+
+  unsigned VecSize = static_cast<unsigned>(SveVectorSizeInBits.getZExtValue());
+
+  // The attribute vector size must match -msve-vector-bits.
+  if (VecSize != S.getLangOpts().ArmSveVectorBits) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_bad_sve_vector_size)
+        << VecSize << S.getLangOpts().ArmSveVectorBits;
+    Attr.setInvalid();
+    return;
+  }
+
+  // Attribute can only be attached to a single SVE vector or predicate type.
+  if (!CurType->isVLSTBuiltinType()) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_invalid_sve_type)
+        << Attr << CurType;
+    Attr.setInvalid();
+    return;
+  }
+
+  const auto *BT = CurType->castAs<BuiltinType>();
+
+  QualType EltType = CurType->getSveEltType(S.Context);
+  unsigned TypeSize = S.Context.getTypeSize(EltType);
+  VectorType::VectorKind VecKind = VectorType::SveFixedLengthDataVector;
+  if (BT->getKind() == BuiltinType::SveBool) {
+    // Predicates are represented as i8.
+    VecSize /= S.Context.getCharWidth() * S.Context.getCharWidth();
+    VecKind = VectorType::SveFixedLengthPredicateVector;
+  } else
+    VecSize /= TypeSize;
+  CurType = S.Context.getVectorType(EltType, VecSize, VecKind);
+}
+
+static void HandleArmMveStrictPolymorphismAttr(TypeProcessingState &State,
+                                               QualType &CurType,
+                                               ParsedAttr &Attr) {
+  const VectorType *VT = dyn_cast<VectorType>(CurType);
+  if (!VT || VT->getVectorKind() != VectorType::NeonVector) {
+    State.getSema().Diag(Attr.getLoc(),
+                         diag::err_attribute_arm_mve_polymorphism);
+    Attr.setInvalid();
+    return;
+  }
+
+  CurType =
+      State.getAttributedType(createSimpleAttr<ArmMveStrictPolymorphismAttr>(
+                                  State.getSema().Context, Attr),
+                              CurType, CurType);
+}
+
+/// Handle OpenCL Access Qualifier Attribute.
+static void HandleOpenCLAccessAttr(QualType &CurType, const ParsedAttr &Attr,
+                                   Sema &S) {
+  // OpenCL v2.0 s6.6 - Access qualifier can be used only for image and pipe type.
+  if (!(CurType->isImageType() || CurType->isPipeType())) {
+    S.Diag(Attr.getLoc(), diag::err_opencl_invalid_access_qualifier);
+    Attr.setInvalid();
+    return;
+  }
+
+  if (const TypedefType* TypedefTy = CurType->getAs<TypedefType>()) {
+    QualType BaseTy = TypedefTy->desugar();
+
+    std::string PrevAccessQual;
+    if (BaseTy->isPipeType()) {
+      if (TypedefTy->getDecl()->hasAttr<OpenCLAccessAttr>()) {
+        OpenCLAccessAttr *Attr =
+            TypedefTy->getDecl()->getAttr<OpenCLAccessAttr>();
+        PrevAccessQual = Attr->getSpelling();
+      } else {
+        PrevAccessQual = "read_only";
+      }
+    } else if (const BuiltinType* ImgType = BaseTy->getAs<BuiltinType>()) {
+
+      switch (ImgType->getKind()) {
+        #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
+      case BuiltinType::Id:                                          \
+        PrevAccessQual = #Access;                                    \
+        break;
+        #include "clang/Basic/OpenCLImageTypes.def"
+      default:
+        llvm_unreachable("Unable to find corresponding image type.");
+      }
+    } else {
+      llvm_unreachable("unexpected type");
+    }
+    StringRef AttrName = Attr.getAttrName()->getName();
+    if (PrevAccessQual == AttrName.ltrim("_")) {
+      // Duplicated qualifiers
+      S.Diag(Attr.getLoc(), diag::warn_duplicate_declspec)
+         << AttrName << Attr.getRange();
+    } else {
+      // Contradicting qualifiers
+      S.Diag(Attr.getLoc(), diag::err_opencl_multiple_access_qualifiers);
+    }
+
+    S.Diag(TypedefTy->getDecl()->getBeginLoc(),
+           diag::note_opencl_typedef_access_qualifier) << PrevAccessQual;
+  } else if (CurType->isPipeType()) {
+    if (Attr.getSemanticSpelling() == OpenCLAccessAttr::Keyword_write_only) {
+      QualType ElemType = CurType->castAs<PipeType>()->getElementType();
+      CurType = S.Context.getWritePipeType(ElemType);
+    }
+  }
+}
+
+/// HandleMatrixTypeAttr - "matrix_type" attribute, like ext_vector_type
+static void HandleMatrixTypeAttr(QualType &CurType, const ParsedAttr &Attr,
+                                 Sema &S) {
+  if (!S.getLangOpts().MatrixTypes) {
+    S.Diag(Attr.getLoc(), diag::err_builtin_matrix_disabled);
+    return;
+  }
+
+  if (Attr.getNumArgs() != 2) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments)
+        << Attr << 2;
+    return;
+  }
+
+  Expr *RowsExpr = Attr.getArgAsExpr(0);
+  Expr *ColsExpr = Attr.getArgAsExpr(1);
+  QualType T = S.BuildMatrixType(CurType, RowsExpr, ColsExpr, Attr.getLoc());
+  if (!T.isNull())
+    CurType = T;
+}
+
+static void HandleLifetimeBoundAttr(TypeProcessingState &State,
+                                    QualType &CurType,
+                                    ParsedAttr &Attr) {
+  if (State.getDeclarator().isDeclarationOfFunction()) {
+    CurType = State.getAttributedType(
+        createSimpleAttr<LifetimeBoundAttr>(State.getSema().Context, Attr),
+        CurType, CurType);
+  }
+}
+
+static bool isAddressSpaceKind(const ParsedAttr &attr) {
+  auto attrKind = attr.getKind();
+
+  return attrKind == ParsedAttr::AT_AddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLPrivateAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLGlobalAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLGlobalDeviceAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLGlobalHostAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLLocalAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLConstantAddressSpace ||
+         attrKind == ParsedAttr::AT_OpenCLGenericAddressSpace;
+}
+
 static void processTypeAttrs(TypeProcessingState &state, QualType &type,
-                             TypeAttrLocation TAL, AttributeList *attrs) {
+                             TypeAttrLocation TAL,
+                             ParsedAttributesView &attrs) {
   // Scan through and apply attributes to this type where it makes sense.  Some
   // attributes (such as __address_space__, __vector_size__, etc) apply to the
   // type, but others can be present in the type specifiers even though they
   // apply to the decl.  Here we apply type attributes and ignore the rest.
 
-  AttributeList *next;
-  do {
-    AttributeList &attr = *attrs;
-    next = attr.getNext();
+  // This loop modifies the list pretty frequently, but we still need to make
+  // sure we visit every element once. Copy the attributes list, and iterate
+  // over that.
+  ParsedAttributesView AttrsCopy{attrs};
+
+  state.setParsedNoDeref(false);
+
+  for (ParsedAttr &attr : AttrsCopy) {
 
     // Skip attributes that were marked to be invalid.
     if (attr.isInvalid())
@@ -4846,18 +8042,25 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
 
     if (attr.isCXX11Attribute()) {
       // [[gnu::...]] attributes are treated as declaration attributes, so may
-      // not appertain to a DeclaratorChunk, even if we handle them as type
-      // attributes.
-      if (attr.getScopeName() && attr.getScopeName()->isStr("gnu")) {
+      // not appertain to a DeclaratorChunk. If we handle them as type
+      // attributes, accept them in that position and diagnose the GCC
+      // incompatibility.
+      if (attr.isGNUScope()) {
+        bool IsTypeAttr = attr.isTypeAttr();
         if (TAL == TAL_DeclChunk) {
           state.getSema().Diag(attr.getLoc(),
-                               diag::warn_cxx11_gnu_attribute_on_type)
-              << attr.getName();
-          continue;
+                               IsTypeAttr
+                                   ? diag::warn_gcc_ignores_type_attr
+                                   : diag::warn_cxx11_gnu_attribute_on_type)
+              << attr;
+          if (!IsTypeAttr)
+            continue;
         }
-      } else if (TAL != TAL_DeclChunk) {
+      } else if (TAL != TAL_DeclChunk && !isAddressSpaceKind(attr)) {
         // Otherwise, only consider type processing for a C++11 attribute if
         // it's actually been applied to a type.
+        // We also allow C++11 address_space and
+        // OpenCL language address space attributes to pass through.
         continue;
       }
     }
@@ -4869,33 +8072,35 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
       // A C++11 attribute on a declarator chunk must appertain to a type.
       if (attr.isCXX11Attribute() && TAL == TAL_DeclChunk) {
         state.getSema().Diag(attr.getLoc(), diag::err_attribute_not_type_attr)
-          << attr.getName();
+            << attr;
         attr.setUsedAsTypeAttr();
       }
       break;
 
-    case AttributeList::UnknownAttribute:
+    case ParsedAttr::UnknownAttribute:
       if (attr.isCXX11Attribute() && TAL == TAL_DeclChunk)
         state.getSema().Diag(attr.getLoc(),
                              diag::warn_unknown_attribute_ignored)
-          << attr.getName();
+            << attr << attr.getRange();
       break;
 
-    case AttributeList::IgnoredAttribute:
+    case ParsedAttr::IgnoredAttribute:
       break;
 
-    case AttributeList::AT_MayAlias:
+    case ParsedAttr::AT_MayAlias:
       // FIXME: This attribute needs to actually be handled, but if we ignore
       // it it breaks large amounts of Linux software.
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_OpenCLPrivateAddressSpace:
-    case AttributeList::AT_OpenCLGlobalAddressSpace:
-    case AttributeList::AT_OpenCLLocalAddressSpace:
-    case AttributeList::AT_OpenCLConstantAddressSpace:
-    case AttributeList::AT_OpenCLGenericAddressSpace:
-    case AttributeList::AT_AddressSpace:
-      HandleAddressSpaceTypeAttribute(type, attr, state.getSema());
+    case ParsedAttr::AT_OpenCLPrivateAddressSpace:
+    case ParsedAttr::AT_OpenCLGlobalAddressSpace:
+    case ParsedAttr::AT_OpenCLGlobalDeviceAddressSpace:
+    case ParsedAttr::AT_OpenCLGlobalHostAddressSpace:
+    case ParsedAttr::AT_OpenCLLocalAddressSpace:
+    case ParsedAttr::AT_OpenCLConstantAddressSpace:
+    case ParsedAttr::AT_OpenCLGenericAddressSpace:
+    case ParsedAttr::AT_AddressSpace:
+      HandleAddressSpaceTypeAttribute(type, attr, state);
       attr.setUsedAsTypeAttr();
       break;
     OBJC_POINTER_TYPE_ATTRS_CASELIST:
@@ -4903,27 +8108,53 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
         distributeObjCPointerTypeAttr(state, attr, type);
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_VectorSize:
+    case ParsedAttr::AT_VectorSize:
       HandleVectorSizeAttr(type, attr, state.getSema());
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_ExtVectorType:
+    case ParsedAttr::AT_ExtVectorType:
       HandleExtVectorTypeAttr(type, attr, state.getSema());
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_NeonVectorType:
+    case ParsedAttr::AT_NeonVectorType:
       HandleNeonVectorTypeAttr(type, attr, state.getSema(),
                                VectorType::NeonVector);
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_NeonPolyVectorType:
+    case ParsedAttr::AT_NeonPolyVectorType:
       HandleNeonVectorTypeAttr(type, attr, state.getSema(),
                                VectorType::NeonPolyVector);
       attr.setUsedAsTypeAttr();
       break;
-    case AttributeList::AT_OpenCLImageAccess:
-      // FIXME: there should be some type checking happening here, I would
-      // imagine, but the original handler's checking was entirely superfluous.
+    case ParsedAttr::AT_ArmSveVectorBits:
+      HandleArmSveVectorBitsTypeAttr(type, attr, state.getSema());
+      attr.setUsedAsTypeAttr();
+      break;
+    case ParsedAttr::AT_ArmMveStrictPolymorphism: {
+      HandleArmMveStrictPolymorphismAttr(state, type, attr);
+      attr.setUsedAsTypeAttr();
+      break;
+    }
+    case ParsedAttr::AT_OpenCLAccess:
+      HandleOpenCLAccessAttr(type, attr, state.getSema());
+      attr.setUsedAsTypeAttr();
+      break;
+    case ParsedAttr::AT_LifetimeBound:
+      if (TAL == TAL_DeclChunk)
+        HandleLifetimeBoundAttr(state, type, attr);
+      break;
+
+    case ParsedAttr::AT_NoDeref: {
+      ASTContext &Ctx = state.getSema().Context;
+      type = state.getAttributedType(createSimpleAttr<NoDerefAttr>(Ctx, attr),
+                                     type, type);
+      attr.setUsedAsTypeAttr();
+      state.setParsedNoDeref(true);
+      break;
+    }
+
+    case ParsedAttr::AT_MatrixType:
+      HandleMatrixTypeAttr(type, attr, state.getSema());
       attr.setUsedAsTypeAttr();
       break;
 
@@ -4932,11 +8163,62 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
         attr.setUsedAsTypeAttr();
       break;
 
-    case AttributeList::AT_NSReturnsRetained:
-      if (!state.getSema().getLangOpts().ObjCAutoRefCount)
-        break;
-      // fallthrough into the function attrs
 
+    NULLABILITY_TYPE_ATTRS_CASELIST:
+      // Either add nullability here or try to distribute it.  We
+      // don't want to distribute the nullability specifier past any
+      // dependent type, because that complicates the user model.
+      if (type->canHaveNullability() || type->isDependentType() ||
+          type->isArrayType() ||
+          !distributeNullabilityTypeAttr(state, type, attr)) {
+        unsigned endIndex;
+        if (TAL == TAL_DeclChunk)
+          endIndex = state.getCurrentChunkIndex();
+        else
+          endIndex = state.getDeclarator().getNumTypeObjects();
+        bool allowOnArrayType =
+            state.getDeclarator().isPrototypeContext() &&
+            !hasOuterPointerLikeChunk(state.getDeclarator(), endIndex);
+        if (checkNullabilityTypeSpecifier(
+              state,
+              type,
+              attr,
+              allowOnArrayType)) {
+          attr.setInvalid();
+        }
+
+        attr.setUsedAsTypeAttr();
+      }
+      break;
+
+    case ParsedAttr::AT_ObjCKindOf:
+      // '__kindof' must be part of the decl-specifiers.
+      switch (TAL) {
+      case TAL_DeclSpec:
+        break;
+
+      case TAL_DeclChunk:
+      case TAL_DeclName:
+        state.getSema().Diag(attr.getLoc(),
+                             diag::err_objc_kindof_wrong_position)
+            << FixItHint::CreateRemoval(attr.getLoc())
+            << FixItHint::CreateInsertion(
+                   state.getDeclarator().getDeclSpec().getBeginLoc(),
+                   "__kindof ");
+        break;
+      }
+
+      // Apply it regardless.
+      if (checkObjCKindOfType(state, type, attr))
+        attr.setInvalid();
+      break;
+
+    case ParsedAttr::AT_NoThrow:
+    // Exception Specifications aren't generally supported in C mode throughout
+    // clang, so revert to attribute-based handling for C.
+      if (!state.getSema().getLangOpts().CPlusPlus)
+        break;
+      LLVM_FALLTHROUGH;
     FUNCTION_TYPE_ATTRS_CASELIST:
       attr.setUsedAsTypeAttr();
 
@@ -4949,11 +8231,108 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
       else if (!handleFunctionTypeAttr(state, attr, type))
         distributeFunctionTypeAttr(state, attr, type);
       break;
+    case ParsedAttr::AT_AcquireHandle: {
+      if (!type->isFunctionType())
+        return;
+
+      if (attr.getNumArgs() != 1) {
+        state.getSema().Diag(attr.getLoc(),
+                             diag::err_attribute_wrong_number_arguments)
+            << attr << 1;
+        attr.setInvalid();
+        return;
+      }
+
+      StringRef HandleType;
+      if (!state.getSema().checkStringLiteralArgumentAttr(attr, 0, HandleType))
+        return;
+      type = state.getAttributedType(
+          AcquireHandleAttr::Create(state.getSema().Context, HandleType, attr),
+          type, type);
+      attr.setUsedAsTypeAttr();
+      break;
     }
-  } while ((attrs = next));
+    }
+
+    // Handle attributes that are defined in a macro. We do not want this to be
+    // applied to ObjC builtin attributes.
+    if (isa<AttributedType>(type) && attr.hasMacroIdentifier() &&
+        !type.getQualifiers().hasObjCLifetime() &&
+        !type.getQualifiers().hasObjCGCAttr() &&
+        attr.getKind() != ParsedAttr::AT_ObjCGC &&
+        attr.getKind() != ParsedAttr::AT_ObjCOwnership) {
+      const IdentifierInfo *MacroII = attr.getMacroIdentifier();
+      type = state.getSema().Context.getMacroQualifiedType(type, MacroII);
+      state.setExpansionLocForMacroQualifiedType(
+          cast<MacroQualifiedType>(type.getTypePtr()),
+          attr.getMacroExpansionLoc());
+    }
+  }
+
+  if (!state.getSema().getLangOpts().OpenCL ||
+      type.getAddressSpace() != LangAS::Default)
+    return;
 }
 
-/// \brief Ensure that the type of the given expression is complete.
+void Sema::completeExprArrayBound(Expr *E) {
+  if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParens())) {
+    if (VarDecl *Var = dyn_cast<VarDecl>(DRE->getDecl())) {
+      if (isTemplateInstantiation(Var->getTemplateSpecializationKind())) {
+        auto *Def = Var->getDefinition();
+        if (!Def) {
+          SourceLocation PointOfInstantiation = E->getExprLoc();
+          runWithSufficientStackSpace(PointOfInstantiation, [&] {
+            InstantiateVariableDefinition(PointOfInstantiation, Var);
+          });
+          Def = Var->getDefinition();
+
+          // If we don't already have a point of instantiation, and we managed
+          // to instantiate a definition, this is the point of instantiation.
+          // Otherwise, we don't request an end-of-TU instantiation, so this is
+          // not a point of instantiation.
+          // FIXME: Is this really the right behavior?
+          if (Var->getPointOfInstantiation().isInvalid() && Def) {
+            assert(Var->getTemplateSpecializationKind() ==
+                       TSK_ImplicitInstantiation &&
+                   "explicit instantiation with no point of instantiation");
+            Var->setTemplateSpecializationKind(
+                Var->getTemplateSpecializationKind(), PointOfInstantiation);
+          }
+        }
+
+        // Update the type to the definition's type both here and within the
+        // expression.
+        if (Def) {
+          DRE->setDecl(Def);
+          QualType T = Def->getType();
+          DRE->setType(T);
+          // FIXME: Update the type on all intervening expressions.
+          E->setType(T);
+        }
+
+        // We still go on to try to complete the type independently, as it
+        // may also require instantiations or diagnostics if it remains
+        // incomplete.
+      }
+    }
+  }
+}
+
+QualType Sema::getCompletedType(Expr *E) {
+  // Incomplete array types may be completed by the initializer attached to
+  // their definitions. For static data members of class templates and for
+  // variable templates, we need to instantiate the definition to get this
+  // initializer and complete the type.
+  if (E->getType()->isIncompleteArrayType())
+    completeExprArrayBound(E);
+
+  // FIXME: Are there other cases which require instantiating something other
+  // than the type to complete the type of an expression?
+
+  return E->getType();
+}
+
+/// Ensure that the type of the given expression is complete.
 ///
 /// This routine checks whether the expression \p E has a complete type. If the
 /// expression refers to an instantiable construct, that instantiation is
@@ -4962,96 +8341,24 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
 /// case of a reference type, the referred-to type).
 ///
 /// \param E The expression whose type is required to be complete.
+/// \param Kind Selects which completeness rules should be applied.
 /// \param Diagnoser The object that will emit a diagnostic if the type is
 /// incomplete.
 ///
 /// \returns \c true if the type of \p E is incomplete and diagnosed, \c false
 /// otherwise.
-bool Sema::RequireCompleteExprType(Expr *E, TypeDiagnoser &Diagnoser){
-  QualType T = E->getType();
-
-  // Fast path the case where the type is already complete.
-  if (!T->isIncompleteType())
-    // FIXME: The definition might not be visible.
-    return false;
-
-  // Incomplete array types may be completed by the initializer attached to
-  // their definitions. For static data members of class templates and for
-  // variable templates, we need to instantiate the definition to get this
-  // initializer and complete the type.
-  if (T->isIncompleteArrayType()) {
-    if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParens())) {
-      if (VarDecl *Var = dyn_cast<VarDecl>(DRE->getDecl())) {
-        if (isTemplateInstantiation(Var->getTemplateSpecializationKind())) {
-          SourceLocation PointOfInstantiation = E->getExprLoc();
-
-          if (MemberSpecializationInfo *MSInfo =
-                  Var->getMemberSpecializationInfo()) {
-            // If we don't already have a point of instantiation, this is it.
-            if (MSInfo->getPointOfInstantiation().isInvalid()) {
-              MSInfo->setPointOfInstantiation(PointOfInstantiation);
-
-              // This is a modification of an existing AST node. Notify
-              // listeners.
-              if (ASTMutationListener *L = getASTMutationListener())
-                L->StaticDataMemberInstantiated(Var);
-            }
-          } else {
-            VarTemplateSpecializationDecl *VarSpec =
-                cast<VarTemplateSpecializationDecl>(Var);
-            if (VarSpec->getPointOfInstantiation().isInvalid())
-              VarSpec->setPointOfInstantiation(PointOfInstantiation);
-          }
-
-          InstantiateVariableDefinition(PointOfInstantiation, Var);
-
-          // Update the type to the newly instantiated definition's type both
-          // here and within the expression.
-          if (VarDecl *Def = Var->getDefinition()) {
-            DRE->setDecl(Def);
-            T = Def->getType();
-            DRE->setType(T);
-            E->setType(T);
-          }
-
-          // We still go on to try to complete the type independently, as it
-          // may also require instantiations or diagnostics if it remains
-          // incomplete.
-        }
-      }
-    }
-  }
-
-  // FIXME: Are there other cases which require instantiating something other
-  // than the type to complete the type of an expression?
-
-  // Look through reference types and complete the referred type.
-  if (const ReferenceType *Ref = T->getAs<ReferenceType>())
-    T = Ref->getPointeeType();
-
-  return RequireCompleteType(E->getExprLoc(), T, Diagnoser);
-}
-
-namespace {
-  struct TypeDiagnoserDiag : Sema::TypeDiagnoser {
-    unsigned DiagID;
-
-    TypeDiagnoserDiag(unsigned DiagID)
-      : Sema::TypeDiagnoser(DiagID == 0), DiagID(DiagID) {}
-
-    void diagnose(Sema &S, SourceLocation Loc, QualType T) override {
-      if (Suppressed) return;
-      S.Diag(Loc, DiagID) << T;
-    }
-  };
+bool Sema::RequireCompleteExprType(Expr *E, CompleteTypeKind Kind,
+                                   TypeDiagnoser &Diagnoser) {
+  return RequireCompleteType(E->getExprLoc(), getCompletedType(E), Kind,
+                             Diagnoser);
 }
 
 bool Sema::RequireCompleteExprType(Expr *E, unsigned DiagID) {
-  TypeDiagnoserDiag Diagnoser(DiagID);
-  return RequireCompleteExprType(E, Diagnoser);
+  BoundTypeDiagnoser<> Diagnoser(DiagID);
+  return RequireCompleteExprType(E, CompleteTypeKind::Default, Diagnoser);
 }
 
-/// @brief Ensure that the type T is a complete type.
+/// Ensure that the type T is a complete type.
 ///
 /// This routine checks whether the type @p T is complete in any
 /// context where a complete type is required. If @p T is a complete
@@ -5066,11 +8373,14 @@ bool Sema::RequireCompleteExprType(Expr *E, unsigned DiagID) {
 ///
 /// @param T  The type that this routine is examining for completeness.
 ///
+/// @param Kind Selects which completeness rules should be applied.
+///
 /// @returns @c true if @p T is incomplete and a diagnostic was emitted,
 /// @c false otherwise.
 bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
+                               CompleteTypeKind Kind,
                                TypeDiagnoser &Diagnoser) {
-  if (RequireCompleteTypeImpl(Loc, T, Diagnoser))
+  if (RequireCompleteTypeImpl(Loc, T, Kind, &Diagnoser))
     return true;
   if (const TagType *Tag = T->getAs<TagType>()) {
     if (!Tag->getDecl()->isCompleteDefinitionRequired()) {
@@ -5081,30 +8391,58 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
   return false;
 }
 
-/// \brief Determine whether there is any declaration of \p D that was ever a
+bool Sema::hasStructuralCompatLayout(Decl *D, Decl *Suggested) {
+  llvm::DenseSet<std::pair<Decl *, Decl *>> NonEquivalentDecls;
+  if (!Suggested)
+    return false;
+
+  // FIXME: Add a specific mode for C11 6.2.7/1 in StructuralEquivalenceContext
+  // and isolate from other C++ specific checks.
+  StructuralEquivalenceContext Ctx(
+      D->getASTContext(), Suggested->getASTContext(), NonEquivalentDecls,
+      StructuralEquivalenceKind::Default,
+      false /*StrictTypeSpelling*/, true /*Complain*/,
+      true /*ErrorOnTagTypeMismatch*/);
+  return Ctx.IsEquivalent(D, Suggested);
+}
+
+/// Determine whether there is any declaration of \p D that was ever a
 ///        definition (perhaps before module merging) and is currently visible.
 /// \param D The definition of the entity.
 /// \param Suggested Filled in with the declaration that should be made visible
 ///        in order to provide a definition of this entity.
-static bool hasVisibleDefinition(Sema &S, NamedDecl *D, NamedDecl **Suggested) {
+/// \param OnlyNeedComplete If \c true, we only need the type to be complete,
+///        not defined. This only matters for enums with a fixed underlying
+///        type, since in all other cases, a type is complete if and only if it
+///        is defined.
+bool Sema::hasVisibleDefinition(NamedDecl *D, NamedDecl **Suggested,
+                                bool OnlyNeedComplete) {
   // Easy case: if we don't have modules, all declarations are visible.
-  if (!S.getLangOpts().Modules)
+  if (!getLangOpts().Modules && !getLangOpts().ModulesLocalVisibility)
     return true;
 
   // If this definition was instantiated from a template, map back to the
   // pattern from which it was instantiated.
-  if (auto *RD = dyn_cast<CXXRecordDecl>(D)) {
+  if (isa<TagDecl>(D) && cast<TagDecl>(D)->isBeingDefined()) {
+    // We're in the middle of defining it; this definition should be treated
+    // as visible.
+    return true;
+  } else if (auto *RD = dyn_cast<CXXRecordDecl>(D)) {
     if (auto *Pattern = RD->getTemplateInstantiationPattern())
       RD = Pattern;
     D = RD->getDefinition();
   } else if (auto *ED = dyn_cast<EnumDecl>(D)) {
-    while (auto *NewED = ED->getInstantiatedFromMemberEnum())
-      ED = NewED;
-    if (ED->isFixed()) {
-      // If the enum has a fixed underlying type, any declaration of it will do.
+    if (auto *Pattern = ED->getTemplateInstantiationPattern())
+      ED = Pattern;
+    if (OnlyNeedComplete && (ED->isFixed() || getLangOpts().MSVCCompat)) {
+      // If the enum has a fixed underlying type, it may have been forward
+      // declared. In -fms-compatibility, `enum Foo;` will also forward declare
+      // the enum and assign it the underlying type of `int`. Since we're only
+      // looking for a complete type (not a definition), any visible declaration
+      // of it will do.
       *Suggested = nullptr;
       for (auto *Redecl : ED->redecls()) {
-        if (LookupResult::isVisible(S, Redecl))
+        if (isVisible(Redecl))
           return true;
         if (Redecl->isThisDeclarationADefinition() ||
             (Redecl->isCanonicalDecl() && !*Suggested))
@@ -5113,49 +8451,88 @@ static bool hasVisibleDefinition(Sema &S, NamedDecl *D, NamedDecl **Suggested) {
       return false;
     }
     D = ED->getDefinition();
+  } else if (auto *FD = dyn_cast<FunctionDecl>(D)) {
+    if (auto *Pattern = FD->getTemplateInstantiationPattern())
+      FD = Pattern;
+    D = FD->getDefinition();
+  } else if (auto *VD = dyn_cast<VarDecl>(D)) {
+    if (auto *Pattern = VD->getTemplateInstantiationPattern())
+      VD = Pattern;
+    D = VD->getDefinition();
   }
   assert(D && "missing definition for pattern of instantiated definition");
 
-  // FIXME: If we merged any other decl into D, and that declaration is visible,
-  // then we should consider a definition to be visible.
   *Suggested = D;
-  return LookupResult::isVisible(S, D);
+
+  auto DefinitionIsVisible = [&] {
+    // The (primary) definition might be in a visible module.
+    if (isVisible(D))
+      return true;
+
+    // A visible module might have a merged definition instead.
+    if (D->isModulePrivate() ? hasMergedDefinitionInCurrentModule(D)
+                             : hasVisibleMergedDefinition(D)) {
+      if (CodeSynthesisContexts.empty() &&
+          !getLangOpts().ModulesLocalVisibility) {
+        // Cache the fact that this definition is implicitly visible because
+        // there is a visible merged definition.
+        D->setVisibleDespiteOwningModule();
+      }
+      return true;
+    }
+
+    return false;
+  };
+
+  if (DefinitionIsVisible())
+    return true;
+
+  // The external source may have additional definitions of this entity that are
+  // visible, so complete the redeclaration chain now and ask again.
+  if (auto *Source = Context.getExternalSource()) {
+    Source->CompleteRedeclChain(D);
+    return DefinitionIsVisible();
+  }
+
+  return false;
 }
 
 /// Locks in the inheritance model for the given class and all of its bases.
 static void assignInheritanceModel(Sema &S, CXXRecordDecl *RD) {
-  RD = RD->getMostRecentDecl();
+  RD = RD->getMostRecentNonInjectedDecl();
   if (!RD->hasAttr<MSInheritanceAttr>()) {
-    MSInheritanceAttr::Spelling IM;
-
+    MSInheritanceModel IM;
+    bool BestCase = false;
     switch (S.MSPointerToMemberRepresentationMethod) {
     case LangOptions::PPTMK_BestCase:
+      BestCase = true;
       IM = RD->calculateInheritanceModel();
       break;
     case LangOptions::PPTMK_FullGeneralitySingleInheritance:
-      IM = MSInheritanceAttr::Keyword_single_inheritance;
+      IM = MSInheritanceModel::Single;
       break;
     case LangOptions::PPTMK_FullGeneralityMultipleInheritance:
-      IM = MSInheritanceAttr::Keyword_multiple_inheritance;
+      IM = MSInheritanceModel::Multiple;
       break;
     case LangOptions::PPTMK_FullGeneralityVirtualInheritance:
-      IM = MSInheritanceAttr::Keyword_unspecified_inheritance;
+      IM = MSInheritanceModel::Unspecified;
       break;
     }
 
+    SourceRange Loc = S.ImplicitMSInheritanceAttrLoc.isValid()
+                          ? S.ImplicitMSInheritanceAttrLoc
+                          : RD->getSourceRange();
     RD->addAttr(MSInheritanceAttr::CreateImplicit(
-        S.getASTContext(), IM,
-        /*BestCase=*/S.MSPointerToMemberRepresentationMethod ==
-            LangOptions::PPTMK_BestCase,
-        S.ImplicitMSInheritanceAttrLoc.isValid()
-            ? S.ImplicitMSInheritanceAttrLoc
-            : RD->getSourceRange()));
+        S.getASTContext(), BestCase, Loc, AttributeCommonInfo::AS_Microsoft,
+        MSInheritanceAttr::Spelling(IM)));
+    S.Consumer.AssignInheritanceModel(RD);
   }
 }
 
-/// \brief The implementation of RequireCompleteType
+/// The implementation of RequireCompleteType
 bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
-                                   TypeDiagnoser &Diagnoser) {
+                                   CompleteTypeKind Kind,
+                                   TypeDiagnoser *Diagnoser) {
   // FIXME: Add this assertion to make sure we always get instantiation points.
   //  assert(!Loc.isInvalid() && "Invalid location in RequireCompleteType");
   // FIXME: Add this assertion to help us flush out problems with
@@ -5164,127 +8541,155 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
   //  assert(!T->isDependentType() &&
   //         "Can't ask whether a dependent type is complete");
 
-  // If we have a complete type, we're done.
+  if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>()) {
+    if (!MPTy->getClass()->isDependentType()) {
+      if (getLangOpts().CompleteMemberPointers &&
+          !MPTy->getClass()->getAsCXXRecordDecl()->isBeingDefined() &&
+          RequireCompleteType(Loc, QualType(MPTy->getClass(), 0), Kind,
+                              diag::err_memptr_incomplete))
+        return true;
+
+      // We lock in the inheritance model once somebody has asked us to ensure
+      // that a pointer-to-member type is complete.
+      if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
+        (void)isCompleteType(Loc, QualType(MPTy->getClass(), 0));
+        assignInheritanceModel(*this, MPTy->getMostRecentCXXRecordDecl());
+      }
+    }
+  }
+
   NamedDecl *Def = nullptr;
-  if (!T->isIncompleteType(&Def)) {
+  bool AcceptSizeless = (Kind == CompleteTypeKind::AcceptSizeless);
+  bool Incomplete = (T->isIncompleteType(&Def) ||
+                     (!AcceptSizeless && T->isSizelessBuiltinType()));
+
+  // Check that any necessary explicit specializations are visible. For an
+  // enum, we just need the declaration, so don't check this.
+  if (Def && !isa<EnumDecl>(Def))
+    checkSpecializationVisibility(Loc, Def);
+
+  // If we have a complete type, we're done.
+  if (!Incomplete) {
     // If we know about the definition but it is not visible, complain.
     NamedDecl *SuggestedDef = nullptr;
-    if (!Diagnoser.Suppressed && Def &&
-        !hasVisibleDefinition(*this, Def, &SuggestedDef)) {
-      // Suppress this error outside of a SFINAE context if we've already
-      // emitted the error once for this type. There's no usefulness in
-      // repeating the diagnostic.
-      // FIXME: Add a Fix-It that imports the corresponding module or includes
-      // the header.
-      Module *Owner = SuggestedDef->getOwningModule();
-      Diag(Loc, diag::err_module_private_definition)
-        << T << Owner->getFullModuleName();
-      Diag(SuggestedDef->getLocation(), diag::note_previous_definition);
-
-      // Try to recover by implicitly importing this module.
-      createImplicitModuleImportForErrorRecovery(Loc, Owner);
-    }
-
-    // We lock in the inheritance model once somebody has asked us to ensure
-    // that a pointer-to-member type is complete.
-    if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
-      if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>()) {
-        if (!MPTy->getClass()->isDependentType()) {
-          RequireCompleteType(Loc, QualType(MPTy->getClass(), 0), 0);
-          assignInheritanceModel(*this, MPTy->getMostRecentCXXRecordDecl());
-        }
-      }
+    if (Def &&
+        !hasVisibleDefinition(Def, &SuggestedDef, /*OnlyNeedComplete*/true)) {
+      // If the user is going to see an error here, recover by making the
+      // definition visible.
+      bool TreatAsComplete = Diagnoser && !isSFINAEContext();
+      if (Diagnoser && SuggestedDef)
+        diagnoseMissingImport(Loc, SuggestedDef, MissingImportKind::Definition,
+                              /*Recover*/TreatAsComplete);
+      return !TreatAsComplete;
+    } else if (Def && !TemplateInstCallbacks.empty()) {
+      CodeSynthesisContext TempInst;
+      TempInst.Kind = CodeSynthesisContext::Memoization;
+      TempInst.Template = Def;
+      TempInst.Entity = Def;
+      TempInst.PointOfInstantiation = Loc;
+      atTemplateBegin(TemplateInstCallbacks, *this, TempInst);
+      atTemplateEnd(TemplateInstCallbacks, *this, TempInst);
     }
 
     return false;
   }
 
-  const TagType *Tag = T->getAs<TagType>();
-  const ObjCInterfaceType *IFace = T->getAs<ObjCInterfaceType>();
+  TagDecl *Tag = dyn_cast_or_null<TagDecl>(Def);
+  ObjCInterfaceDecl *IFace = dyn_cast_or_null<ObjCInterfaceDecl>(Def);
 
-  // If there's an unimported definition of this type in a module (for
-  // instance, because we forward declared it, then imported the definition),
-  // import that definition now.
-  //
-  // FIXME: What about other cases where an import extends a redeclaration
-  // chain for a declaration that can be accessed through a mechanism other
-  // than name lookup (eg, referenced in a template, or a variable whose type
-  // could be completed by the module)?
+  // Give the external source a chance to provide a definition of the type.
+  // This is kept separate from completing the redeclaration chain so that
+  // external sources such as LLDB can avoid synthesizing a type definition
+  // unless it's actually needed.
   if (Tag || IFace) {
-    NamedDecl *D =
-        Tag ? static_cast<NamedDecl *>(Tag->getDecl()) : IFace->getDecl();
-
     // Avoid diagnosing invalid decls as incomplete.
-    if (D->isInvalidDecl())
+    if (Def->isInvalidDecl())
       return true;
 
     // Give the external AST source a chance to complete the type.
     if (auto *Source = Context.getExternalSource()) {
-      if (Tag)
-        Source->CompleteType(Tag->getDecl());
-      else
-        Source->CompleteType(IFace->getDecl());
-
+      if (Tag && Tag->hasExternalLexicalStorage())
+          Source->CompleteType(Tag);
+      if (IFace && IFace->hasExternalLexicalStorage())
+          Source->CompleteType(IFace);
       // If the external source completed the type, go through the motions
       // again to ensure we're allowed to use the completed type.
       if (!T->isIncompleteType())
-        return RequireCompleteTypeImpl(Loc, T, Diagnoser);
+        return RequireCompleteTypeImpl(Loc, T, Kind, Diagnoser);
     }
   }
 
   // If we have a class template specialization or a class member of a
   // class template specialization, or an array with known size of such,
   // try to instantiate it.
-  QualType MaybeTemplate = T;
-  while (const ConstantArrayType *Array
-           = Context.getAsConstantArrayType(MaybeTemplate))
-    MaybeTemplate = Array->getElementType();
-  if (const RecordType *Record = MaybeTemplate->getAs<RecordType>()) {
-    if (ClassTemplateSpecializationDecl *ClassTemplateSpec
-          = dyn_cast<ClassTemplateSpecializationDecl>(Record->getDecl())) {
-      if (ClassTemplateSpec->getSpecializationKind() == TSK_Undeclared)
-        return InstantiateClassTemplateSpecialization(Loc, ClassTemplateSpec,
-                                                      TSK_ImplicitInstantiation,
-                                            /*Complain=*/!Diagnoser.Suppressed);
-    } else if (CXXRecordDecl *Rec
-                 = dyn_cast<CXXRecordDecl>(Record->getDecl())) {
-      CXXRecordDecl *Pattern = Rec->getInstantiatedFromMemberClass();
-      if (!Rec->isBeingDefined() && Pattern) {
-        MemberSpecializationInfo *MSI = Rec->getMemberSpecializationInfo();
+  if (auto *RD = dyn_cast_or_null<CXXRecordDecl>(Tag)) {
+    bool Instantiated = false;
+    bool Diagnosed = false;
+    if (RD->isDependentContext()) {
+      // Don't try to instantiate a dependent class (eg, a member template of
+      // an instantiated class template specialization).
+      // FIXME: Can this ever happen?
+    } else if (auto *ClassTemplateSpec =
+            dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+      if (ClassTemplateSpec->getSpecializationKind() == TSK_Undeclared) {
+        runWithSufficientStackSpace(Loc, [&] {
+          Diagnosed = InstantiateClassTemplateSpecialization(
+              Loc, ClassTemplateSpec, TSK_ImplicitInstantiation,
+              /*Complain=*/Diagnoser);
+        });
+        Instantiated = true;
+      }
+    } else {
+      CXXRecordDecl *Pattern = RD->getInstantiatedFromMemberClass();
+      if (!RD->isBeingDefined() && Pattern) {
+        MemberSpecializationInfo *MSI = RD->getMemberSpecializationInfo();
         assert(MSI && "Missing member specialization information?");
         // This record was instantiated from a class within a template.
-        if (MSI->getTemplateSpecializationKind() != TSK_ExplicitSpecialization)
-          return InstantiateClass(Loc, Rec, Pattern,
-                                  getTemplateInstantiationArgs(Rec),
-                                  TSK_ImplicitInstantiation,
-                                  /*Complain=*/!Diagnoser.Suppressed);
+        if (MSI->getTemplateSpecializationKind() !=
+            TSK_ExplicitSpecialization) {
+          runWithSufficientStackSpace(Loc, [&] {
+            Diagnosed = InstantiateClass(Loc, RD, Pattern,
+                                         getTemplateInstantiationArgs(RD),
+                                         TSK_ImplicitInstantiation,
+                                         /*Complain=*/Diagnoser);
+          });
+          Instantiated = true;
+        }
       }
+    }
+
+    if (Instantiated) {
+      // Instantiate* might have already complained that the template is not
+      // defined, if we asked it to.
+      if (Diagnoser && Diagnosed)
+        return true;
+      // If we instantiated a definition, check that it's usable, even if
+      // instantiation produced an error, so that repeated calls to this
+      // function give consistent answers.
+      if (!T->isIncompleteType())
+        return RequireCompleteTypeImpl(Loc, T, Kind, Diagnoser);
     }
   }
 
-  if (Diagnoser.Suppressed)
+  // FIXME: If we didn't instantiate a definition because of an explicit
+  // specialization declaration, check that it's visible.
+
+  if (!Diagnoser)
     return true;
 
-  // We have an incomplete type. Produce a diagnostic.
-  if (Ident___float128 &&
-      T == Context.getTypeDeclType(Context.getFloat128StubType())) {
-    Diag(Loc, diag::err_typecheck_decl_incomplete_type___float128);
-    return true;
-  }
-
-  Diagnoser.diagnose(*this, Loc, T);
+  Diagnoser->diagnose(*this, Loc, T);
 
   // If the type was a forward declaration of a class/struct/union
   // type, produce a note.
-  if (Tag && !Tag->getDecl()->isInvalidDecl())
-    Diag(Tag->getDecl()->getLocation(),
+  if (Tag && !Tag->isInvalidDecl() && !Tag->getLocation().isInvalid())
+    Diag(Tag->getLocation(),
          Tag->isBeingDefined() ? diag::note_type_being_defined
                                : diag::note_forward_declaration)
-      << QualType(Tag, 0);
+      << Context.getTagDeclType(Tag);
 
   // If the Objective-C class was a forward declaration, produce a note.
-  if (IFace && !IFace->getDecl()->isInvalidDecl())
-    Diag(IFace->getDecl()->getLocation(), diag::note_forward_class);
+  if (IFace && !IFace->isInvalidDecl() && !IFace->getLocation().isInvalid())
+    Diag(IFace->getLocation(), diag::note_forward_class);
 
   // If we have external information that we can use to suggest a fix,
   // produce a note.
@@ -5295,12 +8700,12 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
 }
 
 bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
-                               unsigned DiagID) {
-  TypeDiagnoserDiag Diagnoser(DiagID);
-  return RequireCompleteType(Loc, T, Diagnoser);
+                               CompleteTypeKind Kind, unsigned DiagID) {
+  BoundTypeDiagnoser<> Diagnoser(DiagID);
+  return RequireCompleteType(Loc, T, Kind, Diagnoser);
 }
 
-/// \brief Get diagnostic %select index for tag kind for
+/// Get diagnostic %select index for tag kind for
 /// literal type diagnostic message.
 /// WARNING: Indexes apply to particular diagnostics only!
 ///
@@ -5314,7 +8719,7 @@ static unsigned getLiteralDiagFromTagKind(TagTypeKind Tag) {
   }
 }
 
-/// @brief Ensure that the type T is a literal type.
+/// Ensure that the type T is a literal type.
 ///
 /// This routine checks whether the type @p T is a literal type. If @p T is an
 /// incomplete type, an attempt is made to complete it. If @p T is a literal
@@ -5337,13 +8742,9 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
   assert(!T->isDependentType() && "type should not be dependent");
 
   QualType ElemType = Context.getBaseElementType(T);
-  RequireCompleteType(Loc, ElemType, 0);
-
-  if (T->isLiteralType(Context))
+  if ((isCompleteType(Loc, ElemType) || ElemType->isVoidType()) &&
+      T->isLiteralType(Context))
     return false;
-
-  if (Diagnoser.Suppressed)
-    return true;
 
   Diagnoser.diagnose(*this, Loc, T);
 
@@ -5359,8 +8760,13 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
   // A partially-defined class type can't be a literal type, because a literal
   // class type must have a trivial destructor (which can't be checked until
   // the class definition is complete).
-  if (!RD->isCompleteDefinition()) {
-    RequireCompleteType(Loc, ElemType, diag::note_non_literal_incomplete, T);
+  if (RequireCompleteType(Loc, ElemType, diag::note_non_literal_incomplete, T))
+    return true;
+
+  // [expr.prim.lambda]p3:
+  //   This class type is [not] a literal type.
+  if (RD->isLambda() && !getLangOpts().CPlusPlus17) {
+    Diag(RD->getLocation(), diag::note_non_literal_lambda);
     return true;
   }
 
@@ -5372,7 +8778,7 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
     Diag(RD->getLocation(), diag::note_non_literal_virtual_base)
       << getLiteralDiagFromTagKind(RD->getTagKind()) << RD->getNumVBases();
     for (const auto &I : RD->vbases())
-      Diag(I.getLocStart(), diag::note_constexpr_virtual_base_here)
+      Diag(I.getBeginLoc(), diag::note_constexpr_virtual_base_here)
           << I.getSourceRange();
   } else if (!RD->isAggregate() && !RD->hasConstexprNonCopyMoveConstructor() &&
              !RD->hasTrivialDefaultConstructor()) {
@@ -5380,9 +8786,8 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
   } else if (RD->hasNonLiteralTypeFieldsOrBases()) {
     for (const auto &I : RD->bases()) {
       if (!I.getType()->isLiteralType(Context)) {
-        Diag(I.getLocStart(),
-             diag::note_non_literal_base_class)
-          << RD << I.getType() << I.getSourceRange();
+        Diag(I.getBeginLoc(), diag::note_non_literal_base_class)
+            << RD << I.getType() << I.getSourceRange();
         return true;
       }
     }
@@ -5395,33 +8800,44 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
         return true;
       }
     }
-  } else if (!RD->hasTrivialDestructor()) {
-    // All fields and bases are of literal types, so have trivial destructors.
-    // If this class's destructor is non-trivial it must be user-declared.
+  } else if (getLangOpts().CPlusPlus20 ? !RD->hasConstexprDestructor()
+                                       : !RD->hasTrivialDestructor()) {
+    // All fields and bases are of literal types, so have trivial or constexpr
+    // destructors. If this class's destructor is non-trivial / non-constexpr,
+    // it must be user-declared.
     CXXDestructorDecl *Dtor = RD->getDestructor();
     assert(Dtor && "class has literal fields and bases but no dtor?");
     if (!Dtor)
       return true;
 
-    Diag(Dtor->getLocation(), Dtor->isUserProvided() ?
-         diag::note_non_literal_user_provided_dtor :
-         diag::note_non_literal_nontrivial_dtor) << RD;
-    if (!Dtor->isUserProvided())
-      SpecialMemberIsTrivial(Dtor, CXXDestructor, /*Diagnose*/true);
+    if (getLangOpts().CPlusPlus20) {
+      Diag(Dtor->getLocation(), diag::note_non_literal_non_constexpr_dtor)
+          << RD;
+    } else {
+      Diag(Dtor->getLocation(), Dtor->isUserProvided()
+                                    ? diag::note_non_literal_user_provided_dtor
+                                    : diag::note_non_literal_nontrivial_dtor)
+          << RD;
+      if (!Dtor->isUserProvided())
+        SpecialMemberIsTrivial(Dtor, CXXDestructor, TAH_IgnoreTrivialABI,
+                               /*Diagnose*/ true);
+    }
   }
 
   return true;
 }
 
 bool Sema::RequireLiteralType(SourceLocation Loc, QualType T, unsigned DiagID) {
-  TypeDiagnoserDiag Diagnoser(DiagID);
+  BoundTypeDiagnoser<> Diagnoser(DiagID);
   return RequireLiteralType(Loc, T, Diagnoser);
 }
 
-/// \brief Retrieve a version of the type 'T' that is elaborated by Keyword
-/// and qualified by the nested-name-specifier contained in SS.
+/// Retrieve a version of the type 'T' that is elaborated by Keyword, qualified
+/// by the nested-name-specifier contained in SS, and that is (re)declared by
+/// OwnedTagDecl, which is nullptr if this is not a (re)declaration.
 QualType Sema::getElaboratedType(ElaboratedTypeKeyword Keyword,
-                                 const CXXScopeSpec &SS, QualType T) {
+                                 const CXXScopeSpec &SS, QualType T,
+                                 TagDecl *OwnedTagDecl) {
   if (T.isNull())
     return T;
   NestedNameSpecifier *NNS;
@@ -5432,13 +8848,14 @@ QualType Sema::getElaboratedType(ElaboratedTypeKeyword Keyword,
       return T;
     NNS = nullptr;
   }
-  return Context.getElaboratedType(Keyword, NNS, T);
+  return Context.getElaboratedType(Keyword, NNS, T, OwnedTagDecl);
 }
 
 QualType Sema::BuildTypeofExprType(Expr *E, SourceLocation Loc) {
-  ExprResult ER = CheckPlaceholderExpr(E);
-  if (ER.isInvalid()) return QualType();
-  E = ER.get();
+  assert(!E->hasPlaceholderType() && "unexpected placeholder");
+
+  if (!getLangOpts().CPlusPlus && E->refersToBitField())
+    Diag(E->getExprLoc(), diag::err_sizeof_alignof_typeof_bitfield) << 2;
 
   if (!E->isTypeDependent()) {
     QualType T = E->getType();
@@ -5446,6 +8863,29 @@ QualType Sema::BuildTypeofExprType(Expr *E, SourceLocation Loc) {
       DiagnoseUseOfDecl(TT->getDecl(), E->getExprLoc());
   }
   return Context.getTypeOfExprType(E);
+}
+
+/// getDecltypeForParenthesizedExpr - Given an expr, will return the type for
+/// that expression, as in [dcl.type.simple]p4 but without taking id-expressions
+/// and class member access into account.
+QualType Sema::getDecltypeForParenthesizedExpr(Expr *E) {
+  // C++11 [dcl.type.simple]p4:
+  //   [...]
+  QualType T = E->getType();
+  switch (E->getValueKind()) {
+  //     - otherwise, if e is an xvalue, decltype(e) is T&&, where T is the
+  //       type of e;
+  case VK_XValue:
+    return Context.getRValueReferenceType(T);
+  //     - otherwise, if e is an lvalue, decltype(e) is T&, where T is the
+  //       type of e;
+  case VK_LValue:
+    return Context.getLValueReferenceType(T);
+  //  - otherwise, decltype(e) is the type of e.
+  case VK_RValue:
+    return T;
+  }
+  llvm_unreachable("Unknown value kind");
 }
 
 /// getDecltypeForExpr - Given an expr, will return the decltype for
@@ -5457,7 +8897,17 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
 
   // C++11 [dcl.type.simple]p4:
   //   The type denoted by decltype(e) is defined as follows:
-  //
+
+  // C++20:
+  //     - if E is an unparenthesized id-expression naming a non-type
+  //       template-parameter (13.2), decltype(E) is the type of the
+  //       template-parameter after performing any necessary type deduction
+  // Note that this does not pick up the implicit 'const' for a template
+  // parameter object. This rule makes no difference before C++20 so we apply
+  // it unconditionally.
+  if (const auto *SNTTPE = dyn_cast<SubstNonTypeTemplateParmExpr>(E))
+    return SNTTPE->getParameterType(S.Context);
+
   //     - if e is an unparenthesized id-expression or an unparenthesized class
   //       member access (5.2.5), decltype(e) is the type of the entity named
   //       by e. If there is no such entity, or if e names a set of overloaded
@@ -5465,11 +8915,14 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
   //
   // We apply the same rules for Objective-C ivar and property references.
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
-    if (const ValueDecl *VD = dyn_cast<ValueDecl>(DRE->getDecl()))
-      return VD->getType();
+    const ValueDecl *VD = DRE->getDecl();
+    if (auto *TPO = dyn_cast<TemplateParamObjectDecl>(VD))
+      return TPO->getType().getUnqualifiedType();
+    return VD->getType();
   } else if (const MemberExpr *ME = dyn_cast<MemberExpr>(E)) {
-    if (const FieldDecl *FD = dyn_cast<FieldDecl>(ME->getMemberDecl()))
-      return FD->getType();
+    if (const ValueDecl *VD = ME->getMemberDecl())
+      if (isa<FieldDecl>(VD) || isa<VarDecl>(VD))
+        return VD->getType();
   } else if (const ObjCIvarRefExpr *IR = dyn_cast<ObjCIvarRefExpr>(E)) {
     return IR->getDecl()->getType();
   } else if (const ObjCPropertyRefExpr *PR = dyn_cast<ObjCPropertyRefExpr>(E)) {
@@ -5478,7 +8931,7 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
   } else if (auto *PE = dyn_cast<PredefinedExpr>(E)) {
     return PE->getType();
   }
-  
+
   // C++11 [expr.lambda.prim]p18:
   //   Every occurrence of decltype((x)) where x is a possibly
   //   parenthesized id-expression that names an entity of automatic
@@ -5499,34 +8952,19 @@ static QualType getDecltypeForExpr(Sema &S, Expr *E) {
     }
   }
 
-
-  // C++11 [dcl.type.simple]p4:
-  //   [...]
-  QualType T = E->getType();
-  switch (E->getValueKind()) {
-  //     - otherwise, if e is an xvalue, decltype(e) is T&&, where T is the
-  //       type of e;
-  case VK_XValue: T = S.Context.getRValueReferenceType(T); break;
-  //     - otherwise, if e is an lvalue, decltype(e) is T&, where T is the
-  //       type of e;
-  case VK_LValue: T = S.Context.getLValueReferenceType(T); break;
-  //  - otherwise, decltype(e) is the type of e.
-  case VK_RValue: break;
-  }
-
-  return T;
+  return S.getDecltypeForParenthesizedExpr(E);
 }
 
 QualType Sema::BuildDecltypeType(Expr *E, SourceLocation Loc,
                                  bool AsUnevaluated) {
-  ExprResult ER = CheckPlaceholderExpr(E);
-  if (ER.isInvalid()) return QualType();
-  E = ER.get();
+  assert(!E->hasPlaceholderType() && "unexpected placeholder");
 
-  if (AsUnevaluated && ActiveTemplateInstantiations.empty() &&
-      E->HasSideEffects(Context, false)) {
+  if (AsUnevaluated && CodeSynthesisContexts.empty() &&
+      !E->isInstantiationDependent() && E->HasSideEffects(Context, false)) {
     // The expression operand for decltype is in an unevaluated expression
     // context, so side effects could result in unintended consequences.
+    // Exclude instantiation-dependent expressions, because 'decltype' is often
+    // used to build SFINAE gadgets.
     Diag(E->getExprLoc(), diag::warn_side_effects_unevaluated_context);
   }
 
@@ -5553,7 +8991,7 @@ QualType Sema::BuildUnaryTransformType(QualType BaseType,
           return QualType();
         }
 
-        EnumDecl *ED = BaseType->getAs<EnumType>()->getDecl();
+        EnumDecl *ED = BaseType->castAs<EnumType>()->getDecl();
         assert(ED && "EnumType has no EnumDecl");
 
         DiagnoseUseOfDecl(ED, Loc);
@@ -5586,9 +9024,14 @@ QualType Sema::BuildAtomicType(QualType T, SourceLocation Loc) {
       DisallowedKind = 4;
     else if (T.hasQualifiers())
       DisallowedKind = 5;
+    else if (T->isSizelessType())
+      DisallowedKind = 6;
     else if (!T.isTriviallyCopyableType(Context))
       // Some other non-trivially-copyable type (probably a C++ class)
-      DisallowedKind = 6;
+      DisallowedKind = 7;
+    else if (T->isExtIntType()) {
+        DisallowedKind = 8;
+    }
 
     if (DisallowedKind != -1) {
       Diag(Loc, diag::err_atomic_specifier_bad_type) << DisallowedKind << T;

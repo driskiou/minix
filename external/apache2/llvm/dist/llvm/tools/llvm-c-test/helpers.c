@@ -1,9 +1,9 @@
 /*===-- helpers.c - tool for testing libLLVM and llvm-c API ---------------===*\
 |*                                                                            *|
-|*                     The LLVM Compiler Infrastructure                       *|
-|*                                                                            *|
-|* This file is distributed under the University of Illinois Open Source      *|
-|* License. See LICENSE.TXT for details.                                      *|
+|* Part of the LLVM Project, under the Apache License v2.0 with LLVM          *|
+|* Exceptions.                                                                *|
+|* See https://llvm.org/LICENSE.txt for license information.                  *|
+|* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    *|
 |*                                                                            *|
 |*===----------------------------------------------------------------------===*|
 |*                                                                            *|
@@ -11,14 +11,13 @@
 |*                                                                            *|
 \*===----------------------------------------------------------------------===*/
 
-#include "llvm-c-test.h"
 #include <stdio.h>
 #include <string.h>
 
 #define MAX_TOKENS 512
 #define MAX_LINE_LEN 1024
 
-void tokenize_stdin(void (*cb)(char **tokens, int ntokens)) {
+void llvm_tokenize_stdin(void (*cb)(char **tokens, int ntokens)) {
   char line[MAX_LINE_LEN];
   char *tokbuf[MAX_TOKENS];
 

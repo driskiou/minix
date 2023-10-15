@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.4 2013/04/25 13:59:56 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:47 joerg Exp $
 
 PROG_CXX=	llvm-extract
 NOMAN=		yes
@@ -13,14 +13,21 @@ LLVM_LIBS+= \
 	IRReader \
 	AsmParser \
 	BitReader \
+	BitstreamReader \
 	BitWriter \
 	ipo \
 	TransformsUtils \
 	Analysis \
+	Object \
+	MCParser \
+	MC \
+	ProfileData \
 	Target \
-	ipa \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Support \
+	Demangle
 
 .include "${.PARSEDIR}/../../link.mk"
 

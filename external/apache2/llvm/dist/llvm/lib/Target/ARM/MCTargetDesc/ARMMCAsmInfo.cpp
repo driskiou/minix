@@ -1,9 +1,8 @@
 //===-- ARMMCAsmInfo.cpp - ARM asm properties -----------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,14 +12,12 @@
 
 #include "ARMMCAsmInfo.h"
 #include "llvm/ADT/Triple.h"
-#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 
 void ARMMCAsmInfoDarwin::anchor() { }
 
-ARMMCAsmInfoDarwin::ARMMCAsmInfoDarwin(StringRef TT) {
-  Triple TheTriple(TT);
+ARMMCAsmInfoDarwin::ARMMCAsmInfoDarwin(const Triple &TheTriple) {
   if ((TheTriple.getArch() == Triple::armeb) ||
       (TheTriple.getArch() == Triple::thumbeb))
     IsLittleEndian = false;
@@ -33,16 +30,18 @@ ARMMCAsmInfoDarwin::ARMMCAsmInfoDarwin(StringRef TT) {
 
   SupportsDebugInformation = true;
 
-  // Exceptions handling
-  ExceptionsType = ExceptionHandling::SjLj;
+  // Conditional Thumb 4-byte instructions can have an implicit IT.
+  MaxInstLength = 6;
 
-  UseIntegratedAssembler = true;
+  // Exceptions handling
+  ExceptionsType = (TheTriple.isOSDarwin() && !TheTriple.isWatchABI())
+                       ? ExceptionHandling::SjLj
+                       : ExceptionHandling::DwarfCFI;
 }
 
 void ARMELFMCAsmInfo::anchor() { }
 
-ARMELFMCAsmInfo::ARMELFMCAsmInfo(StringRef TT) {
-  Triple TheTriple(TT);
+ARMELFMCAsmInfo::ARMELFMCAsmInfo(const Triple &TheTriple) {
   if ((TheTriple.getArch() == Triple::armeb) ||
       (TheTriple.getArch() == Triple::thumbeb))
     IsLittleEndian = false;
@@ -57,6 +56,9 @@ ARMELFMCAsmInfo::ARMELFMCAsmInfo(StringRef TT) {
 
   SupportsDebugInformation = true;
 
+  // Conditional Thumb 4-byte instructions can have an implicit IT.
+  MaxInstLength = 6;
+
   // Exceptions handling
   switch (TheTriple.getOS()) {
   case Triple::NetBSD:
@@ -69,8 +71,6 @@ ARMELFMCAsmInfo::ARMELFMCAsmInfo(StringRef TT) {
 
   // foo(plt) instead of foo@plt
   UseParensForSymbolVariant = true;
-
-  UseIntegratedAssembler = true;
 }
 
 void ARMELFMCAsmInfo::setUseIntegratedAssembler(bool Value) {
@@ -87,9 +87,14 @@ void ARMCOFFMCAsmInfoMicrosoft::anchor() { }
 
 ARMCOFFMCAsmInfoMicrosoft::ARMCOFFMCAsmInfoMicrosoft() {
   AlignmentIsInBytes = false;
-
+  SupportsDebugInformation = true;
+  ExceptionsType = ExceptionHandling::WinEH;
   PrivateGlobalPrefix = "$M";
   PrivateLabelPrefix = "$M";
+  CommentString = ";";
+
+  // Conditional Thumb 4-byte instructions can have an implicit IT.
+  MaxInstLength = 6;
 }
 
 void ARMCOFFMCAsmInfoGNU::anchor() { }
@@ -105,10 +110,11 @@ ARMCOFFMCAsmInfoGNU::ARMCOFFMCAsmInfoGNU() {
   PrivateLabelPrefix = ".L";
 
   SupportsDebugInformation = true;
-  ExceptionsType = ExceptionHandling::None;
+  ExceptionsType = ExceptionHandling::DwarfCFI;
   UseParensForSymbolVariant = true;
 
-  UseIntegratedAssembler = false;
-  DwarfRegNumForCFI = true;
-}
+  DwarfRegNumForCFI = false;
 
+  // Conditional Thumb 4-byte instructions can have an implicit IT.
+  MaxInstLength = 6;
+}

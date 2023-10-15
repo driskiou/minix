@@ -1,37 +1,40 @@
-//===-- X86Operand.h - Parsed X86 machine instruction --------------------===//
+//===- X86Operand.h - Parsed X86 machine instruction ------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LIB_TARGET_X86_ASMPARSER_X86OPERAND_H
 #define LLVM_LIB_TARGET_X86_ASMPARSER_X86OPERAND_H
 
+#include "MCTargetDesc/X86IntelInstPrinter.h"
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "X86AsmParserCommon.h"
-#include "llvm/MC/MCExpr.h"
-#include "llvm/MC/MCParser/MCParsedAsmOperand.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCParser/MCParsedAsmOperand.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/SMLoc.h"
+#include <cassert>
+#include <memory>
 
 namespace llvm {
 
 /// X86Operand - Instances of this class represent a parsed X86 machine
 /// instruction.
-struct X86Operand : public MCParsedAsmOperand {
-  enum KindTy {
-    Token,
-    Register,
-    Immediate,
-    Memory
-  } Kind;
+struct X86Operand final : public MCParsedAsmOperand {
+  enum KindTy { Token, Register, Immediate, Memory, Prefix, DXRegister } Kind;
 
   SMLoc StartLoc, EndLoc;
   SMLoc OffsetOfLoc;
   StringRef SymName;
   void *OpDecl;
   bool AddressOf;
+  bool CallOperand;
 
   struct TokOp {
     const char *Data;
@@ -42,18 +45,28 @@ struct X86Operand : public MCParsedAsmOperand {
     unsigned RegNo;
   };
 
+  struct PrefOp {
+    unsigned Prefixes;
+  };
+
   struct ImmOp {
     const MCExpr *Val;
+    bool LocalRef;
   };
 
   struct MemOp {
     unsigned SegReg;
     const MCExpr *Disp;
     unsigned BaseReg;
+    unsigned DefaultBaseReg;
     unsigned IndexReg;
     unsigned Scale;
     unsigned Size;
     unsigned ModeSize;
+
+    /// If the memory operand is unsized and there are multiple instruction
+    /// matches, prefer the one with this size.
+    unsigned FrontendSize;
   };
 
   union {
@@ -61,25 +74,77 @@ struct X86Operand : public MCParsedAsmOperand {
     struct RegOp Reg;
     struct ImmOp Imm;
     struct MemOp Mem;
+    struct PrefOp Pref;
   };
 
   X86Operand(KindTy K, SMLoc Start, SMLoc End)
-    : Kind(K), StartLoc(Start), EndLoc(End) {}
+      : Kind(K), StartLoc(Start), EndLoc(End), CallOperand(false) {}
 
   StringRef getSymName() override { return SymName; }
   void *getOpDecl() override { return OpDecl; }
 
   /// getStartLoc - Get the location of the first token of this operand.
   SMLoc getStartLoc() const override { return StartLoc; }
+
   /// getEndLoc - Get the location of the last token of this operand.
   SMLoc getEndLoc() const override { return EndLoc; }
+
   /// getLocRange - Get the range between the first and last token of this
   /// operand.
   SMRange getLocRange() const { return SMRange(StartLoc, EndLoc); }
+
   /// getOffsetOfLoc - Get the location of the offset operator.
   SMLoc getOffsetOfLoc() const override { return OffsetOfLoc; }
 
-  void print(raw_ostream &OS) const override {}
+  void print(raw_ostream &OS) const override {
+
+    auto PrintImmValue = [&](const MCExpr *Val, const char *VName) {
+      if (Val->getKind() == MCExpr::Constant) {
+        if (auto Imm = cast<MCConstantExpr>(Val)->getValue())
+          OS << VName << Imm;
+      } else if (Val->getKind() == MCExpr::SymbolRef) {
+        if (auto *SRE = dyn_cast<MCSymbolRefExpr>(Val)) {
+          const MCSymbol &Sym = SRE->getSymbol();
+          if (const char *SymNameStr = Sym.getName().data())
+            OS << VName << SymNameStr;
+        }
+      }
+    };
+
+    switch (Kind) {
+    case Token:
+      OS << Tok.Data;
+      break;
+    case Register:
+      OS << "Reg:" << X86IntelInstPrinter::getRegisterName(Reg.RegNo);
+      break;
+    case DXRegister:
+      OS << "DXReg";
+      break;
+    case Immediate:
+      PrintImmValue(Imm.Val, "Imm:");
+      break;
+    case Prefix:
+      OS << "Prefix:" << Pref.Prefixes;
+      break;
+    case Memory:
+      OS << "Memory: ModeSize=" << Mem.ModeSize;
+      if (Mem.Size)
+        OS << ",Size=" << Mem.Size;
+      if (Mem.BaseReg)
+        OS << ",BaseReg=" << X86IntelInstPrinter::getRegisterName(Mem.BaseReg);
+      if (Mem.IndexReg)
+        OS << ",IndexReg="
+           << X86IntelInstPrinter::getRegisterName(Mem.IndexReg);
+      if (Mem.Scale)
+        OS << ",Scale=" << Mem.Scale;
+      if (Mem.Disp)
+        PrintImmValue(Mem.Disp, ",Disp=");
+      if (Mem.SegReg)
+        OS << ",SegReg=" << X86IntelInstPrinter::getRegisterName(Mem.SegReg);
+      break;
+    }
+  }
 
   StringRef getToken() const {
     assert(Kind == Token && "Invalid access!");
@@ -94,6 +159,11 @@ struct X86Operand : public MCParsedAsmOperand {
   unsigned getReg() const override {
     assert(Kind == Register && "Invalid access!");
     return Reg.RegNo;
+  }
+
+  unsigned getPrefix() const {
+    assert(Kind == Prefix && "Invalid access!");
+    return Pref.Prefixes;
   }
 
   const MCExpr *getImm() const {
@@ -113,6 +183,10 @@ struct X86Operand : public MCParsedAsmOperand {
     assert(Kind == Memory && "Invalid access!");
     return Mem.BaseReg;
   }
+  unsigned getMemDefaultBaseReg() const {
+    assert(Kind == Memory && "Invalid access!");
+    return Mem.DefaultBaseReg;
+  }
   unsigned getMemIndexReg() const {
     assert(Kind == Memory && "Invalid access!");
     return Mem.IndexReg;
@@ -124,6 +198,10 @@ struct X86Operand : public MCParsedAsmOperand {
   unsigned getMemModeSize() const {
     assert(Kind == Memory && "Invalid access!");
     return Mem.ModeSize;
+  }
+  unsigned getMemFrontendSize() const {
+    assert(Kind == Memory && "Invalid access!");
+    return Mem.FrontendSize;
   }
 
   bool isToken() const override {return Kind == Token; }
@@ -187,13 +265,27 @@ struct X86Operand : public MCParsedAsmOperand {
     return isImmSExti64i32Value(CE->getValue());
   }
 
-  bool isOffsetOf() const override {
-    return OffsetOfLoc.getPointer();
+  bool isImmUnsignedi4() const {
+    if (!isImm()) return false;
+    // If this isn't a constant expr, reject it. The immediate byte is shared
+    // with a register encoding. We can't have it affected by a relocation.
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getImm());
+    if (!CE) return false;
+    return isImmUnsignedi4Value(CE->getValue());
   }
 
-  bool needAddressOf() const override {
-    return AddressOf;
+  bool isImmUnsignedi8() const {
+    if (!isImm()) return false;
+    // If this isn't a constant expr, just assume it fits and let relaxation
+    // handle it.
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getImm());
+    if (!CE) return true;
+    return isImmUnsignedi8Value(CE->getValue());
   }
+
+  bool isOffsetOfLocal() const override { return isImm() && Imm.LocalRef; }
+
+  bool needAddressOf() const override { return AddressOf; }
 
   bool isMem() const override { return Kind == Memory; }
   bool isMemUnsized() const {
@@ -224,42 +316,66 @@ struct X86Operand : public MCParsedAsmOperand {
     return Kind == Memory && (!Mem.Size || Mem.Size == 512);
   }
 
-  bool isMemVX32() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 32) &&
-      getMemIndexReg() >= X86::XMM0 && getMemIndexReg() <= X86::XMM15;
+  bool isSibMem() const {
+    return isMem() && Mem.BaseReg != X86::RIP && Mem.BaseReg != X86::EIP;
   }
-  bool isMemVY32() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 32) &&
-      getMemIndexReg() >= X86::YMM0 && getMemIndexReg() <= X86::YMM15;
+
+  bool isMemIndexReg(unsigned LowR, unsigned HighR) const {
+    assert(Kind == Memory && "Invalid access!");
+    return Mem.IndexReg >= LowR && Mem.IndexReg <= HighR;
   }
-  bool isMemVX64() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 64) &&
-      getMemIndexReg() >= X86::XMM0 && getMemIndexReg() <= X86::XMM15;
+
+  bool isMem64_RC128() const {
+    return isMem64() && isMemIndexReg(X86::XMM0, X86::XMM15);
   }
-  bool isMemVY64() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 64) &&
-      getMemIndexReg() >= X86::YMM0 && getMemIndexReg() <= X86::YMM15;
+  bool isMem128_RC128() const {
+    return isMem128() && isMemIndexReg(X86::XMM0, X86::XMM15);
   }
-  bool isMemVZ32() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 32) &&
-      getMemIndexReg() >= X86::ZMM0 && getMemIndexReg() <= X86::ZMM31;
+  bool isMem128_RC256() const {
+    return isMem128() && isMemIndexReg(X86::YMM0, X86::YMM15);
   }
-  bool isMemVZ64() const {
-    return Kind == Memory && (!Mem.Size || Mem.Size == 64) &&
-      getMemIndexReg() >= X86::ZMM0 && getMemIndexReg() <= X86::ZMM31;
+  bool isMem256_RC128() const {
+    return isMem256() && isMemIndexReg(X86::XMM0, X86::XMM15);
+  }
+  bool isMem256_RC256() const {
+    return isMem256() && isMemIndexReg(X86::YMM0, X86::YMM15);
+  }
+
+  bool isMem64_RC128X() const {
+    return isMem64() && isMemIndexReg(X86::XMM0, X86::XMM31);
+  }
+  bool isMem128_RC128X() const {
+    return isMem128() && isMemIndexReg(X86::XMM0, X86::XMM31);
+  }
+  bool isMem128_RC256X() const {
+    return isMem128() && isMemIndexReg(X86::YMM0, X86::YMM31);
+  }
+  bool isMem256_RC128X() const {
+    return isMem256() && isMemIndexReg(X86::XMM0, X86::XMM31);
+  }
+  bool isMem256_RC256X() const {
+    return isMem256() && isMemIndexReg(X86::YMM0, X86::YMM31);
+  }
+  bool isMem256_RC512() const {
+    return isMem256() && isMemIndexReg(X86::ZMM0, X86::ZMM31);
+  }
+  bool isMem512_RC256X() const {
+    return isMem512() && isMemIndexReg(X86::YMM0, X86::YMM31);
+  }
+  bool isMem512_RC512() const {
+    return isMem512() && isMemIndexReg(X86::ZMM0, X86::ZMM31);
   }
 
   bool isAbsMem() const {
     return Kind == Memory && !getMemSegReg() && !getMemBaseReg() &&
       !getMemIndexReg() && getMemScale() == 1;
   }
+  bool isAVX512RC() const{
+      return isImm();
+  }
 
   bool isAbsMem16() const {
     return isAbsMem() && Mem.ModeSize == 16;
-  }
-
-  bool isAbsMem32() const {
-    return isAbsMem() && Mem.ModeSize != 16;
   }
 
   bool isSrcIdx() const {
@@ -340,56 +456,89 @@ struct X86Operand : public MCParsedAsmOperand {
     return isMemOffs() && Mem.ModeSize == 64 && (!Mem.Size || Mem.Size == 64);
   }
 
+  bool isPrefix() const { return Kind == Prefix; }
   bool isReg() const override { return Kind == Register; }
+  bool isDXReg() const { return Kind == DXRegister; }
 
   bool isGR32orGR64() const {
     return Kind == Register &&
       (X86MCRegisterClasses[X86::GR32RegClassID].contains(getReg()) ||
-      X86MCRegisterClasses[X86::GR64RegClassID].contains(getReg()));
+       X86MCRegisterClasses[X86::GR64RegClassID].contains(getReg()));
+  }
+
+  bool isGR16orGR32orGR64() const {
+    return Kind == Register &&
+      (X86MCRegisterClasses[X86::GR16RegClassID].contains(getReg()) ||
+       X86MCRegisterClasses[X86::GR32RegClassID].contains(getReg()) ||
+       X86MCRegisterClasses[X86::GR64RegClassID].contains(getReg()));
+  }
+
+  bool isVectorReg() const {
+    return Kind == Register &&
+           (X86MCRegisterClasses[X86::VR64RegClassID].contains(getReg()) ||
+            X86MCRegisterClasses[X86::VR128XRegClassID].contains(getReg()) ||
+            X86MCRegisterClasses[X86::VR256XRegClassID].contains(getReg()) ||
+            X86MCRegisterClasses[X86::VR512RegClassID].contains(getReg()));
+  }
+
+  bool isVK1Pair() const {
+    return Kind == Register &&
+      X86MCRegisterClasses[X86::VK1RegClassID].contains(getReg());
+  }
+
+  bool isVK2Pair() const {
+    return Kind == Register &&
+      X86MCRegisterClasses[X86::VK2RegClassID].contains(getReg());
+  }
+
+  bool isVK4Pair() const {
+    return Kind == Register &&
+      X86MCRegisterClasses[X86::VK4RegClassID].contains(getReg());
+  }
+
+  bool isVK8Pair() const {
+    return Kind == Register &&
+      X86MCRegisterClasses[X86::VK8RegClassID].contains(getReg());
+  }
+
+  bool isVK16Pair() const {
+    return Kind == Register &&
+      X86MCRegisterClasses[X86::VK16RegClassID].contains(getReg());
   }
 
   void addExpr(MCInst &Inst, const MCExpr *Expr) const {
     // Add as immediates when possible.
     if (const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(Expr))
-      Inst.addOperand(MCOperand::CreateImm(CE->getValue()));
+      Inst.addOperand(MCOperand::createImm(CE->getValue()));
     else
-      Inst.addOperand(MCOperand::CreateExpr(Expr));
+      Inst.addOperand(MCOperand::createExpr(Expr));
   }
 
   void addRegOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::CreateReg(getReg()));
-  }
-
-  static unsigned getGR32FromGR64(unsigned RegNo) {
-    switch (RegNo) {
-    default: llvm_unreachable("Unexpected register");
-    case X86::RAX: return X86::EAX;
-    case X86::RCX: return X86::ECX;
-    case X86::RDX: return X86::EDX;
-    case X86::RBX: return X86::EBX;
-    case X86::RBP: return X86::EBP;
-    case X86::RSP: return X86::ESP;
-    case X86::RSI: return X86::ESI;
-    case X86::RDI: return X86::EDI;
-    case X86::R8: return X86::R8D;
-    case X86::R9: return X86::R9D;
-    case X86::R10: return X86::R10D;
-    case X86::R11: return X86::R11D;
-    case X86::R12: return X86::R12D;
-    case X86::R13: return X86::R13D;
-    case X86::R14: return X86::R14D;
-    case X86::R15: return X86::R15D;
-    case X86::RIP: return X86::EIP;
-    }
+    Inst.addOperand(MCOperand::createReg(getReg()));
   }
 
   void addGR32orGR64Operands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
-    unsigned RegNo = getReg();
+    MCRegister RegNo = getReg();
     if (X86MCRegisterClasses[X86::GR64RegClassID].contains(RegNo))
-      RegNo = getGR32FromGR64(RegNo);
-    Inst.addOperand(MCOperand::CreateReg(RegNo));
+      RegNo = getX86SubSuperRegister(RegNo, 32);
+    Inst.addOperand(MCOperand::createReg(RegNo));
+  }
+
+  void addGR16orGR32orGR64Operands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    MCRegister RegNo = getReg();
+    if (X86MCRegisterClasses[X86::GR32RegClassID].contains(RegNo) ||
+        X86MCRegisterClasses[X86::GR64RegClassID].contains(RegNo))
+      RegNo = getX86SubSuperRegister(RegNo, 16);
+    Inst.addOperand(MCOperand::createReg(RegNo));
+  }
+
+  void addAVX512RCOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    addExpr(Inst, getImm());
   }
 
   void addImmOperands(MCInst &Inst, unsigned N) const {
@@ -397,47 +546,75 @@ struct X86Operand : public MCParsedAsmOperand {
     addExpr(Inst, getImm());
   }
 
+  void addMaskPairOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    unsigned Reg = getReg();
+    switch (Reg) {
+    case X86::K0:
+    case X86::K1:
+      Reg = X86::K0_K1;
+      break;
+    case X86::K2:
+    case X86::K3:
+      Reg = X86::K2_K3;
+      break;
+    case X86::K4:
+    case X86::K5:
+      Reg = X86::K4_K5;
+      break;
+    case X86::K6:
+    case X86::K7:
+      Reg = X86::K6_K7;
+      break;
+    }
+    Inst.addOperand(MCOperand::createReg(Reg));
+  }
+
   void addMemOperands(MCInst &Inst, unsigned N) const {
     assert((N == 5) && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::CreateReg(getMemBaseReg()));
-    Inst.addOperand(MCOperand::CreateImm(getMemScale()));
-    Inst.addOperand(MCOperand::CreateReg(getMemIndexReg()));
+    if (getMemBaseReg())
+      Inst.addOperand(MCOperand::createReg(getMemBaseReg()));
+    else
+      Inst.addOperand(MCOperand::createReg(getMemDefaultBaseReg()));
+    Inst.addOperand(MCOperand::createImm(getMemScale()));
+    Inst.addOperand(MCOperand::createReg(getMemIndexReg()));
     addExpr(Inst, getMemDisp());
-    Inst.addOperand(MCOperand::CreateReg(getMemSegReg()));
+    Inst.addOperand(MCOperand::createReg(getMemSegReg()));
   }
 
   void addAbsMemOperands(MCInst &Inst, unsigned N) const {
     assert((N == 1) && "Invalid number of operands!");
     // Add as immediates when possible.
     if (const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getMemDisp()))
-      Inst.addOperand(MCOperand::CreateImm(CE->getValue()));
+      Inst.addOperand(MCOperand::createImm(CE->getValue()));
     else
-      Inst.addOperand(MCOperand::CreateExpr(getMemDisp()));
+      Inst.addOperand(MCOperand::createExpr(getMemDisp()));
   }
 
   void addSrcIdxOperands(MCInst &Inst, unsigned N) const {
     assert((N == 2) && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::CreateReg(getMemBaseReg()));
-    Inst.addOperand(MCOperand::CreateReg(getMemSegReg()));
+    Inst.addOperand(MCOperand::createReg(getMemBaseReg()));
+    Inst.addOperand(MCOperand::createReg(getMemSegReg()));
   }
+
   void addDstIdxOperands(MCInst &Inst, unsigned N) const {
     assert((N == 1) && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::CreateReg(getMemBaseReg()));
+    Inst.addOperand(MCOperand::createReg(getMemBaseReg()));
   }
 
   void addMemOffsOperands(MCInst &Inst, unsigned N) const {
     assert((N == 2) && "Invalid number of operands!");
     // Add as immediates when possible.
     if (const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(getMemDisp()))
-      Inst.addOperand(MCOperand::CreateImm(CE->getValue()));
+      Inst.addOperand(MCOperand::createImm(CE->getValue()));
     else
-      Inst.addOperand(MCOperand::CreateExpr(getMemDisp()));
-    Inst.addOperand(MCOperand::CreateReg(getMemSegReg()));
+      Inst.addOperand(MCOperand::createExpr(getMemDisp()));
+    Inst.addOperand(MCOperand::createReg(getMemSegReg()));
   }
 
   static std::unique_ptr<X86Operand> CreateToken(StringRef Str, SMLoc Loc) {
     SMLoc EndLoc = SMLoc::getFromPointer(Loc.getPointer() + Str.size());
-    auto Res = llvm::make_unique<X86Operand>(Token, Loc, EndLoc);
+    auto Res = std::make_unique<X86Operand>(Token, Loc, EndLoc);
     Res->Tok.Data = Str.data();
     Res->Tok.Length = Str.size();
     return Res;
@@ -447,7 +624,7 @@ struct X86Operand : public MCParsedAsmOperand {
   CreateReg(unsigned RegNo, SMLoc StartLoc, SMLoc EndLoc,
             bool AddressOf = false, SMLoc OffsetOfLoc = SMLoc(),
             StringRef SymName = StringRef(), void *OpDecl = nullptr) {
-    auto Res = llvm::make_unique<X86Operand>(Register, StartLoc, EndLoc);
+    auto Res = std::make_unique<X86Operand>(Register, StartLoc, EndLoc);
     Res->Reg.RegNo = RegNo;
     Res->AddressOf = AddressOf;
     Res->OffsetOfLoc = OffsetOfLoc;
@@ -456,10 +633,29 @@ struct X86Operand : public MCParsedAsmOperand {
     return Res;
   }
 
+  static std::unique_ptr<X86Operand>
+  CreateDXReg(SMLoc StartLoc, SMLoc EndLoc) {
+    return std::make_unique<X86Operand>(DXRegister, StartLoc, EndLoc);
+  }
+
+  static std::unique_ptr<X86Operand>
+  CreatePrefix(unsigned Prefixes, SMLoc StartLoc, SMLoc EndLoc) {
+    auto Res = std::make_unique<X86Operand>(Prefix, StartLoc, EndLoc);
+    Res->Pref.Prefixes = Prefixes;
+    return Res;
+  }
+
   static std::unique_ptr<X86Operand> CreateImm(const MCExpr *Val,
-                                               SMLoc StartLoc, SMLoc EndLoc) {
-    auto Res = llvm::make_unique<X86Operand>(Immediate, StartLoc, EndLoc);
-    Res->Imm.Val = Val;
+                                               SMLoc StartLoc, SMLoc EndLoc,
+                                               StringRef SymName = StringRef(),
+                                               void *OpDecl = nullptr,
+                                               bool GlobalRef = true) {
+    auto Res = std::make_unique<X86Operand>(Immediate, StartLoc, EndLoc);
+    Res->Imm.Val      = Val;
+    Res->Imm.LocalRef = !GlobalRef;
+    Res->SymName      = SymName;
+    Res->OpDecl       = OpDecl;
+    Res->AddressOf    = true;
     return Res;
   }
 
@@ -467,15 +663,17 @@ struct X86Operand : public MCParsedAsmOperand {
   static std::unique_ptr<X86Operand>
   CreateMem(unsigned ModeSize, const MCExpr *Disp, SMLoc StartLoc, SMLoc EndLoc,
             unsigned Size = 0, StringRef SymName = StringRef(),
-            void *OpDecl = nullptr) {
-    auto Res = llvm::make_unique<X86Operand>(Memory, StartLoc, EndLoc);
+            void *OpDecl = nullptr, unsigned FrontendSize = 0) {
+    auto Res = std::make_unique<X86Operand>(Memory, StartLoc, EndLoc);
     Res->Mem.SegReg   = 0;
     Res->Mem.Disp     = Disp;
     Res->Mem.BaseReg  = 0;
+    Res->Mem.DefaultBaseReg = 0;
     Res->Mem.IndexReg = 0;
     Res->Mem.Scale    = 1;
     Res->Mem.Size     = Size;
     Res->Mem.ModeSize = ModeSize;
+    Res->Mem.FrontendSize = FrontendSize;
     Res->SymName      = SymName;
     Res->OpDecl       = OpDecl;
     Res->AddressOf    = false;
@@ -486,23 +684,28 @@ struct X86Operand : public MCParsedAsmOperand {
   static std::unique_ptr<X86Operand>
   CreateMem(unsigned ModeSize, unsigned SegReg, const MCExpr *Disp,
             unsigned BaseReg, unsigned IndexReg, unsigned Scale, SMLoc StartLoc,
-            SMLoc EndLoc, unsigned Size = 0, StringRef SymName = StringRef(),
-            void *OpDecl = nullptr) {
+            SMLoc EndLoc, unsigned Size = 0,
+            unsigned DefaultBaseReg = X86::NoRegister,
+            StringRef SymName = StringRef(), void *OpDecl = nullptr,
+            unsigned FrontendSize = 0) {
     // We should never just have a displacement, that should be parsed as an
     // absolute memory operand.
-    assert((SegReg || BaseReg || IndexReg) && "Invalid memory operand!");
+    assert((SegReg || BaseReg || IndexReg || DefaultBaseReg) &&
+           "Invalid memory operand!");
 
     // The scale should always be one of {1,2,4,8}.
     assert(((Scale == 1 || Scale == 2 || Scale == 4 || Scale == 8)) &&
            "Invalid scale!");
-    auto Res = llvm::make_unique<X86Operand>(Memory, StartLoc, EndLoc);
+    auto Res = std::make_unique<X86Operand>(Memory, StartLoc, EndLoc);
     Res->Mem.SegReg   = SegReg;
     Res->Mem.Disp     = Disp;
     Res->Mem.BaseReg  = BaseReg;
+    Res->Mem.DefaultBaseReg = DefaultBaseReg;
     Res->Mem.IndexReg = IndexReg;
     Res->Mem.Scale    = Scale;
     Res->Mem.Size     = Size;
     Res->Mem.ModeSize = ModeSize;
+    Res->Mem.FrontendSize = FrontendSize;
     Res->SymName      = SymName;
     Res->OpDecl       = OpDecl;
     Res->AddressOf    = false;
@@ -510,6 +713,6 @@ struct X86Operand : public MCParsedAsmOperand {
   }
 };
 
-} // End of namespace llvm
+} // end namespace llvm
 
-#endif
+#endif // LLVM_LIB_TARGET_X86_ASMPARSER_X86OPERAND_H

@@ -1,9 +1,8 @@
-//=- IvarInvalidationChecker.cpp - -*- C++ -------------------------------*-==//
+//===- IvarInvalidationChecker.cpp ------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,15 +19,15 @@
 //  been called on them. An invalidation method should either invalidate all
 //  the ivars or call another invalidation method (on self).
 //
-//  Partial invalidor annotation allows to addess cases when ivars are 
-//  invalidated by other methods, which might or might not be called from 
+//  Partial invalidor annotation allows to address cases when ivars are
+//  invalidated by other methods, which might or might not be called from
 //  the invalidation method. The checker checks that each invalidation
 //  method and all the partial methods cumulatively invalidate all ivars.
 //    __attribute__((annotate("objc_instance_variable_invalidator_partial")));
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/StmtVisitor.h"
@@ -43,19 +42,17 @@ using namespace clang;
 using namespace ento;
 
 namespace {
-
 struct ChecksFilter {
   /// Check for missing invalidation method declarations.
   DefaultBool check_MissingInvalidationMethod;
   /// Check that all ivars are invalidated.
   DefaultBool check_InstanceVariableInvalidation;
 
-  CheckName checkName_MissingInvalidationMethod;
-  CheckName checkName_InstanceVariableInvalidation;
+  CheckerNameRef checkName_MissingInvalidationMethod;
+  CheckerNameRef checkName_InstanceVariableInvalidation;
 };
 
 class IvarInvalidationCheckerImpl {
-
   typedef llvm::SmallSetVector<const ObjCMethodDecl*, 2> MethodSet;
   typedef llvm::DenseMap<const ObjCMethodDecl*,
                          const ObjCIvarDecl*> MethToIvarMapTy;
@@ -63,7 +60,6 @@ class IvarInvalidationCheckerImpl {
                          const ObjCIvarDecl*> PropToIvarMapTy;
   typedef llvm::DenseMap<const ObjCIvarDecl*,
                          const ObjCPropertyDecl*> IvarToPropMapTy;
-
 
   struct InvalidationInfo {
     /// Has the ivar been invalidated?
@@ -167,9 +163,9 @@ class IvarInvalidationCheckerImpl {
     void VisitObjCMessageExpr(const ObjCMessageExpr *ME);
 
     void VisitChildren(const Stmt *S) {
-      for (Stmt::const_child_range I = S->children(); I; ++I) {
-        if (*I)
-          this->Visit(*I);
+      for (const auto *Child : S->children()) {
+        if (Child)
+          this->Visit(Child);
         if (CalledAnotherInvalidationMethod)
           return;
       }
@@ -203,11 +199,12 @@ class IvarInvalidationCheckerImpl {
                         const ObjCIvarDecl *IvarDecl,
                         const IvarToPropMapTy &IvarToPopertyMap);
 
-  void reportNoInvalidationMethod(CheckName CheckName,
+  void reportNoInvalidationMethod(CheckerNameRef CheckName,
                                   const ObjCIvarDecl *FirstIvarDecl,
                                   const IvarToPropMapTy &IvarToPopertyMap,
                                   const ObjCInterfaceDecl *InterfaceD,
                                   bool MissingDeclaration) const;
+
   void reportIvarNeedsInvalidation(const ObjCIvarDecl *IvarD,
                                    const IvarToPropMapTy &IvarToPopertyMap,
                                    const ObjCMethodDecl *MethodD) const;
@@ -276,8 +273,6 @@ void IvarInvalidationCheckerImpl::containsInvalidationMethod(
     }
     return;
   }
-
-  return;
 }
 
 bool IvarInvalidationCheckerImpl::trackIvar(const ObjCIvarDecl *Iv,
@@ -310,7 +305,7 @@ const ObjCIvarDecl *IvarInvalidationCheckerImpl::findPropertyBackingIvar(
 
   // Lookup for the synthesized case.
   IvarD = Prop->getPropertyIvarDecl();
-  // We only track the ivars/properties that are defined in the current 
+  // We only track the ivars/properties that are defined in the current
   // class (not the parent).
   if (IvarD && IvarD->getContainingInterface() == InterfaceD) {
     if (TrackedIvars.count(IvarD)) {
@@ -336,7 +331,7 @@ const ObjCIvarDecl *IvarInvalidationCheckerImpl::findPropertyBackingIvar(
       llvm::raw_svector_ostream os(PropNameWithUnderscore);
       os << '_' << PropName;
     }
-    if (IvarName == PropNameWithUnderscore.str())
+    if (IvarName == PropNameWithUnderscore)
       return Iv;
   }
 
@@ -390,6 +385,8 @@ visit(const ObjCImplementationDecl *ImplD) const {
   for (ObjCInterfaceDecl::PropertyMap::iterator
       I = PropMap.begin(), E = PropMap.end(); I != E; ++I) {
     const ObjCPropertyDecl *PD = I->second;
+    if (PD->isClassProperty())
+      continue;
 
     const ObjCIvarDecl *ID = findPropertyBackingIvar(PD, InterfaceD, Ivars,
                                                      &FirstIvarDecl);
@@ -404,13 +401,13 @@ visit(const ObjCImplementationDecl *ImplD) const {
     // Find the setter and the getter.
     const ObjCMethodDecl *SetterD = PD->getSetterMethodDecl();
     if (SetterD) {
-      SetterD = cast<ObjCMethodDecl>(SetterD->getCanonicalDecl());
+      SetterD = SetterD->getCanonicalDecl();
       PropSetterToIvarMap[SetterD] = ID;
     }
 
     const ObjCMethodDecl *GetterD = PD->getGetterMethodDecl();
     if (GetterD) {
-      GetterD = cast<ObjCMethodDecl>(GetterD->getCanonicalDecl());
+      GetterD = GetterD->getCanonicalDecl();
       PropGetterToIvarMap[GetterD] = ID;
     }
   }
@@ -529,7 +526,7 @@ visit(const ObjCImplementationDecl *ImplD) const {
 }
 
 void IvarInvalidationCheckerImpl::reportNoInvalidationMethod(
-    CheckName CheckName, const ObjCIvarDecl *FirstIvarDecl,
+    CheckerNameRef CheckName, const ObjCIvarDecl *FirstIvarDecl,
     const IvarToPropMapTy &IvarToPopertyMap,
     const ObjCInterfaceDecl *InterfaceD, bool MissingDeclaration) const {
   SmallString<128> sbuf;
@@ -584,8 +581,7 @@ void IvarInvalidationCheckerImpl::MethodCrawler::markInvalidated(
     // If InvalidationMethod is present, we are processing the message send and
     // should ensure we are invalidating with the appropriate method,
     // otherwise, we are processing setting to 'nil'.
-    if (!InvalidationMethod ||
-        (InvalidationMethod && I->second.hasMethod(InvalidationMethod)))
+    if (!InvalidationMethod || I->second.hasMethod(InvalidationMethod))
       IVars.erase(I);
   }
 }
@@ -609,7 +605,7 @@ void IvarInvalidationCheckerImpl::MethodCrawler::checkObjCMessageExpr(
     const ObjCMessageExpr *ME) {
   const ObjCMethodDecl *MD = ME->getMethodDecl();
   if (MD) {
-    MD = cast<ObjCMethodDecl>(MD->getCanonicalDecl());
+    MD = MD->getCanonicalDecl();
     MethToIvarMapTy::const_iterator IvI = PropertyGetterToIvarMap.find(MD);
     if (IvI != PropertyGetterToIvarMap.end())
       markInvalidated(IvI->second);
@@ -633,7 +629,7 @@ void IvarInvalidationCheckerImpl::MethodCrawler::checkObjCPropertyRefExpr(
   if (PA->isImplicitProperty()) {
     const ObjCMethodDecl *MD = PA->getImplicitPropertySetter();
     if (MD) {
-      MD = cast<ObjCMethodDecl>(MD->getCanonicalDecl());
+      MD = MD->getCanonicalDecl();
       MethToIvarMapTy::const_iterator IvI =PropertyGetterToIvarMap.find(MD);
       if (IvI != PropertyGetterToIvarMap.end())
         markInvalidated(IvI->second);
@@ -705,7 +701,7 @@ void IvarInvalidationCheckerImpl::MethodCrawler::VisitObjCMessageExpr(
 
   // Check if we call a setter and set the property to 'nil'.
   if (MD && (ME->getNumArgs() == 1) && isZero(ME->getArg(0))) {
-    MD = cast<ObjCMethodDecl>(MD->getCanonicalDecl());
+    MD = MD->getCanonicalDecl();
     MethToIvarMapTy::const_iterator IvI = PropertySetterToIvarMap.find(MD);
     if (IvI != PropertySetterToIvarMap.end()) {
       markInvalidated(IvI->second);
@@ -722,11 +718,10 @@ void IvarInvalidationCheckerImpl::MethodCrawler::VisitObjCMessageExpr(
 
   VisitStmt(ME);
 }
-}
+} // end anonymous namespace
 
 // Register the checkers.
 namespace {
-
 class IvarInvalidationChecker :
   public Checker<check::ASTDecl<ObjCImplementationDecl> > {
 public:
@@ -738,16 +733,25 @@ public:
     Walker.visit(D);
   }
 };
+} // end anonymous namespace
+
+void ento::registerIvarInvalidationModeling(CheckerManager &mgr) {
+  mgr.registerChecker<IvarInvalidationChecker>();
+}
+
+bool ento::shouldRegisterIvarInvalidationModeling(const CheckerManager &mgr) {
+  return true;
 }
 
 #define REGISTER_CHECKER(name)                                                 \
   void ento::register##name(CheckerManager &mgr) {                             \
     IvarInvalidationChecker *checker =                                         \
-        mgr.registerChecker<IvarInvalidationChecker>();                        \
+        mgr.getChecker<IvarInvalidationChecker>();                             \
     checker->Filter.check_##name = true;                                       \
-    checker->Filter.checkName_##name = mgr.getCurrentCheckName();              \
-  }
+    checker->Filter.checkName_##name = mgr.getCurrentCheckerName();            \
+  }                                                                            \
+                                                                               \
+  bool ento::shouldRegister##name(const CheckerManager &mgr) { return true; }
 
 REGISTER_CHECKER(InstanceVariableInvalidation)
 REGISTER_CHECKER(MissingInvalidationMethod)
-

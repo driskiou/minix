@@ -1,9 +1,8 @@
 //===-- llvm/MC/MCInstrInfo.h - Target Instruction Info ---------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,42 +18,62 @@
 
 namespace llvm {
 
+class MCSubtargetInfo;
+
 //---------------------------------------------------------------------------
-///
-/// MCInstrInfo - Interface to description of machine instruction set
-///
+/// Interface to description of machine instruction set.
 class MCInstrInfo {
+public:
+  using ComplexDeprecationPredicate = bool (*)(MCInst &,
+                                               const MCSubtargetInfo &,
+                                               std::string &);
+
+private:
   const MCInstrDesc *Desc;          // Raw array to allow static init'n
   const unsigned *InstrNameIndices; // Array for name indices in InstrNameData
   const char *InstrNameData;        // Instruction name string pool
+  // Subtarget feature that an instruction is deprecated on, if any
+  // -1 implies this is not deprecated by any single feature. It may still be
+  // deprecated due to a "complex" reason, below.
+  const uint8_t *DeprecatedFeatures;
+  // A complex method to determine if a certain instruction is deprecated or
+  // not, and return the reason for deprecation.
+  const ComplexDeprecationPredicate *ComplexDeprecationInfos;
   unsigned NumOpcodes;              // Number of entries in the desc array
 
 public:
-  /// InitMCInstrInfo - Initialize MCInstrInfo, called by TableGen
-  /// auto-generated routines. *DO NOT USE*.
+  /// Initialize MCInstrInfo, called by TableGen auto-generated routines.
+  /// *DO NOT USE*.
   void InitMCInstrInfo(const MCInstrDesc *D, const unsigned *NI, const char *ND,
-                       unsigned NO) {
+                       const uint8_t *DF,
+                       const ComplexDeprecationPredicate *CDI, unsigned NO) {
     Desc = D;
     InstrNameIndices = NI;
     InstrNameData = ND;
+    DeprecatedFeatures = DF;
+    ComplexDeprecationInfos = CDI;
     NumOpcodes = NO;
   }
 
   unsigned getNumOpcodes() const { return NumOpcodes; }
 
-  /// get - Return the machine instruction descriptor that corresponds to the
+  /// Return the machine instruction descriptor that corresponds to the
   /// specified instruction opcode.
-  ///
   const MCInstrDesc &get(unsigned Opcode) const {
     assert(Opcode < NumOpcodes && "Invalid opcode!");
     return Desc[Opcode];
   }
 
-  /// getName - Returns the name for the instructions with the given opcode.
-  const char *getName(unsigned Opcode) const {
+  /// Returns the name for the instructions with the given opcode.
+  StringRef getName(unsigned Opcode) const {
     assert(Opcode < NumOpcodes && "Invalid opcode!");
-    return &InstrNameData[InstrNameIndices[Opcode]];
+    return StringRef(&InstrNameData[InstrNameIndices[Opcode]]);
   }
+
+  /// Returns true if a certain instruction is deprecated and if so
+  /// returns the reason in \p Info.
+  bool getDeprecatedInfo(MCInst &MI, const MCSubtargetInfo &STI,
+                         std::string &Info) const;
 };
 
 } // End llvm namespace

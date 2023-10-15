@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.13 2015/01/29 20:41:34 joerg Exp $
+#	$NetBSD: Makefile,v 1.2 2021/05/30 01:56:46 joerg Exp $
 
 PROG_CXX=	lli
 NOMAN=		yes
@@ -8,22 +8,31 @@ NOMAN=		yes
 .PATH: ${LLVM_SRCDIR}/tools/lli
 
 SRCS=	lli.cpp \
-	RemoteMemoryManager.cpp \
-	RemoteTarget.cpp \
-	RemoteTargetExternal.cpp
+	ExecutionUtils.cpp
 
 LLVM_LIBS+= \
+	Orc \
+	ExecutionEngineJITLink \
+	ExecutionEngineOrcTargetProcess \
+	ExecutionEngineOrcShared \
 	X86CodeGen \
 	X86TargetInfo \
 	X86MCTargetDesc \
-	X86AsmPrinter \
-	X86Utils \
+	X86AsmParser \
+	TransformsCFGuard \
 	AsmPrinter \
+	GlobalISel \
 	IRReader \
 	AsmParser \
+	DebugInfoCodeView \
+	DebugInfoDWARF \
 	Object \
+	TextAPI \
 	MCParser \
+	BitWriter \
 	BitReader \
+	BitstreamReader \
+	MCDisassembler \
 	MCJIT \
 	RuntimeDyld \
 	Instrumentation \
@@ -31,13 +40,20 @@ LLVM_LIBS+= \
 	ExecutionEngine \
 	SelectionDAG \
 	CodeGen \
+	ProfileData \
 	ScalarOpts \
 	TransformsUtils \
 	Analysis \
 	Target \
 	MC \
 	IR \
-	Support
+	Remarks \
+	BinaryFormat \
+	Support \
+	Demangle
+
+LDADD+=	-lz
+DPADD+=	${LIBZ}
 
 .include "${.PARSEDIR}/../../link.mk"
 

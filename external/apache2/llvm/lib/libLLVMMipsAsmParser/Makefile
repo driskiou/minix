@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2012/01/17 15:51:55 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:09 joerg Exp $
 
 LIB=	LLVMMipsAsmParser
 

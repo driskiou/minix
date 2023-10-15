@@ -1,9 +1,8 @@
 //=== X86CallingConv.h - X86 Custom Calling Convention Routines -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,32 +14,18 @@
 #ifndef LLVM_LIB_TARGET_X86_X86CALLINGCONV_H
 #define LLVM_LIB_TARGET_X86_X86CALLINGCONV_H
 
+#include "MCTargetDesc/X86MCTargetDesc.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/IR/CallingConv.h"
 
 namespace llvm {
 
-inline bool CC_X86_32_VectorCallIndirect(unsigned &ValNo, MVT &ValVT,
-                                         MVT &LocVT,
-                                         CCValAssign::LocInfo &LocInfo,
-                                         ISD::ArgFlagsTy &ArgFlags,
-                                         CCState &State) {
-  // Similar to CCPassIndirect, with the addition of inreg.
-  LocVT = MVT::i32;
-  LocInfo = CCValAssign::Indirect;
-  ArgFlags.setInReg();
-  return false; // Continue the search, but now for i32.
-}
+bool RetCC_X86(unsigned ValNo, MVT ValVT, MVT LocVT,
+               CCValAssign::LocInfo LocInfo, ISD::ArgFlagsTy ArgFlags,
+               CCState &State);
 
-
-inline bool CC_X86_AnyReg_Error(unsigned &, MVT &, MVT &,
-                                CCValAssign::LocInfo &, ISD::ArgFlagsTy &,
-                                CCState &) {
-  llvm_unreachable("The AnyReg calling convention is only supported by the " \
-                   "stackmap and patchpoint intrinsics.");
-  // gracefully fallback to X86 C calling convention on Release builds.
-  return false;
-}
+bool CC_X86(unsigned ValNo, MVT ValVT, MVT LocVT, CCValAssign::LocInfo LocInfo,
+            ISD::ArgFlagsTy ArgFlags, CCState &State);
 
 } // End llvm namespace
 

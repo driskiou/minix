@@ -1,4 +1,14 @@
-add_llvm_library(LLVMMCJIT
+add_llvm_component_library(LLVMMCJIT
   MCJIT.cpp
-  SectionMemoryManager.cpp
+
+  DEPENDS
+  intrinsics_gen
+
+  LINK_COMPONENTS
+  Core
+  ExecutionEngine
+  Object
+  RuntimeDyld
+  Support
+  Target
   )

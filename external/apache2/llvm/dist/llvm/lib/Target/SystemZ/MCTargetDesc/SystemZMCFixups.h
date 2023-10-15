@@ -1,9 +1,8 @@
 //===-- SystemZMCFixups.h - SystemZ-specific fixup entries ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,10 +15,11 @@ namespace llvm {
 namespace SystemZ {
 enum FixupKind {
   // These correspond directly to R_390_* relocations.
-  FK_390_PC16DBL = FirstTargetFixupKind,
+  FK_390_PC12DBL = FirstTargetFixupKind,
+  FK_390_PC16DBL,
+  FK_390_PC24DBL,
   FK_390_PC32DBL,
-  FK_390_PLT16DBL,
-  FK_390_PLT32DBL,
+  FK_390_TLS_CALL,
 
   // Marker
   LastTargetFixupKind,

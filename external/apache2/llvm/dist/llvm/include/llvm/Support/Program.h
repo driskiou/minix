@@ -1,9 +1,8 @@
 //===- llvm/Support/Program.h ------------------------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -15,8 +14,13 @@
 #define LLVM_SUPPORT_PROGRAM_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/Path.h"
+#include "llvm/Support/FileSystem.h"
+#include <chrono>
 #include <system_error>
 
 namespace llvm {
@@ -26,33 +30,39 @@ namespace sys {
   // a colon on Unix or a semicolon on Windows.
 #if defined(LLVM_ON_UNIX)
   const char EnvPathSeparator = ':';
-#elif defined (LLVM_ON_WIN32)
+#elif defined (_WIN32)
   const char EnvPathSeparator = ';';
 #endif
 
-/// @brief This struct encapsulates information about a process.
-struct ProcessInfo {
-#if defined(LLVM_ON_UNIX)
-  typedef pid_t ProcessId;
-#elif defined(LLVM_ON_WIN32)
-  typedef unsigned long ProcessId; // Must match the type of DWORD on Windows.
-  typedef void * HANDLE; // Must match the type of HANDLE on Windows.
-  /// The handle to the process (available on Windows only).
-  HANDLE ProcessHandle;
+#if defined(_WIN32)
+  typedef unsigned long procid_t; // Must match the type of DWORD on Windows.
+  typedef void *process_t;        // Must match the type of HANDLE on Windows.
 #else
-#error "ProcessInfo is not defined for this platform!"
+  typedef ::pid_t procid_t;
+  typedef procid_t process_t;
 #endif
 
-  /// The process identifier.
-  ProcessId Pid;
+  /// This struct encapsulates information about a process.
+  struct ProcessInfo {
+    enum : procid_t { InvalidPid = 0 };
 
-  /// The return code, set after execution.
-  int ReturnCode;
+    procid_t Pid;      /// The process identifier.
+    process_t Process; /// Platform-dependent process object.
 
-  ProcessInfo();
-};
+    /// The return code, set after execution.
+    int ReturnCode;
 
-  /// \brief Find the first executable file \p Name in \p Paths.
+    ProcessInfo();
+  };
+
+  /// This struct encapsulates information about a process execution.
+  struct ProcessStatistics {
+    std::chrono::microseconds TotalTime;
+    std::chrono::microseconds UserTime;
+    uint64_t PeakMemory = 0; ///< Maximum resident set size in KiB.
+  };
+
+  /// Find the first executable file \p Name in \p Paths.
   ///
   /// This does not perform hashing as a shell would but instead stats each PATH
   /// entry individually so should generally be avoided. Core LLVM library
@@ -66,8 +76,13 @@ struct ProcessInfo {
   /// \returns The fully qualified path to the first \p Name in \p Paths if it
   ///   exists. \p Name if \p Name has slashes in it. Otherwise an error.
   ErrorOr<std::string>
-  findProgramByName(StringRef Name,
-                    ArrayRef<StringRef> Paths = ArrayRef<StringRef>());
+  findProgramByName(StringRef Name, ArrayRef<StringRef> Paths = {});
+
+  // These functions change the specified standard stream (stdin or stdout) mode
+  // based on the Flags. They return errc::success if the specified stream was
+  // changed. Otherwise, a platform dependent error is returned.
+  std::error_code ChangeStdinMode(fs::OpenFlags Flags);
+  std::error_code ChangeStdoutMode(fs::OpenFlags Flags);
 
   // These functions change the specified standard stream (stdin or stdout) to
   // binary mode. They return errc::success if the specified stream
@@ -82,33 +97,34 @@ struct ProcessInfo {
   /// This function waits for the program to finish, so should be avoided in
   /// library functions that aren't expected to block. Consider using
   /// ExecuteNoWait() instead.
-  /// @returns an integer result code indicating the status of the program.
+  /// \returns an integer result code indicating the status of the program.
   /// A zero or positive value indicates the result code of the program.
   /// -1 indicates failure to execute
   /// -2 indicates a crash during execution or timeout
   int ExecuteAndWait(
       StringRef Program, ///< Path of the program to be executed. It is
-      /// presumed this is the result of the findProgramByName method.
-      const char **args, ///< A vector of strings that are passed to the
+      ///< presumed this is the result of the findProgramByName method.
+      ArrayRef<StringRef> Args, ///< An array of strings that are passed to the
       ///< program.  The first element should be the name of the program.
-      ///< The list *must* be terminated by a null char* entry.
-      const char **env = nullptr, ///< An optional vector of strings to use for
-      ///< the program's environment. If not provided, the current program's
-      ///< environment will be used.
-      const StringRef **redirects = nullptr, ///< An optional array of pointers
-      ///< to paths. If the array is null, no redirection is done. The array
-      ///< should have a size of at least three. The inferior process's
-      ///< stdin(0), stdout(1), and stderr(2) will be redirected to the
-      ///< corresponding paths.
-      ///< When an empty path is passed in, the corresponding file
-      ///< descriptor will be disconnected (ie, /dev/null'd) in a portable
-      ///< way.
-      unsigned secondsToWait = 0, ///< If non-zero, this specifies the amount
+      ///< The array should **not** be terminated by an empty StringRef.
+      Optional<ArrayRef<StringRef>> Env = None, ///< An optional vector of
+      ///< strings to use for the program's environment. If not provided, the
+      ///< current program's environment will be used.  If specified, the
+      ///< vector should **not** be terminated by an empty StringRef.
+      ArrayRef<Optional<StringRef>> Redirects = {}, ///<
+      ///< An array of optional paths. Should have a size of zero or three.
+      ///< If the array is empty, no redirections are performed.
+      ///< Otherwise, the inferior process's stdin(0), stdout(1), and stderr(2)
+      ///< will be redirected to the corresponding paths, if the optional path
+      ///< is present (not \c llvm::None).
+      ///< When an empty path is passed in, the corresponding file descriptor
+      ///< will be disconnected (ie, /dev/null'd) in a portable way.
+      unsigned SecondsToWait = 0, ///< If non-zero, this specifies the amount
       ///< of time to wait for the child process to exit. If the time
       ///< expires, the child is killed and this call returns. If zero,
       ///< this function will wait until the child finishes or forever if
       ///< it doesn't.
-      unsigned memoryLimit = 0, ///< If non-zero, this specifies max. amount
+      unsigned MemoryLimit = 0, ///< If non-zero, this specifies max. amount
       ///< of memory can be allocated by process. If memory usage will be
       ///< higher limit, the child is killed and this call returns. If zero
       ///< - no memory limit.
@@ -116,21 +132,36 @@ struct ProcessInfo {
       ///< string instance in which error messages will be returned. If the
       ///< string is non-empty upon return an error occurred while invoking the
       ///< program.
-      bool *ExecutionFailed = nullptr);
+      bool *ExecutionFailed = nullptr,
+      Optional<ProcessStatistics> *ProcStat = nullptr, ///< If non-zero,
+      /// provides a pointer to a structure in which process execution
+      /// statistics will be stored.
+      BitVector *AffinityMask = nullptr ///< CPUs or processors the new
+                                        /// program shall run on.
+  );
 
   /// Similar to ExecuteAndWait, but returns immediately.
-  /// @returns The \see ProcessInfo of the newly launced process.
-  /// \note On Microsoft Windows systems, users will need to either call \see
-  /// Wait until the process finished execution or win32 CloseHandle() API on
-  /// ProcessInfo.ProcessHandle to avoid memory leaks.
-  ProcessInfo
-  ExecuteNoWait(StringRef Program, const char **args, const char **env = nullptr,
-                const StringRef **redirects = nullptr, unsigned memoryLimit = 0,
-                std::string *ErrMsg = nullptr, bool *ExecutionFailed = nullptr);
+  /// @returns The \see ProcessInfo of the newly launched process.
+  /// \note On Microsoft Windows systems, users will need to either call
+  /// \see Wait until the process finished execution or win32 CloseHandle() API
+  /// on ProcessInfo.ProcessHandle to avoid memory leaks.
+  ProcessInfo ExecuteNoWait(StringRef Program, ArrayRef<StringRef> Args,
+                            Optional<ArrayRef<StringRef>> Env,
+                            ArrayRef<Optional<StringRef>> Redirects = {},
+                            unsigned MemoryLimit = 0,
+                            std::string *ErrMsg = nullptr,
+                            bool *ExecutionFailed = nullptr,
+                            BitVector *AffinityMask = nullptr);
 
   /// Return true if the given arguments fit within system-specific
   /// argument length limits.
-  bool argumentsFitWithinSystemLimits(ArrayRef<const char*> Args);
+  bool commandLineFitsWithinSystemLimits(StringRef Program,
+                                         ArrayRef<StringRef> Args);
+
+  /// Return true if the given arguments fit within system-specific
+  /// argument length limits.
+  bool commandLineFitsWithinSystemLimits(StringRef Program,
+                                         ArrayRef<const char *> Args);
 
   /// File encoding options when writing contents that a non-UTF8 tool will
   /// read (on Windows systems). For UNIX, we always use UTF-8.
@@ -174,18 +205,32 @@ struct ProcessInfo {
   /// \note Users of this function should always check the ReturnCode member of
   /// the \see ProcessInfo returned from this function.
   ProcessInfo Wait(
-      const ProcessInfo &PI, ///< The child process that should be waited on.
+      const ProcessInfo &PI,  ///< The child process that should be waited on.
       unsigned SecondsToWait, ///< If non-zero, this specifies the amount of
       ///< time to wait for the child process to exit. If the time expires, the
       ///< child is killed and this function returns. If zero, this function
       ///< will perform a non-blocking wait on the child process.
       bool WaitUntilTerminates, ///< If true, ignores \p SecondsToWait and waits
       ///< until child has terminated.
-      std::string *ErrMsg = nullptr ///< If non-zero, provides a pointer to a
+      std::string *ErrMsg = nullptr, ///< If non-zero, provides a pointer to a
       ///< string instance in which error messages will be returned. If the
       ///< string is non-empty upon return an error occurred while invoking the
       ///< program.
-      );
+      Optional<ProcessStatistics> *ProcStat = nullptr ///< If non-zero, provides
+      /// a pointer to a structure in which process execution statistics will be
+      /// stored.
+  );
+
+  /// Print a command argument, and optionally quote it.
+  void printArg(llvm::raw_ostream &OS, StringRef Arg, bool Quote);
+
+#if defined(_WIN32)
+  /// Given a list of command line arguments, quote and escape them as necessary
+  /// to build a single flat command line appropriate for calling CreateProcess
+  /// on
+  /// Windows.
+  ErrorOr<std::wstring> flattenWindowsCommandLine(ArrayRef<StringRef> Args);
+#endif
   }
 }
 

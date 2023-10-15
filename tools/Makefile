@@ -140,20 +140,21 @@ SUBDIR += \
 SUBDIR+= .WAIT config
 .endif # defined(__MINIX)
 
-.if ${MKLLVM} != "no"
+.if ${MKLLVM} != "no" || ${MKLLVMRT} != "no"
 SUBDIR+= \
 	llvm .WAIT \
-	llvm-lib/libLLVMSupport llvm-lib/libLLVMTableGen .WAIT \
-	llvm-tblgen llvm-clang-tblgen .WAIT \
-	llvm-include .WAIT \
+	llvm-lib/libLLVMDemangle llvm-lib/libLLVMSupport llvm-lib/libLLVMTableGen .WAIT \
+	llvm-tblgen
+.endif
+.if ${MKLLVM} != "no"
+SUBDIR+= \
+	llvm-clang-tblgen
+.endif
+.if ${MKLLVM} != "no" && !defined(EXTERNAL_TOOLCHAIN)
+SUBDIR+= \
+	.WAIT llvm-include .WAIT \
 	llvm-lib .WAIT \
 	llvm-clang
-. if ${MKLLD} != "no"
-SUBDIR+=	llvm-lld
-. endif
-. if ${MKMCLINKER} != "no"
-SUBDIR+=	llvm-mcld
-. endif
 .endif
 
 .if ${MKMAN} != "no" || ${MKDOC} != "no" || ${MKHTML} != "no"

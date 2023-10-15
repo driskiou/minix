@@ -1,16 +1,15 @@
 //===- Win64EHDumper.h - Win64 EH Printing ----------------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_TOOLS_LLVM_READOBJ_WIN64EHDUMPER_H
 #define LLVM_TOOLS_LLVM_READOBJ_WIN64EHDUMPER_H
 
-#include "StreamWriter.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/Win64EH.h"
 
 namespace llvm {
@@ -22,7 +21,7 @@ struct coff_section;
 
 namespace Win64EH {
 class Dumper {
-  StreamWriter &SW;
+  ScopedPrinter &SW;
   raw_ostream &OS;
 
 public:
@@ -53,7 +52,7 @@ private:
                             uint64_t SectionOffset, const RuntimeFunction &RF);
 
 public:
-  Dumper(StreamWriter &SW) : SW(SW), OS(SW.getOStream()) {}
+  Dumper(ScopedPrinter &SW) : SW(SW), OS(SW.getOStream()) {}
 
   void printData(const Context &Ctx);
 };

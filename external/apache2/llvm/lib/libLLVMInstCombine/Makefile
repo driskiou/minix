@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2011/02/06 01:13:57 joerg Exp $
+#	$NetBSD: Makefile,v 1.4 2023/06/03 08:52:53 lukem Exp $
 
 LIB=	LLVMInstCombine
 
@@ -6,22 +6,26 @@ LIB=	LLVMInstCombine
 
 .PATH: ${LLVM_SRCDIR}/lib/Transforms/InstCombine
 
-SRCS+=	InstructionCombining.cpp \
-	InstCombineAddSub.cpp \
+SRCS+=	InstCombineAddSub.cpp \
 	InstCombineAndOrXor.cpp \
+	InstCombineAtomicRMW.cpp \
 	InstCombineCalls.cpp \
 	InstCombineCasts.cpp \
 	InstCombineCompares.cpp \
 	InstCombineLoadStoreAlloca.cpp \
 	InstCombineMulDivRem.cpp \
+	InstCombineNegator.cpp \
 	InstCombinePHI.cpp \
 	InstCombineSelect.cpp \
 	InstCombineShifts.cpp \
 	InstCombineSimplifyDemanded.cpp \
-	InstCombineVectorOps.cpp
+	InstCombineVectorOps.cpp \
+	InstructionCombining.cpp
 
 .if defined(HOSTLIB)
 .include <bsd.hostlib.mk>
 .else
 .include <bsd.lib.mk>
 .endif
+
+CWARNFLAGS.gcc+=	${CC_WNO_ADDRESS_OF_PACKED_MEMBER}

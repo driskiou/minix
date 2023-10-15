@@ -1,9 +1,8 @@
 //===---- LatencyPriorityQueue.cpp - A latency-oriented priority queue ----===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/LatencyPriorityQueue.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
@@ -55,9 +55,8 @@ bool latency_sort::operator()(const SUnit *LHS, const SUnit *RHS) const {
 /// of SU, return it, otherwise return null.
 SUnit *LatencyPriorityQueue::getSingleUnscheduledPred(SUnit *SU) {
   SUnit *OnlyAvailablePred = nullptr;
-  for (SUnit::const_pred_iterator I = SU->Preds.begin(), E = SU->Preds.end();
-       I != E; ++I) {
-    SUnit &Pred = *I->getSUnit();
+  for (const SDep &P : SU->Preds) {
+    SUnit &Pred = *P.getSUnit();
     if (!Pred.isScheduled) {
       // We found an available, but not scheduled, predecessor.  If it's the
       // only one we have found, keep track of it... otherwise give up.
@@ -90,10 +89,8 @@ void LatencyPriorityQueue::push(SUnit *SU) {
 // single predecessor has a higher priority, since scheduling it will make
 // the node available.
 void LatencyPriorityQueue::scheduledNode(SUnit *SU) {
-  for (SUnit::const_succ_iterator I = SU->Succs.begin(), E = SU->Succs.end();
-       I != E; ++I) {
-    AdjustPriorityOfUnscheduledPreds(I->getSUnit());
-  }
+  for (const SDep &Succ : SU->Succs)
+    AdjustPriorityOfUnscheduledPreds(Succ.getSUnit());
 }
 
 /// AdjustPriorityOfUnscheduledPreds - One of the predecessors of SU was just
@@ -133,21 +130,20 @@ SUnit *LatencyPriorityQueue::pop() {
 
 void LatencyPriorityQueue::remove(SUnit *SU) {
   assert(!Queue.empty() && "Queue is empty!");
-  std::vector<SUnit *>::iterator I = std::find(Queue.begin(), Queue.end(), SU);
+  std::vector<SUnit *>::iterator I = find(Queue, SU);
+  assert(I != Queue.end() && "Queue doesn't contain the SU being removed!");
   if (I != std::prev(Queue.end()))
     std::swap(*I, Queue.back());
   Queue.pop_back();
 }
 
-#ifdef NDEBUG
-void LatencyPriorityQueue::dump(ScheduleDAG *DAG) const {}
-#else
-void LatencyPriorityQueue::dump(ScheduleDAG *DAG) const {
-  LatencyPriorityQueue q = *this;
-  while (!q.empty()) {
-    SUnit *su = q.pop();
-    dbgs() << "Height " << su->getHeight() << ": ";
-    su->dump(DAG);
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void LatencyPriorityQueue::dump(ScheduleDAG *DAG) const {
+  dbgs() << "Latency Priority Queue\n";
+  dbgs() << "  Number of Queue Entries: " << Queue.size() << "\n";
+  for (const SUnit *SU : Queue) {
+    dbgs() << "    ";
+    DAG->dumpNode(*SU);
   }
 }
 #endif

@@ -1,9 +1,8 @@
 //===- yaml2obj - Convert YAML to a binary object file --------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -14,80 +13,113 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "yaml2obj.h"
+#include "llvm/ObjectYAML/yaml2obj.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ObjectYAML/ObjectYAML.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/Signals.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include "llvm/Support/WithColor.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
 #include <system_error>
 
 using namespace llvm;
 
-static cl::opt<std::string>
-  Input(cl::Positional, cl::desc("<input>"), cl::init("-"));
+namespace {
+cl::OptionCategory Cat("yaml2obj Options");
 
-// TODO: The "right" way to tell what kind of object file a given YAML file
-// corresponds to is to look at YAML "tags" (e.g. `!Foo`). Then, different
-// tags (`!ELF`, `!COFF`, etc.) would be used to discriminate between them.
-// Interpreting the tags is needed eventually for when writing test cases,
-// so that we can e.g. have `!Archive` contain a sequence of `!ELF`, and
-// just Do The Right Thing. However, interpreting these tags and acting on
-// them appropriately requires some work in the YAML parser and the YAMLIO
-// library.
-enum YAMLObjectFormat {
-  YOF_COFF,
-  YOF_ELF
-};
+cl::opt<std::string> Input(cl::Positional, cl::desc("<input file>"),
+                           cl::init("-"), cl::cat(Cat));
 
-cl::opt<YAMLObjectFormat> Format(
-  "format",
-  cl::desc("Interpret input as this type of object file"),
-  cl::values(
-    clEnumValN(YOF_COFF, "coff", "COFF object file format"),
-    clEnumValN(YOF_ELF, "elf", "ELF object file format"),
-  clEnumValEnd));
+cl::list<std::string>
+    D("D", cl::Prefix,
+      cl::desc("Defined the specified macros to their specified "
+               "definition. The syntax is <macro>=<definition>"));
 
 cl::opt<unsigned>
-DocNum("docnum", cl::init(1),
-       cl::desc("Read specified document from input (default = 1)"));
+    DocNum("docnum", cl::init(1),
+           cl::desc("Read specified document from input (default = 1)"),
+           cl::cat(Cat));
 
-static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"),
-                                           cl::value_desc("filename"));
+static cl::opt<uint64_t> MaxSize(
+    "max-size", cl::init(10 * 1024 * 1024),
+    cl::desc(
+        "Sets the maximum allowed output size (0 means no limit) [ELF only]"));
 
-typedef int (*ConvertFuncPtr)(yaml::Input & YIn, raw_ostream &Out);
+cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"),
+                                    cl::value_desc("filename"), cl::init("-"),
+                                    cl::Prefix, cl::cat(Cat));
+} // namespace
 
-int convertYAML(yaml::Input & YIn, raw_ostream &Out, ConvertFuncPtr Convert) {
-  unsigned CurDocNum = 0;
-  do {
-    if (++CurDocNum == DocNum)
-      return Convert(YIn, Out);
-  } while (YIn.nextDocument());
+static Optional<std::string> preprocess(StringRef Buf,
+                                        yaml::ErrorHandler ErrHandler) {
+  DenseMap<StringRef, StringRef> Defines;
+  for (StringRef Define : D) {
+    StringRef Macro, Definition;
+    std::tie(Macro, Definition) = Define.split('=');
+    if (!Define.count('=') || Macro.empty()) {
+      ErrHandler("invalid syntax for -D: " + Define);
+      return {};
+    }
+    if (!Defines.try_emplace(Macro, Definition).second) {
+      ErrHandler("'" + Macro + "'" + " redefined");
+      return {};
+    }
+  }
 
-  errs() << "yaml2obj: Cannot find the " << DocNum
-         << llvm::getOrdinalSuffix(DocNum) << " document\n";
-  return 1;
+  std::string Preprocessed;
+  while (!Buf.empty()) {
+    if (Buf.startswith("[[")) {
+      size_t I = Buf.find_first_of("[]", 2);
+      if (Buf.substr(I).startswith("]]")) {
+        StringRef MacroExpr = Buf.substr(2, I - 2);
+        StringRef Macro;
+        StringRef Default;
+        std::tie(Macro, Default) = MacroExpr.split('=');
+
+        // When the -D option is requested, we use the provided value.
+        // Otherwise we use a default macro value if present.
+        auto It = Defines.find(Macro);
+        Optional<StringRef> Value;
+        if (It != Defines.end())
+          Value = It->second;
+        else if (!Default.empty() || MacroExpr.endswith("="))
+          Value = Default;
+
+        if (Value) {
+          Preprocessed += *Value;
+          Buf = Buf.substr(I + 2);
+          continue;
+        }
+      }
+    }
+
+    Preprocessed += Buf[0];
+    Buf = Buf.substr(1);
+  }
+
+  return Preprocessed;
 }
 
 int main(int argc, char **argv) {
-  cl::ParseCommandLineOptions(argc, argv);
-  sys::PrintStackTraceOnErrorSignal();
-  PrettyStackTraceProgram X(argc, argv);
-  llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
+  InitLLVM X(argc, argv);
+  cl::HideUnrelatedOptions(Cat);
+  cl::ParseCommandLineOptions(
+      argc, argv, "Create an object file from a YAML description", nullptr,
+      nullptr, /*LongOptionsUseDoubleDash=*/true);
 
-  if (OutputFilename.empty())
-    OutputFilename = "-";
+  auto ErrHandler = [](const Twine &Msg) {
+    WithColor::error(errs(), "yaml2obj") << Msg << "\n";
+  };
 
   std::error_code EC;
-  std::unique_ptr<tool_output_file> Out(
-      new tool_output_file(OutputFilename, EC, sys::fs::F_None));
+  std::unique_ptr<ToolOutputFile> Out(
+      new ToolOutputFile(OutputFilename, EC, sys::fs::OF_None));
   if (EC) {
-    errs() << EC.message() << '\n';
+    ErrHandler("failed to open '" + OutputFilename + "': " + EC.message());
     return 1;
   }
 
@@ -96,21 +128,16 @@ int main(int argc, char **argv) {
   if (!Buf)
     return 1;
 
-  ConvertFuncPtr Convert = nullptr;
-  if (Format == YOF_COFF)
-    Convert = yaml2coff;
-  else if (Format == YOF_ELF)
-    Convert = yaml2elf;
-  else {
-    errs() << "Not yet implemented\n";
+  Optional<std::string> Buffer = preprocess(Buf.get()->getBuffer(), ErrHandler);
+  if (!Buffer)
     return 1;
-  }
+  yaml::Input YIn(*Buffer);
 
-  yaml::Input YIn(Buf.get()->getBuffer());
+  if (!convertYAML(YIn, Out->os(), ErrHandler, DocNum,
+                   MaxSize == 0 ? UINT64_MAX : MaxSize))
+    return 1;
 
-  int Res = convertYAML(YIn, Out->os(), Convert);
-  if (Res == 0)
-    Out->keep();
-
-  return Res;
+  Out->keep();
+  Out->os().flush();
+  return 0;
 }

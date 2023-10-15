@@ -1,8 +1,11 @@
-add_llvm_library(LLVMCore
+add_llvm_component_library(LLVMCore
+  AbstractCallSite.cpp
   AsmWriter.cpp
+  Assumptions.cpp
   Attributes.cpp
   AutoUpgrade.cpp
   BasicBlock.cpp
+  BuiltinGCs.cpp
   Comdat.cpp
   ConstantFold.cpp
   ConstantRange.cpp
@@ -11,12 +14,15 @@ add_llvm_library(LLVMCore
   DIBuilder.cpp
   DataLayout.cpp
   DebugInfo.cpp
+  DebugInfoMetadata.cpp
   DebugLoc.cpp
+  DiagnosticHandler.cpp
   DiagnosticInfo.cpp
   DiagnosticPrinter.cpp
   Dominators.cpp
+  FPEnv.cpp
   Function.cpp
-  GCOV.cpp
+  GCStrategy.cpp
   GVMaterializer.cpp
   Globals.cpp
   IRBuilder.cpp
@@ -27,25 +33,46 @@ add_llvm_library(LLVMCore
   IntrinsicInst.cpp
   LLVMContext.cpp
   LLVMContextImpl.cpp
+  LLVMRemarkStreamer.cpp
   LegacyPassManager.cpp
   MDBuilder.cpp
   Mangler.cpp
   Metadata.cpp
-  MetadataTracking.cpp
   Module.cpp
+  ModuleSummaryIndex.cpp
+  Operator.cpp
+  OptBisect.cpp
   Pass.cpp
+  PassInstrumentation.cpp
   PassManager.cpp
   PassRegistry.cpp
+  PassTimingInfo.cpp
+  PrintPasses.cpp
+  SafepointIRVerifier.cpp
+  ProfileSummary.cpp
+  PseudoProbe.cpp
+  ReplaceConstant.cpp
   Statepoint.cpp
+  StructuralHash.cpp
   Type.cpp
   TypeFinder.cpp
   Use.cpp
-  UseListOrder.cpp
   User.cpp
   Value.cpp
   ValueSymbolTable.cpp
-  ValueTypes.cpp
   Verifier.cpp
-  )
 
-add_dependencies(LLVMCore intrinsics_gen)
+  ADDITIONAL_HEADER_DIRS
+  ${LLVM_MAIN_INCLUDE_DIR}/llvm/IR
+
+  LINK_LIBS
+  ${LLVM_PTHREAD_LIB}
+
+  DEPENDS
+  intrinsics_gen
+
+  LINK_COMPONENTS
+  BinaryFormat
+  Remarks
+  Support
+  )

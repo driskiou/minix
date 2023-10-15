@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2011/07/04 22:37:59 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:11 joerg Exp $
 
 LIB=	LLVMPowerPCTargetInfo
 

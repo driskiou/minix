@@ -1,9 +1,8 @@
 //===--- TokenConcatenation.cpp - Token Concatenation Avoidance -----------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -67,7 +66,7 @@ bool TokenConcatenation::IsIdentifierStringPrefix(const Token &Tok) const {
   return IsStringPrefix(StringRef(PP.getSpelling(Tok)), LangOpts.CPlusPlus11);
 }
 
-TokenConcatenation::TokenConcatenation(Preprocessor &pp) : PP(pp) {
+TokenConcatenation::TokenConcatenation(const Preprocessor &pp) : PP(pp) {
   memset(TokenInfo, 0, sizeof(TokenInfo));
 
   // These tokens have custom code in AvoidConcat.
@@ -99,9 +98,13 @@ TokenConcatenation::TokenConcatenation(Preprocessor &pp) : PP(pp) {
     TokenInfo[tok::utf32_char_constant ] |= aci_custom;
   }
 
-  // These tokens have custom code in C++1z mode.
-  if (PP.getLangOpts().CPlusPlus1z)
+  // These tokens have custom code in C++17 mode.
+  if (PP.getLangOpts().CPlusPlus17)
     TokenInfo[tok::utf8_char_constant] |= aci_custom;
+
+  // These tokens have custom code in C++2a mode.
+  if (PP.getLangOpts().CPlusPlus20)
+    TokenInfo[tok::lessequal ] |= aci_custom_firstchar;
 
   // These tokens change behavior if followed by an '='.
   TokenInfo[tok::amp         ] |= aci_avoid_equal;           // &=
@@ -122,7 +125,7 @@ TokenConcatenation::TokenConcatenation(Preprocessor &pp) : PP(pp) {
 
 /// GetFirstChar - Get the first character of the token \arg Tok,
 /// avoiding calls to getSpelling where possible.
-static char GetFirstChar(Preprocessor &PP, const Token &Tok) {
+static char GetFirstChar(const Preprocessor &PP, const Token &Tok) {
   if (IdentifierInfo *II = Tok.getIdentifierInfo()) {
     // Avoid spelling identifiers, the most common form of token.
     return II->getNameStart()[0];
@@ -157,6 +160,11 @@ static char GetFirstChar(Preprocessor &PP, const Token &Tok) {
 bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
                                      const Token &PrevTok,
                                      const Token &Tok) const {
+  // Conservatively assume that every annotation token that has a printable
+  // form requires whitespace.
+  if (PrevTok.isAnnotation())
+    return true;
+
   // First, check to see if the tokens were directly adjacent in the original
   // source.  If they were, it must be okay to stick them together: if there
   // were an issue, the tokens would have been lexed differently.
@@ -178,20 +186,20 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
 
   if (ConcatInfo & aci_avoid_equal) {
     // If the next token is '=' or '==', avoid concatenation.
-    if (Tok.is(tok::equal) || Tok.is(tok::equalequal))
+    if (Tok.isOneOf(tok::equal, tok::equalequal))
       return true;
     ConcatInfo &= ~aci_avoid_equal;
   }
   if (Tok.isAnnotation()) {
     // Modules annotation can show up when generated automatically for includes.
-    assert((Tok.is(tok::annot_module_include) ||
-            Tok.is(tok::annot_module_begin) ||
-            Tok.is(tok::annot_module_end)) &&
+    assert(Tok.isOneOf(tok::annot_module_include, tok::annot_module_begin,
+                       tok::annot_module_end) &&
            "unexpected annotation in AvoidConcat");
     ConcatInfo = 0;
   }
 
-  if (ConcatInfo == 0) return false;
+  if (ConcatInfo == 0)
+    return false;
 
   // Basic algorithm: we look at the first character of the second token, and
   // determine whether it, if appended to the first token, would form (or
@@ -232,17 +240,17 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
     // it as an identifier.
     if (!PrevTok.hasUDSuffix())
       return false;
-    // FALL THROUGH.
+    LLVM_FALLTHROUGH;
   case tok::identifier:   // id+id or id+number or id+L"foo".
     // id+'.'... will not append.
     if (Tok.is(tok::numeric_constant))
       return GetFirstChar(PP, Tok) != '.';
 
-    if (Tok.getIdentifierInfo() || Tok.is(tok::wide_string_literal) ||
-        Tok.is(tok::utf8_string_literal) || Tok.is(tok::utf16_string_literal) ||
-        Tok.is(tok::utf32_string_literal) || Tok.is(tok::wide_char_constant) ||
-        Tok.is(tok::utf8_char_constant) || Tok.is(tok::utf16_char_constant) ||
-        Tok.is(tok::utf32_char_constant))
+    if (Tok.getIdentifierInfo() ||
+        Tok.isOneOf(tok::wide_string_literal, tok::utf8_string_literal,
+                    tok::utf16_string_literal, tok::utf32_string_literal,
+                    tok::wide_char_constant, tok::utf8_char_constant,
+                    tok::utf16_char_constant, tok::utf32_char_constant))
       return true;
 
     // If this isn't identifier + string, we're done.
@@ -283,5 +291,7 @@ bool TokenConcatenation::AvoidConcat(const Token &PrevPrevTok,
     return FirstChar == '#' || FirstChar == '@' || FirstChar == '%';
   case tok::arrow:           // ->*
     return PP.getLangOpts().CPlusPlus && FirstChar == '*';
+  case tok::lessequal:       // <=> (C++2a)
+    return PP.getLangOpts().CPlusPlus20 && FirstChar == '>';
   }
 }

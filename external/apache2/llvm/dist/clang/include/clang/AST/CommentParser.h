@@ -1,9 +1,8 @@
 //===--- CommentParser.h - Doxygen comment parser ---------------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -28,8 +27,8 @@ class CommandTraits;
 
 /// Doxygen comment parser.
 class Parser {
-  Parser(const Parser &) LLVM_DELETED_FUNCTION;
-  void operator=(const Parser &) LLVM_DELETED_FUNCTION;
+  Parser(const Parser &) = delete;
+  void operator=(const Parser &) = delete;
 
   friend class TextTokenRetokenizer;
 
@@ -75,11 +74,7 @@ class Parser {
       return;
 
     MoreLATokens.push_back(Tok);
-    for (const Token *I = &Toks.back(),
-         *B = &Toks.front();
-         I != B; --I) {
-      MoreLATokens.push_back(*I);
-    }
+    MoreLATokens.append(Toks.rbegin(), std::prev(Toks.rend()));
 
     Tok = Toks[0];
   }

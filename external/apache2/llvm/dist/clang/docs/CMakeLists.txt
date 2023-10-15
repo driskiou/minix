@@ -47,6 +47,14 @@ if (LLVM_ENABLE_DOXYGEN)
     set(clang_doxygen_qhp_cust_filter_attrs "")
   endif()
 
+  option(LLVM_DOXYGEN_SVG
+    "Use svg instead of png files for doxygen graphs." OFF)
+  if (LLVM_DOXYGEN_SVG)
+    set(DOT_IMAGE_FORMAT "svg")
+  else()
+    set(DOT_IMAGE_FORMAT "png")
+  endif()
+
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/doxygen.cfg.in
     ${CMAKE_CURRENT_BINARY_DIR}/doxygen.cfg @ONLY)
 
@@ -64,6 +72,7 @@ if (LLVM_ENABLE_DOXYGEN)
   set(clang_doxygen_qhelpgenerator_path)
   set(clang_doxygen_qhp_cust_filter_name)
   set(clang_doxygen_qhp_cust_filter_attrs)
+  set(DOT_IMAGE_FORMAT)
 
   add_custom_target(doxygen-clang
     COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/doxygen.cfg
@@ -81,11 +90,46 @@ if (LLVM_ENABLE_DOXYGEN)
 endif()
 endif()
 
+function (gen_rst_file_from_td output_file td_option source docs_target)
+  if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
+    message(FATAL_ERROR "Cannot find source file: ${source} in ${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
+  get_filename_component(TABLEGEN_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${source}" DIRECTORY)
+  list(APPEND LLVM_TABLEGEN_FLAGS "-I${TABLEGEN_INCLUDE_DIR}")
+  clang_tablegen(${output_file} ${td_option} SOURCE ${source} TARGET "gen-${output_file}")
+  add_dependencies(${docs_target} "gen-${output_file}")
+endfunction()
+
 if (LLVM_ENABLE_SPHINX)
+  include(AddSphinxTarget)
   if (SPHINX_FOUND)
-    include(AddSphinxTarget)
     if (${SPHINX_OUTPUT_HTML})
-      add_sphinx_target(html clang)
+      add_sphinx_target(html clang SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+
+      # Copy rst files to build directory before generating the html
+      # documentation.  Some of the rst files are generated, so they
+      # only exist in the build directory.  Sphinx needs all files in
+      # the same directory in order to generate the html, so we need to
+      # copy all the non-gnerated rst files from the source to the build
+      # directory before we run sphinx.
+      add_custom_target(copy-clang-rst-docs
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}")
+      add_dependencies(docs-clang-html copy-clang-rst-docs)
+
+      add_custom_command(TARGET docs-clang-html POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy
+        "${CMAKE_CURRENT_SOURCE_DIR}/LibASTMatchersReference.html"
+        "${CMAKE_CURRENT_BINARY_DIR}/html/LibASTMatchersReference.html")
+
+      # Generated files
+      gen_rst_file_from_td(AttributeReference.rst -gen-attr-docs ../include/clang/Basic/Attr.td docs-clang-html)
+      gen_rst_file_from_td(DiagnosticsReference.rst -gen-diag-docs ../include/clang/Basic/Diagnostic.td docs-clang-html)
+      gen_rst_file_from_td(ClangCommandLineReference.rst -gen-opt-docs ../include/clang/Driver/ClangOptionDocs.td docs-clang-html)
+    endif()
+    if (${SPHINX_OUTPUT_MAN})
+      add_sphinx_target(man clang)
     endif()
   endif()
 endif()

@@ -1,14 +1,14 @@
-//===-- XCoreMachineFuctionInfo.cpp - XCore machine function info ---------===//
+//===-- XCoreMachineFunctionInfo.cpp - XCore machine function info --------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
 #include "XCoreMachineFunctionInfo.h"
 #include "XCoreInstrInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Function.h"
 
 using namespace llvm;
@@ -17,7 +17,7 @@ void XCoreFunctionInfo::anchor() { }
 
 bool XCoreFunctionInfo::isLargeFrame(const MachineFunction &MF) const {
   if (CachedEStackSize == -1) {
-    CachedEStackSize = MF.getFrameInfo()->estimateStackSize(MF);
+    CachedEStackSize = MF.getFrameInfo().estimateStackSize(MF);
   }
   // isLargeFrame() is used when deciding if spill slots should be added to
   // allow eliminateFrameIndex() to scavenge registers.
@@ -35,13 +35,15 @@ int XCoreFunctionInfo::createLRSpillSlot(MachineFunction &MF) {
   if (LRSpillSlotSet) {
     return LRSpillSlot;
   }
-  const TargetRegisterClass *RC = &XCore::GRRegsRegClass;
-  MachineFrameInfo *MFI = MF.getFrameInfo();
-  if (! MF.getFunction()->isVarArg()) {
+  const TargetRegisterClass &RC = XCore::GRRegsRegClass;
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  if (! MF.getFunction().isVarArg()) {
     // A fixed offset of 0 allows us to save / restore LR using entsp / retsp.
-    LRSpillSlot = MFI->CreateFixedObject(RC->getSize(), 0, true);
+    LRSpillSlot = MFI.CreateFixedObject(TRI.getSpillSize(RC), 0, true);
   } else {
-    LRSpillSlot = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(), true);
+    LRSpillSlot = MFI.CreateStackObject(TRI.getSpillSize(RC),
+                                        TRI.getSpillAlign(RC), true);
   }
   LRSpillSlotSet = true;
   return LRSpillSlot;
@@ -51,9 +53,11 @@ int XCoreFunctionInfo::createFPSpillSlot(MachineFunction &MF) {
   if (FPSpillSlotSet) {
     return FPSpillSlot;
   }
-  const TargetRegisterClass *RC = &XCore::GRRegsRegClass;
-  MachineFrameInfo *MFI = MF.getFrameInfo();
-  FPSpillSlot = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(), true);
+  const TargetRegisterClass &RC = XCore::GRRegsRegClass;
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  FPSpillSlot =
+      MFI.CreateStackObject(TRI.getSpillSize(RC), TRI.getSpillAlign(RC), true);
   FPSpillSlotSet = true;
   return FPSpillSlot;
 }
@@ -62,10 +66,13 @@ const int* XCoreFunctionInfo::createEHSpillSlot(MachineFunction &MF) {
   if (EHSpillSlotSet) {
     return EHSpillSlot;
   }
-  const TargetRegisterClass *RC = &XCore::GRRegsRegClass;
-  MachineFrameInfo *MFI = MF.getFrameInfo();
-  EHSpillSlot[0] = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(), true);
-  EHSpillSlot[1] = MFI->CreateStackObject(RC->getSize(), RC->getAlignment(), true);
+  const TargetRegisterClass &RC = XCore::GRRegsRegClass;
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  unsigned Size = TRI.getSpillSize(RC);
+  Align Alignment = TRI.getSpillAlign(RC);
+  EHSpillSlot[0] = MFI.CreateStackObject(Size, Alignment, true);
+  EHSpillSlot[1] = MFI.CreateStackObject(Size, Alignment, true);
   EHSpillSlotSet = true;
   return EHSpillSlot;
 }

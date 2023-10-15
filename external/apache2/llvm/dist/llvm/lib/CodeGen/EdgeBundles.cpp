@@ -1,9 +1,8 @@
 //===-------- EdgeBundles.cpp - Bundles of CFG edges ----------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,11 +11,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/EdgeBundles.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -27,7 +29,7 @@ ViewEdgeBundles("view-edge-bundles", cl::Hidden,
 char EdgeBundles::ID = 0;
 
 INITIALIZE_PASS(EdgeBundles, "edge-bundles", "Bundle Machine CFG Edges",
-                /* cfg = */true, /* analysis = */ true)
+                /* cfg = */true, /* is_analysis = */ true)
 
 char &llvm::EdgeBundlesID = EdgeBundles::ID;
 
@@ -44,9 +46,8 @@ bool EdgeBundles::runOnMachineFunction(MachineFunction &mf) {
   for (const auto &MBB : *MF) {
     unsigned OutE = 2 * MBB.getNumber() + 1;
     // Join the outgoing bundle with the ingoing bundles of all successors.
-    for (MachineBasicBlock::const_succ_iterator SI = MBB.succ_begin(),
-           SE = MBB.succ_end(); SI != SE; ++SI)
-      EC.join(OutE, 2 * (*SI)->getNumber());
+    for (const MachineBasicBlock *Succ : MBB.successors())
+      EC.join(OutE, 2 * Succ->getNumber());
   }
   EC.compress();
   if (ViewEdgeBundles)
@@ -57,8 +58,8 @@ bool EdgeBundles::runOnMachineFunction(MachineFunction &mf) {
   Blocks.resize(getNumBundles());
 
   for (unsigned i = 0, e = MF->getNumBlockIDs(); i != e; ++i) {
-    unsigned b0 = getBundle(i, 0);
-    unsigned b1 = getBundle(i, 1);
+    unsigned b0 = getBundle(i, false);
+    unsigned b1 = getBundle(i, true);
     Blocks[b0].push_back(i);
     if (b1 != b0)
       Blocks[b1].push_back(i);
@@ -67,8 +68,9 @@ bool EdgeBundles::runOnMachineFunction(MachineFunction &mf) {
   return false;
 }
 
-/// Specialize WriteGraph, the standard implementation won't work.
 namespace llvm {
+
+/// Specialize WriteGraph, the standard implementation won't work.
 template<>
 raw_ostream &WriteGraph<>(raw_ostream &O, const EdgeBundles &G,
                           bool ShortNames,
@@ -78,18 +80,20 @@ raw_ostream &WriteGraph<>(raw_ostream &O, const EdgeBundles &G,
   O << "digraph {\n";
   for (const auto &MBB : *MF) {
     unsigned BB = MBB.getNumber();
-    O << "\t\"BB#" << BB << "\" [ shape=box ]\n"
-      << '\t' << G.getBundle(BB, false) << " -> \"BB#" << BB << "\"\n"
-      << "\t\"BB#" << BB << "\" -> " << G.getBundle(BB, true) << '\n';
-    for (MachineBasicBlock::const_succ_iterator SI = MBB.succ_begin(),
-           SE = MBB.succ_end(); SI != SE; ++SI)
-      O << "\t\"BB#" << BB << "\" -> \"BB#" << (*SI)->getNumber()
-        << "\" [ color=lightgray ]\n";
+    O << "\t\"" << printMBBReference(MBB) << "\" [ shape=box ]\n"
+      << '\t' << G.getBundle(BB, false) << " -> \"" << printMBBReference(MBB)
+      << "\"\n"
+      << "\t\"" << printMBBReference(MBB) << "\" -> " << G.getBundle(BB, true)
+      << '\n';
+    for (const MachineBasicBlock *Succ : MBB.successors())
+      O << "\t\"" << printMBBReference(MBB) << "\" -> \""
+        << printMBBReference(*Succ) << "\" [ color=lightgray ]\n";
   }
   O << "}\n";
   return O;
 }
-}
+
+} // end namespace llvm
 
 /// view - Visualize the annotated bipartite CFG with Graphviz.
 void EdgeBundles::view() const {

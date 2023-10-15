@@ -1,9 +1,8 @@
 //===-- llvm/Analysis/Passes.h - Constructors for analyses ------*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,94 +17,14 @@
 namespace llvm {
   class FunctionPass;
   class ImmutablePass;
-  class LoopPass;
   class ModulePass;
-  class Pass;
-  class PassInfo;
-  class LibCallInfo;
 
   //===--------------------------------------------------------------------===//
   //
-  // createGlobalsModRefPass - This pass provides alias and mod/ref info for
-  // global values that do not have their addresses taken.
-  //
-  Pass *createGlobalsModRefPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createAliasDebugger - This pass helps debug clients of AA
-  //
-  Pass *createAliasDebugger();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createAliasAnalysisCounterPass - This pass counts alias queries and how the
-  // alias analysis implementation responds.
-  //
-  ModulePass *createAliasAnalysisCounterPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createAAEvalPass - This pass implements a simple N^2 alias analysis
-  // accuracy evaluator.
-  //
-  FunctionPass *createAAEvalPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createNoAAPass - This pass implements a "I don't know" alias analysis.
-  //
-  ImmutablePass *createNoAAPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createBasicAliasAnalysisPass - This pass implements the stateless alias
-  // analysis.
-  //
-  ImmutablePass *createBasicAliasAnalysisPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createCFLAliasAnalysisPass - This pass implements a set-based approach to
+  // createObjCARCAAWrapperPass - This pass implements ObjC-ARC-based
   // alias analysis.
   //
-  ImmutablePass *createCFLAliasAnalysisPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  /// createLibCallAliasAnalysisPass - Create an alias analysis pass that knows
-  /// about the semantics of a set of libcalls specified by LCI.  The newly
-  /// constructed pass takes ownership of the pointer that is provided.
-  ///
-  FunctionPass *createLibCallAliasAnalysisPass(LibCallInfo *LCI);
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createScalarEvolutionAliasAnalysisPass - This pass implements a simple
-  // alias analysis using ScalarEvolution queries.
-  //
-  FunctionPass *createScalarEvolutionAliasAnalysisPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createTypeBasedAliasAnalysisPass - This pass implements metadata-based
-  // type-based alias analysis.
-  //
-  ImmutablePass *createTypeBasedAliasAnalysisPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createScopedNoAliasAAPass - This pass implements metadata-based
-  // scoped noalias analysis.
-  //
-  ImmutablePass *createScopedNoAliasAAPass();
-
-  //===--------------------------------------------------------------------===//
-  //
-  // createObjCARCAliasAnalysisPass - This pass implements ObjC-ARC-based
-  // alias analysis.
-  //
-  ImmutablePass *createObjCARCAliasAnalysisPass();
+  ImmutablePass *createObjCARCAAWrapperPass();
 
   FunctionPass *createPAEvalPass();
 
@@ -117,10 +36,10 @@ namespace llvm {
 
   //===--------------------------------------------------------------------===//
   //
-  // createDependenceAnalysisPass - This creates an instance of the
-  // DependenceAnalysis pass.
+  // createDependenceAnalysisWrapperPass - This creates an instance of the
+  // DependenceAnalysisWrapper pass.
   //
-  FunctionPass *createDependenceAnalysisPass();
+  FunctionPass *createDependenceAnalysisWrapperPass();
 
   //===--------------------------------------------------------------------===//
   //
@@ -135,6 +54,13 @@ namespace llvm {
   // multidimensional array indices from linearized expressions.
   //
   FunctionPass *createDelinearizationPass();
+
+  //===--------------------------------------------------------------------===//
+  //
+  // createLegacyDivergenceAnalysisPass - This pass determines which branches in a GPU
+  // program are divergent.
+  //
+  FunctionPass *createLegacyDivergenceAnalysisPass();
 
   //===--------------------------------------------------------------------===//
   //
@@ -159,9 +85,28 @@ namespace llvm {
   //
   FunctionPass *createMemDepPrinter();
 
-  // createJumpInstrTableInfoPass - This creates a pass that stores information
-  // about the jump tables created by JumpInstrTables
-  ImmutablePass *createJumpInstrTableInfoPass();
+  //===--------------------------------------------------------------------===//
+  //
+  // createMemDerefPrinter - This pass collects memory dereferenceability
+  // information and prints it with -analyze.
+  //
+  FunctionPass *createMemDerefPrinter();
+
+  //===--------------------------------------------------------------------===//
+  //
+  // createMustExecutePrinter - This pass collects information about which
+  // instructions within a loop are guaranteed to execute if the loop header is
+  // entered and prints it with -analyze.
+  //
+  FunctionPass *createMustExecutePrinter();
+
+  //===--------------------------------------------------------------------===//
+  //
+  // createMustBeExecutedContextPrinter - This pass prints information about which
+  // instructions are guaranteed to execute together (run with -analyze).
+  //
+  ModulePass *createMustBeExecutedContextPrinter();
+
 }
 
 #endif

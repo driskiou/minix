@@ -1,9 +1,8 @@
 #===- object.py - Python Object Bindings --------------------*- python -*--===#
 #
-#                     The LLVM Compiler Infrastructure
-#
-# This file is distributed under the University of Illinois Open Source
-# License. See LICENSE.TXT for details.
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
 #===------------------------------------------------------------------------===#
 
@@ -372,14 +371,6 @@ class Relocation(LLVMObject):
         self.expired = False
 
     @CachedProperty
-    def address(self):
-        """The address of this relocation, in long bytes."""
-        if self.expired:
-            raise Exception('Relocation instance has expired.')
-
-        return lib.LLVMGetRelocationAddress(self)
-
-    @CachedProperty
     def offset(self):
         """The offset of this relocation, in long bytes."""
         if self.expired:
@@ -497,9 +488,6 @@ def register_library(library):
 
     library.LLVMGetSymbolSize.argtypes = [Symbol]
     library.LLVMGetSymbolSize.restype = c_uint64
-
-    library.LLVMGetRelocationAddress.argtypes = [c_object_p]
-    library.LLVMGetRelocationAddress.restype = c_uint64
 
     library.LLVMGetRelocationOffset.argtypes = [c_object_p]
     library.LLVMGetRelocationOffset.restype = c_uint64

@@ -1,9 +1,8 @@
 //===--- RewriteTest.cpp - Rewriter playground ----------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -11,12 +10,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Rewrite/Frontend/Rewriters.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Rewrite/Core/TokenRewriter.h"
+#include "clang/Rewrite/Frontend/Rewriters.h"
 #include "llvm/Support/raw_ostream.h"
 
-void clang::DoRewriteTest(Preprocessor &PP, raw_ostream* OS) {
+void clang::DoRewriteTest(Preprocessor &PP, raw_ostream *OS) {
   SourceManager &SM = PP.getSourceManager();
   const LangOptions &LangOpts = PP.getLangOpts();
 

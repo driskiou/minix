@@ -1,9 +1,8 @@
 //===- Win32/Process.cpp - Win32 Process Implementation ------- -*- C++ -*-===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -12,26 +11,22 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/WindowsError.h"
 #include <malloc.h>
 
 // The Windows.h header must be after LLVM and standard headers.
-#include "WindowsSupport.h"
+#include "llvm/Support/Windows/WindowsSupport.h"
 
 #include <direct.h>
 #include <io.h>
 #include <psapi.h>
 #include <shellapi.h>
 
-#ifdef __MINGW32__
- #if (HAVE_LIBPSAPI != 1)
-  #error "libpsapi.a should be present"
- #endif
- #if (HAVE_LIBSHELL32 != 1)
-  #error "libshell32.a should be present"
- #endif
-#else
+#if !defined(__MINGW32__)
  #pragma comment(lib, "psapi.lib")
  #pragma comment(lib, "shell32.lib")
 #endif
@@ -47,18 +42,11 @@
 #endif
 
 using namespace llvm;
-using namespace sys;
 
-static TimeValue getTimeValueFromFILETIME(FILETIME Time) {
-  ULARGE_INTEGER TimeInteger;
-  TimeInteger.LowPart = Time.dwLowDateTime;
-  TimeInteger.HighPart = Time.dwHighDateTime;
-
-  // FILETIME's are # of 100 nanosecond ticks (1/10th of a microsecond)
-  return TimeValue(
-      static_cast<TimeValue::SecondsType>(TimeInteger.QuadPart / 10000000),
-      static_cast<TimeValue::NanoSecondsType>(
-          (TimeInteger.QuadPart % 10000000) * 100));
+Process::Pid Process::getProcessId() {
+  static_assert(sizeof(Pid) >= sizeof(DWORD),
+                "Process::Pid should be big enough to store DWORD");
+  return Pid(::GetCurrentProcessId());
 }
 
 // This function retrieves the page size using GetNativeSystemInfo() and is
@@ -74,7 +62,7 @@ static unsigned computePageSize() {
   return static_cast<unsigned>(info.dwPageSize);
 }
 
-unsigned Process::getPageSize() {
+Expected<unsigned> Process::getPageSize() {
   static unsigned Ret = computePageSize();
   return Ret;
 }
@@ -93,17 +81,17 @@ Process::GetMallocUsage()
   return size;
 }
 
-void Process::GetTimeUsage(TimeValue &elapsed, TimeValue &user_time,
-                           TimeValue &sys_time) {
-  elapsed = TimeValue::now();
+void Process::GetTimeUsage(TimePoint<> &elapsed, std::chrono::nanoseconds &user_time,
+                           std::chrono::nanoseconds &sys_time) {
+  elapsed = std::chrono::system_clock::now();;
 
   FILETIME ProcCreate, ProcExit, KernelTime, UserTime;
   if (GetProcessTimes(GetCurrentProcess(), &ProcCreate, &ProcExit, &KernelTime,
                       &UserTime) == 0)
     return;
 
-  user_time = getTimeValueFromFILETIME(UserTime);
-  sys_time = getTimeValueFromFILETIME(KernelTime);
+  user_time = toDuration(UserTime);
+  sys_time = toDuration(KernelTime);
 }
 
 // Some LLVM programs such as bugpoint produce core files as a normal part of
@@ -123,6 +111,8 @@ void Process::PreventCoreFiles() {
   SetErrorMode(SEM_FAILCRITICALERRORS |
                SEM_NOGPFAULTERRORBOX |
                SEM_NOOPENFILEERRORBOX);
+
+  coreFilesPrevented = true;
 }
 
 /// Returns the environment variable \arg Name's value as a string encoded in
@@ -140,9 +130,10 @@ Optional<std::string> Process::GetEnv(StringRef Name) {
   size_t Size = MAX_PATH;
   do {
     Buf.reserve(Size);
+    SetLastError(NO_ERROR);
     Size =
-        GetEnvironmentVariableW(NameUTF16.data(), Buf.data(), Buf.capacity());
-    if (Size == 0)
+      GetEnvironmentVariableW(NameUTF16.data(), Buf.data(), Buf.capacity());
+    if (Size == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND)
       return None;
 
     // Try again with larger buffer.
@@ -156,98 +147,123 @@ Optional<std::string> Process::GetEnv(StringRef Name) {
   return std::string(Res.data());
 }
 
-static std::error_code windows_error(DWORD E) {
-  return mapWindowsError(E);
-}
+/// Perform wildcard expansion of Arg, or just push it into Args if it doesn't
+/// have wildcards or doesn't match any files.
+static std::error_code WildcardExpand(StringRef Arg,
+                                      SmallVectorImpl<const char *> &Args,
+                                      StringSaver &Saver) {
+  std::error_code EC;
 
-static void AllocateAndPush(const SmallVectorImpl<char> &S,
-                            SmallVectorImpl<const char *> &Vector,
-                            SpecificBumpPtrAllocator<char> &Allocator) {
-  char *Buffer = Allocator.Allocate(S.size() + 1);
-  ::memcpy(Buffer, S.data(), S.size());
-  Buffer[S.size()] = '\0';
-  Vector.push_back(Buffer);
-}
-
-/// Convert Arg from UTF-16 to UTF-8 and push it onto Args.
-static std::error_code
-ConvertAndPushArg(const wchar_t *Arg, SmallVectorImpl<const char *> &Args,
-                  SpecificBumpPtrAllocator<char> &Allocator) {
-  SmallVector<char, MAX_PATH> ArgString;
-  if (std::error_code ec = windows::UTF16ToUTF8(Arg, wcslen(Arg), ArgString))
-    return ec;
-  AllocateAndPush(ArgString, Args, Allocator);
-  return std::error_code();
-}
-
-/// \brief Perform wildcard expansion of Arg, or just push it into Args if it
-/// doesn't have wildcards or doesn't match any files.
-static std::error_code
-WildcardExpand(const wchar_t *Arg, SmallVectorImpl<const char *> &Args,
-               SpecificBumpPtrAllocator<char> &Allocator) {
-  if (!wcspbrk(Arg, L"*?")) {
-    // Arg does not contain any wildcard characters. This is the common case.
-    return ConvertAndPushArg(Arg, Args, Allocator);
+  // Don't expand Arg if it does not contain any wildcard characters. This is
+  // the common case. Also don't wildcard expand /?. Always treat it as an
+  // option.
+  if (Arg.find_first_of("*?") == StringRef::npos || Arg == "/?" ||
+      Arg == "-?") {
+    Args.push_back(Arg.data());
+    return EC;
   }
 
-  if (wcscmp(Arg, L"/?") == 0 || wcscmp(Arg, L"-?") == 0) {
-    // Don't wildcard expand /?. Always treat it as an option.
-    return ConvertAndPushArg(Arg, Args, Allocator);
+  // Convert back to UTF-16 so we can call FindFirstFileW.
+  SmallVector<wchar_t, MAX_PATH> ArgW;
+  EC = windows::UTF8ToUTF16(Arg, ArgW);
+  if (EC)
+    return EC;
+
+  // Search for matching files.
+  // FIXME:  This assumes the wildcard is only in the file name and not in the
+  // directory portion of the file path.  For example, it doesn't handle
+  // "*\foo.c" nor "s?c\bar.cpp".
+  WIN32_FIND_DATAW FileData;
+  HANDLE FindHandle = FindFirstFileW(ArgW.data(), &FileData);
+  if (FindHandle == INVALID_HANDLE_VALUE) {
+    Args.push_back(Arg.data());
+    return EC;
   }
 
   // Extract any directory part of the argument.
-  SmallVector<char, MAX_PATH> Dir;
-  if (std::error_code ec = windows::UTF16ToUTF8(Arg, wcslen(Arg), Dir))
-    return ec;
+  SmallString<MAX_PATH> Dir = Arg;
   sys::path::remove_filename(Dir);
   const int DirSize = Dir.size();
 
-  // Search for matching files.
-  WIN32_FIND_DATAW FileData;
-  HANDLE FindHandle = FindFirstFileW(Arg, &FileData);
-  if (FindHandle == INVALID_HANDLE_VALUE) {
-    return ConvertAndPushArg(Arg, Args, Allocator);
-  }
-
-  std::error_code ec;
   do {
-    SmallVector<char, MAX_PATH> FileName;
-    ec = windows::UTF16ToUTF8(FileData.cFileName, wcslen(FileData.cFileName),
+    SmallString<MAX_PATH> FileName;
+    EC = windows::UTF16ToUTF8(FileData.cFileName, wcslen(FileData.cFileName),
                               FileName);
-    if (ec)
+    if (EC)
       break;
 
-    // Push the filename onto Dir, and remove it afterwards.
-    llvm::sys::path::append(Dir, StringRef(FileName.data(), FileName.size()));
-    AllocateAndPush(Dir, Args, Allocator);
+    // Append FileName to Dir, and remove it afterwards.
+    llvm::sys::path::append(Dir, FileName);
+    Args.push_back(Saver.save(StringRef(Dir)).data());
     Dir.resize(DirSize);
   } while (FindNextFileW(FindHandle, &FileData));
 
   FindClose(FindHandle);
-  return ec;
+  return EC;
+}
+
+static std::error_code GetExecutableName(SmallVectorImpl<char> &Filename) {
+  // The first argument may contain just the name of the executable (e.g.,
+  // "clang") rather than the full path, so swap it with the full path.
+  wchar_t ModuleName[MAX_PATH];
+  size_t Length = ::GetModuleFileNameW(NULL, ModuleName, MAX_PATH);
+  if (Length == 0 || Length == MAX_PATH) {
+    return mapWindowsError(GetLastError());
+  }
+
+  // If the first argument is a shortened (8.3) name (which is possible even
+  // if we got the module name), the driver will have trouble distinguishing it
+  // (e.g., clang.exe v. clang++.exe), so expand it now.
+  Length = GetLongPathNameW(ModuleName, ModuleName, MAX_PATH);
+  if (Length == 0)
+    return mapWindowsError(GetLastError());
+  if (Length > MAX_PATH) {
+    // We're not going to try to deal with paths longer than MAX_PATH, so we'll
+    // treat this as an error.  GetLastError() returns ERROR_SUCCESS, which
+    // isn't useful, so we'll hardcode an appropriate error value.
+    return mapWindowsError(ERROR_INSUFFICIENT_BUFFER);
+  }
+
+  std::error_code EC = windows::UTF16ToUTF8(ModuleName, Length, Filename);
+  if (EC)
+    return EC;
+
+  // Make a copy of the filename since assign makes the StringRef invalid.
+  std::string Base = sys::path::filename(Filename.data()).str();
+  Filename.assign(Base.begin(), Base.end());
+  return std::error_code();
 }
 
 std::error_code
-Process::GetArgumentVector(SmallVectorImpl<const char *> &Args,
-                           ArrayRef<const char *>,
-                           SpecificBumpPtrAllocator<char> &ArgAllocator) {
-  int ArgCount;
-  wchar_t **UnicodeCommandLine =
-      CommandLineToArgvW(GetCommandLineW(), &ArgCount);
-  if (!UnicodeCommandLine)
-    return windows_error(::GetLastError());
+windows::GetCommandLineArguments(SmallVectorImpl<const char *> &Args,
+                                 BumpPtrAllocator &Alloc) {
+  const wchar_t *CmdW = GetCommandLineW();
+  assert(CmdW);
+  std::error_code EC;
+  SmallString<MAX_PATH> Cmd;
+  EC = windows::UTF16ToUTF8(CmdW, wcslen(CmdW), Cmd);
+  if (EC)
+    return EC;
 
-  Args.reserve(ArgCount);
-  std::error_code ec;
+  SmallVector<const char *, 20> TmpArgs;
+  StringSaver Saver(Alloc);
+  cl::TokenizeWindowsCommandLine(Cmd, Saver, TmpArgs, /*MarkEOLs=*/false);
 
-  for (int i = 0; i < ArgCount; ++i) {
-    ec = WildcardExpand(UnicodeCommandLine[i], Args, ArgAllocator);
-    if (ec)
-      break;
+  for (const char *Arg : TmpArgs) {
+    EC = WildcardExpand(Arg, Args, Saver);
+    if (EC)
+      return EC;
   }
 
-  LocalFree(UnicodeCommandLine);
-  return ec;
+  SmallVector<char, MAX_PATH> Arg0(Args[0], Args[0] + strlen(Args[0]));
+  SmallVector<char, MAX_PATH> Filename;
+  sys::path::remove_filename(Arg0);
+  EC = GetExecutableName(Filename);
+  if (EC)
+    return EC;
+  sys::path::append(Arg0, Filename);
+  Args[0] = Saver.save(Arg0).data();
+  return std::error_code();
 }
 
 std::error_code Process::FixupStandardFileDescriptors() {
@@ -308,6 +324,15 @@ bool Process::StandardErrHasColors() {
 
 static bool UseANSI = false;
 void Process::UseANSIEscapeCodes(bool enable) {
+#if defined(ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+  if (enable) {
+    HANDLE Console = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD Mode;
+    GetConsoleMode(Console, &Mode);
+    Mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(Console, Mode);
+  }
+#endif
   UseANSI = enable;
 }
 
@@ -329,6 +354,16 @@ class DefaultColors
 };
 
 DefaultColors defaultColors;
+
+WORD fg_color(WORD color) {
+  return color & (FOREGROUND_BLUE | FOREGROUND_GREEN |
+                  FOREGROUND_INTENSITY | FOREGROUND_RED);
+}
+
+WORD bg_color(WORD color) {
+  return color & (BACKGROUND_BLUE | BACKGROUND_GREEN |
+                  BACKGROUND_INTENSITY | BACKGROUND_RED);
+}
 }
 
 bool Process::ColorNeedsFlush() {
@@ -350,6 +385,7 @@ const char *Process::OutputBold(bool bg) {
 const char *Process::OutputColor(char code, bool bold, bool bg) {
   if (UseANSI) return colorcodes[bg?1:0][bold?1:0][code&7];
 
+  WORD current = DefaultColors::GetCurrentColor();
   WORD colors;
   if (bg) {
     colors = ((code&1) ? BACKGROUND_RED : 0) |
@@ -357,12 +393,14 @@ const char *Process::OutputColor(char code, bool bold, bool bg) {
       ((code&4) ? BACKGROUND_BLUE : 0);
     if (bold)
       colors |= BACKGROUND_INTENSITY;
+    colors |= fg_color(current);
   } else {
     colors = ((code&1) ? FOREGROUND_RED : 0) |
       ((code&2) ? FOREGROUND_GREEN : 0 ) |
       ((code&4) ? FOREGROUND_BLUE : 0);
     if (bold)
       colors |= FOREGROUND_INTENSITY;
+    colors |= bg_color(current);
   }
   SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), colors);
   return 0;
@@ -408,16 +446,66 @@ const char *Process::ResetColor() {
   return 0;
 }
 
-unsigned Process::GetRandomNumber() {
-  HCRYPTPROV HCPC;
-  if (!::CryptAcquireContextW(&HCPC, NULL, NULL, PROV_RSA_FULL,
-                              CRYPT_VERIFYCONTEXT))
-    report_fatal_error("Could not acquire a cryptographic context");
+static unsigned GetRandomNumberSeed() {
+  // Generate a random number seed from the millisecond-resolution Windows
+  // system clock and the current process id.
+  FILETIME Time;
+  GetSystemTimeAsFileTime(&Time);
+  DWORD Pid = GetCurrentProcessId();
+  return hash_combine(Time.dwHighDateTime, Time.dwLowDateTime, Pid);
+}
 
-  ScopedCryptContext CryptoProvider(HCPC);
-  unsigned Ret;
-  if (!::CryptGenRandom(CryptoProvider, sizeof(Ret),
-                        reinterpret_cast<BYTE *>(&Ret)))
-    report_fatal_error("Could not generate a random number");
-  return Ret;
+static unsigned GetPseudoRandomNumber() {
+  // Arrange to call srand once when this function is first used, and
+  // otherwise (if GetRandomNumber always succeeds in using
+  // CryptGenRandom) don't bother at all.
+  static int x = (static_cast<void>(::srand(GetRandomNumberSeed())), 0);
+  (void)x;
+  return ::rand();
+}
+
+unsigned Process::GetRandomNumber() {
+  // Try to use CryptGenRandom.
+  HCRYPTPROV HCPC;
+  if (::CryptAcquireContextW(&HCPC, NULL, NULL, PROV_RSA_FULL,
+                             CRYPT_VERIFYCONTEXT)) {
+    ScopedCryptContext CryptoProvider(HCPC);
+    unsigned Ret;
+    if (::CryptGenRandom(CryptoProvider, sizeof(Ret),
+                         reinterpret_cast<BYTE *>(&Ret)))
+      return Ret;
+  }
+
+  // If that fails, fall back to pseudo-random numbers.
+  return GetPseudoRandomNumber();
+}
+
+typedef NTSTATUS(WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+
+llvm::VersionTuple llvm::GetWindowsOSVersion() {
+  HMODULE hMod = ::GetModuleHandleW(L"ntdll.dll");
+  if (hMod) {
+    auto getVer = (RtlGetVersionPtr)::GetProcAddress(hMod, "RtlGetVersion");
+    if (getVer) {
+      RTL_OSVERSIONINFOEXW info{};
+      info.dwOSVersionInfoSize = sizeof(info);
+      if (getVer((PRTL_OSVERSIONINFOW)&info) == STATUS_SUCCESS) {
+        return llvm::VersionTuple(info.dwMajorVersion, info.dwMinorVersion, 0,
+                                  info.dwBuildNumber);
+      }
+    }
+  }
+  return llvm::VersionTuple(0, 0, 0, 0);
+}
+
+bool llvm::RunningWindows8OrGreater() {
+  // Windows 8 is version 6.2, service pack 0.
+  return GetWindowsOSVersion() >= llvm::VersionTuple(6, 2, 0, 0);
+}
+
+LLVM_ATTRIBUTE_NORETURN
+void Process::ExitNoCleanup(int RetCode) {
+  TerminateProcess(GetCurrentProcess(), RetCode);
+  llvm_unreachable("TerminateProcess doesn't return");
 }

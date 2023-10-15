@@ -1,9 +1,8 @@
 //===-- MipsAsmBackend.h - Mips Asm Backend  ------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -23,25 +22,28 @@ namespace llvm {
 
 class MCAssembler;
 struct MCFixupKindInfo;
+class MCRegisterInfo;
 class Target;
-class MCObjectWriter;
 
 class MipsAsmBackend : public MCAsmBackend {
-  Triple::OSType OSType;
-  bool IsLittle; // Big or little endian
-  bool Is64Bit;  // 32 or 64 bit words
+  Triple TheTriple;
+  bool IsN32;
 
 public:
-  MipsAsmBackend(const Target &T, Triple::OSType _OSType, bool _isLittle,
-                 bool _is64Bit)
-      : MCAsmBackend(), OSType(_OSType), IsLittle(_isLittle),
-        Is64Bit(_is64Bit) {}
+  MipsAsmBackend(const Target &T, const MCRegisterInfo &MRI, const Triple &TT,
+                 StringRef CPU, bool N32)
+      : MCAsmBackend(TT.isLittleEndian() ? support::little : support::big),
+        TheTriple(TT), IsN32(N32) {}
 
-  MCObjectWriter *createObjectWriter(raw_ostream &OS) const override;
+  std::unique_ptr<MCObjectTargetWriter>
+  createObjectTargetWriter() const override;
 
-  void applyFixup(const MCFixup &Fixup, char *Data, unsigned DataSize,
-                  uint64_t Value, bool IsPCRel) const override;
+  void applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
+                  const MCValue &Target, MutableArrayRef<char> Data,
+                  uint64_t Value, bool IsResolved,
+                  const MCSubtargetInfo *STI) const override;
 
+  Optional<MCFixupKind> getFixupKind(StringRef Name) const override;
   const MCFixupKindInfo &getFixupKindInfo(MCFixupKind Kind) const override;
 
   unsigned getNumFixupKinds() const override {
@@ -51,41 +53,22 @@ public:
   /// @name Target Relaxation Interfaces
   /// @{
 
-  /// MayNeedRelaxation - Check whether the given instruction may need
-  /// relaxation.
-  ///
-  /// \param Inst - The instruction to test.
-  bool mayNeedRelaxation(const MCInst &Inst) const override {
-    return false;
-  }
-
   /// fixupNeedsRelaxation - Target specific predicate for whether a given
   /// fixup requires the associated instruction to be relaxed.
-   bool fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
-                             const MCRelaxableFragment *DF,
-                             const MCAsmLayout &Layout) const override {
+  bool fixupNeedsRelaxation(const MCFixup &Fixup, uint64_t Value,
+                            const MCRelaxableFragment *DF,
+                            const MCAsmLayout &Layout) const override {
     // FIXME.
     llvm_unreachable("RelaxInstruction() unimplemented");
     return false;
   }
 
-  /// RelaxInstruction - Relax the instruction in the given fragment
-  /// to the next wider instruction.
-  ///
-  /// \param Inst - The instruction to relax, which may be the same
-  /// as the output.
-  /// \param [out] Res On return, the relaxed instruction.
-  void relaxInstruction(const MCInst &Inst, MCInst &Res) const override {}
+  bool writeNopData(raw_ostream &OS, uint64_t Count) const override;
 
-  /// @}
+  bool shouldForceRelocation(const MCAssembler &Asm, const MCFixup &Fixup,
+                             const MCValue &Target) override;
 
-  bool writeNopData(uint64_t Count, MCObjectWriter *OW) const override;
-
-  void processFixupValue(const MCAssembler &Asm, const MCAsmLayout &Layout,
-                         const MCFixup &Fixup, const MCFragment *DF,
-                         const MCValue &Target, uint64_t &Value,
-                         bool &IsResolved) override;
-
+  bool isMicroMips(const MCSymbol *Sym) const override;
 }; // class MipsAsmBackend
 
 } // namespace

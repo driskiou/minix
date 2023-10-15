@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.1 2011/07/05 17:22:23 joerg Exp $
+#	$NetBSD: Makefile,v 1.1 2019/11/11 22:45:04 joerg Exp $
 
 LIB=	LLVMARMTargetInfo
 

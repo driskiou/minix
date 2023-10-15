@@ -1,9 +1,8 @@
 (*===-- llvm_target.ml - LLVM OCaml Interface ------------------*- OCaml -*-===*
  *
- *                     The LLVM Compiler Infrastructure
- *
- * This file is distributed under the University of Illinois Open Source
- * License. See LICENSE.TXT for details.
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
  *===----------------------------------------------------------------------===*)
 
@@ -54,9 +53,6 @@ module DataLayout = struct
 
   external of_string : string -> t = "llvm_datalayout_of_string"
   external as_string : t -> string = "llvm_datalayout_as_string"
-  external add_to_pass_manager : [<Llvm.PassManager.any]
-                                 Llvm.PassManager.t -> t -> unit
-                               = "llvm_datalayout_add_to_pass_manager"
   external byte_order : t -> Endian.t = "llvm_datalayout_byte_order"
   external pointer_size : t -> int = "llvm_datalayout_pointer_size"
   external intptr_type : Llvm.llcontext -> t -> Llvm.lltype

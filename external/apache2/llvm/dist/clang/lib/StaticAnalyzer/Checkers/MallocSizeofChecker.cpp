@@ -1,9 +1,8 @@
 // MallocSizeofChecker.cpp - Check for dubious malloc arguments ---*- C++ -*-=//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 //
@@ -13,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ClangSACheckers.h"
+#include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/StaticAnalyzer/Core/BugReporter/BugReporter.h"
@@ -65,10 +64,9 @@ public:
   }
 
   void VisitChildren(const Stmt *S) {
-    for (Stmt::const_child_iterator I = S->child_begin(), E = S->child_end();
-         I!=E; ++I)
-      if (const Stmt *child = *I)
-        VisitChild(S, child);
+    for (const Stmt *Child : S->children())
+      if (Child)
+        VisitChild(S, Child);
   }
 
   TypeCallPair VisitCastExpr(const CastExpr *E) {
@@ -144,20 +142,20 @@ static bool typesCompatible(ASTContext &C, QualType A, QualType B) {
   while (true) {
     A = A.getCanonicalType();
     B = B.getCanonicalType();
-  
+
     if (A.getTypePtr() == B.getTypePtr())
       return true;
-    
+
     if (const PointerType *ptrA = A->getAs<PointerType>())
       if (const PointerType *ptrB = B->getAs<PointerType>()) {
         A = ptrA->getPointeeType();
         B = ptrB->getPointeeType();
         continue;
       }
-      
+
     break;
   }
-  
+
   return false;
 }
 
@@ -185,7 +183,7 @@ public:
       QualType CastedType = i->CastedExpr->getType();
       if (!CastedType->isPointerType())
         continue;
-      QualType PointeeType = CastedType->getAs<PointerType>()->getPointeeType();
+      QualType PointeeType = CastedType->getPointeeType();
       if (PointeeType->isVoidType())
         continue;
 
@@ -250,4 +248,8 @@ public:
 
 void ento::registerMallocSizeofChecker(CheckerManager &mgr) {
   mgr.registerChecker<MallocSizeofChecker>();
+}
+
+bool ento::shouldRegisterMallocSizeofChecker(const CheckerManager &mgr) {
+  return true;
 }
