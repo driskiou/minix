@@ -43,6 +43,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
+#include "atomic.h"
 
 #if !defined(__minix)
 #include <pthread.h>
@@ -54,9 +56,6 @@
 	if (sched_yield) sched_yield();\
 	} while(0)
 #endif /* !defined(__minix) */
-
-#include <assert.h>
-#include "atomic.h"
 
 // Older GCC doesn't define __LITTLE_ENDIAN__
 #ifndef __LITTLE_ENDIAN__

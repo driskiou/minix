@@ -442,9 +442,14 @@ impl::child::wait(void)
                            "process " + text::to_string(m_pid), errno);
 
     if (m_stdout != -1)
-        ::close(m_stdout); m_stdout = -1;
+        ::close(m_stdout); 
+        
+    m_stdout = -1;
+
     if (m_stderr != -1)
-        ::close(m_stderr); m_stderr = -1;
+        ::close(m_stderr);
+        
+    m_stderr = -1;
 
     m_waited = true;
     return status(s);

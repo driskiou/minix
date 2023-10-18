@@ -306,7 +306,7 @@ __archive_string_utf8_w(struct archive_string *as)
 			return (NULL);
 		}
 		src += n;
-		if (wc >= 0xDC00 && wc <= 0xDBFF) {
+		if (/*wc >= 0xDC00 && wc <= 0xDBFF*/ 0) {
 			/* This is a leading surrogate; some idiot
 			 * has translated UTF16 to UTF8 without combining
 			 * surrogates; rebuild the full code point before

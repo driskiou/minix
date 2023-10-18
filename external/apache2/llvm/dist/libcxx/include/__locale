@@ -450,12 +450,12 @@ public:
     static const mask blank  = _BLANK;
     static const mask __regex_word = 0x80;
 # define _LIBCPP_CTYPE_MASK_IS_COMPOSITE_PRINT
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__) || defined(__minix)
 # ifdef __APPLE__
     typedef __uint32_t mask;
 # elif defined(__FreeBSD__)
     typedef unsigned long mask;
-# elif defined(__EMSCRIPTEN__) || defined(__NetBSD__)
+# elif defined(__EMSCRIPTEN__) || defined(__NetBSD__) || defined(__minix)
     typedef unsigned short mask;
 # endif
     static const mask space  = _CTYPE_S;
@@ -468,7 +468,7 @@ public:
     static const mask punct  = _CTYPE_P;
     static const mask xdigit = _CTYPE_X;
 
-# if defined(__NetBSD__)
+# if defined(__NetBSD__) || defined(__minix)
     static const mask blank  = _CTYPE_BL;
     // NetBSD defines classes up to 0x2000
     // see sys/ctype_bits.h, _CTYPE_Q
@@ -724,7 +724,7 @@ public:
     static const int* __classic_upper_table() _NOEXCEPT;
     static const int* __classic_lower_table() _NOEXCEPT;
 #endif
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) || defined(__minix)
     static const short* __classic_upper_table() _NOEXCEPT;
     static const short* __classic_lower_table() _NOEXCEPT;
 #endif

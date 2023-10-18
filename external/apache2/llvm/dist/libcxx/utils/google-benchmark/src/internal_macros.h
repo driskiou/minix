@@ -54,7 +54,7 @@
   #endif
 #elif defined(__FreeBSD__)
   #define BENCHMARK_OS_FREEBSD 1
-#elif defined(__NetBSD__)
+#elif defined(__NetBSD__) || defined(__minix)
   #define BENCHMARK_OS_NETBSD 1
 #elif defined(__OpenBSD__)
   #define BENCHMARK_OS_OPENBSD 1

@@ -12,7 +12,7 @@ which curl >/dev/null
 if [ $? -eq 0 ]; then
 	FETCH="curl -O -f"
 fi
-
+ 
 # Fetch sources if not available
 if [ ! -d dist ];
 then

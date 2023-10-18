@@ -320,7 +320,8 @@ build: .PHONY .MAKE
 .else
 	@echo "Build started at: ${START_TIME}"
 .for tgt in ${BUILDTARGETS}
-	${MAKEDIRTARGET} . ${tgt}
+	${MAKEDIRTARGET} . ${tgt} VERBOSE=1
+	
 .endfor
 	${MAKEDIRTARGET} etc install-etc-release
 .if defined(__MINIX)

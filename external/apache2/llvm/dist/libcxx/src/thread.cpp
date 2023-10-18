@@ -19,7 +19,7 @@
 # include <unistd.h> // for sysconf
 #endif
 
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) || defined(__minix)
 #pragma weak pthread_create // Do not create libpthread dependency
 #endif
 

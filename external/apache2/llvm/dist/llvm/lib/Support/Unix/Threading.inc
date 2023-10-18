@@ -112,7 +112,7 @@ uint64_t llvm::get_threadid() {
   return Self;
 #elif defined(__FreeBSD__)
   return uint64_t(pthread_getthreadid_np());
-#elif defined(__NetBSD__)
+#elif defined(__NetBSD__) ||  defined(__minix)
   return uint64_t(_lwp_self());
 #elif defined(__OpenBSD__)
   return uint64_t(getthrid());
@@ -127,7 +127,7 @@ uint64_t llvm::get_threadid() {
 
 
 static constexpr uint32_t get_max_thread_name_length_impl() {
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) ||  defined(__minix)
   return PTHREAD_MAX_NAMELEN_NP;
 #elif defined(__APPLE__)
   return 64;
@@ -172,7 +172,7 @@ void llvm::set_thread_name(const Twine &Name) {
 #endif
 #elif defined(__FreeBSD__) || defined(__OpenBSD__)
   ::pthread_set_name_np(::pthread_self(), NameStr.data());
-#elif defined(__NetBSD__)
+#elif defined(__NetBSD__) ||  defined(__minix)
   ::pthread_setname_np(::pthread_self(), "%s",
     const_cast<char *>(NameStr.data()));
 #elif defined(__APPLE__)
@@ -219,7 +219,7 @@ void llvm::get_thread_name(SmallVectorImpl<char> &Name) {
   }
   free(kp);
   return;
-#elif defined(__NetBSD__)
+#elif defined(__NetBSD__) ||  defined(__minix)
   constexpr uint32_t len = get_max_thread_name_length_impl();
   char buf[len];
   ::pthread_getname_np(::pthread_self(), buf, len);

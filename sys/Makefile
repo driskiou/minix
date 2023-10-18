@@ -7,6 +7,7 @@ SUBDIR=	altq arch dev fs \
         netmpls \
 	sys ufs uvm
 
+
 .if !defined(__MINIX)
 # interrupt implementation depends on the kernel within the port
 #.if (${MACHINE} != "evbppc")

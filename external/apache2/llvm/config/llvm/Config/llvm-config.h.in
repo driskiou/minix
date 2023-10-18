@@ -19,19 +19,22 @@
 /* #undef LINK_POLLY_INTO_TOOLS */
 
 /* Target triple LLVM will generate code for by default */
-#define LLVM_DEFAULT_TARGET_TRIPLE "x86_64--netbsd"
+#define LLVM_DEFAULT_TARGET_TRIPLE "i586-elf32-minix"
 
 /* Define to enable checks that alter the LLVM C++ ABI */
 #define LLVM_ENABLE_ABI_BREAKING_CHECKS 0
 
+#if !defined(__minix)
 /* Define if threads enabled */
 #define LLVM_ENABLE_THREADS 1
+#endif /* !defined(__MINIX) */
+
 
 /* Has gcc/MSVC atomic intrinsics */
 #define LLVM_HAS_ATOMICS 1
 
 /* Host triple LLVM will be executed on */
-#define LLVM_HOST_TRIPLE "x86_64--netbsd"
+#define LLVM_HOST_TRIPLE "i586-elf32-minix"
 
 /* LLVM architecture name for the native architecture, if available */
 #define LLVM_NATIVE_ARCH X86

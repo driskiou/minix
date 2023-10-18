@@ -1011,7 +1011,10 @@
 ./usr/include/adosfs				base-c-usr
 ./usr/include/altq				base-c-usr
 ./usr/include/arpa				base-c-usr
-./usr/include/c++				base-cxx-usr
+./usr/include/c++/__iterator			base-cxx-usr
+./usr/include/c++/__memory			base-cxx-usr
+./usr/include/c++/__ranges			base-cxx-usr
+./usr/include/c++/__utility			base-cxx-usr
 ./usr/include/c++/experimental			base-cxx-usr
 ./usr/include/c++/ext				base-cxx-usr
 ./usr/include/cdk				base-obsolete		obsolete

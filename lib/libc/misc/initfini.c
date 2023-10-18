@@ -74,7 +74,7 @@ void _libc_init(void);
  * Declare as common symbol to allow new libc with older binaries to
  * not trigger an undefined reference.
  */
-struct ps_strings *__ps_strings;
+static struct ps_strings *__ps_strings;
 
 /*
  * _libc_init is called twice.  The first time explicitly by crt0.o

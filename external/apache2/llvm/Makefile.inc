@@ -37,16 +37,16 @@ HOST_CXXFLAGS+=	-O2 -fno-rtti -fno-exceptions -fno-strict-aliasing
 HOST_CXXFLAGS+=	${MODULES_CXXFLAGS}
 .endif
 HOST_CXXFLAGS+=	-std=c++14
-LLVM_TARGETS=	x86,powerpc,sparc,aarch64,arm,mips
+LLVM_TARGETS=	x86
 .else
 LLVM_INCLUDE_CONFIG=	${LLVM_TOPLEVEL}/config
 CLANG_INCLUDE_CONFIG=	${LLVM_TOPLEVEL}/config
 LLVM_INCLUDE_OBJDIR!=	cd ${LLVM_TOPLEVEL}/include && ${PRINTOBJDIR}
 LLVM_MODULE_CACHE=	${LLVM_INCLUDE_OBJDIR}/module.cache
-LLVM_TARGETS=	x86,powerpc,sparc,aarch64,arm,mips,amdgpu
+LLVM_TARGETS=	x86
 CXXFLAGS+=		${${ACTIVE_CC} == "clang":? ${MODULES_CXXFLAGS} :}
 
-CXXFLAGS+=	-std=c++14
+CXXFLAGS+=	-std=c++11
 .if ${MKDEBUG:Uno} != "no"
 CXXFLAGS+=	-g1
 .endif
@@ -59,7 +59,11 @@ LDADD+=		-lexecinfo
 CPPFLAGS+=	-I${LLVM_INCLUDE_OBJDIR} -I${LLVM_INCLUDE_CONFIG} \
 		-I${CLANG_INCLUDE_CONFIG}
 
+.if !defined(__MINIX)
 LLVM_PLATFORM=${MACHINE_GNU_ARCH}--netbsd
+.else
+LLVM_PLATFORM=${MACHINE_GNU_ARCH}-elf32-minix
+
 
 LLVM_CONFIGURE_ARGS=	\
 	--enable-targets=${LLVM_TARGETS} \
@@ -70,6 +74,12 @@ LLVM_CONFIGURE_ARGS=	\
 	--with-clang-srcdir=${CLANG_SRCDIR} \
 	--host=${LLVM_PLATFORM} --disable-compiler-version-checks \
 	--disable-bindings llvm_cv_gnu_make_command=${MAKE}
+
+.if ${HOST_OSTYPE:C/\-.*//} == "Minix"
+LLVM_CONFIGURE_ARGS+= --disable-threads
+CPPFLAGS+= -D_NLS_PRIVATE=1
+.endif # ${HOST_OSTYPE:C/\-.*//} == "Minix"
+.endif # !defined(__MINIX)
 
 .for tool in circo dot dotty fdp neato twopi xdot
 LLVM_CONFIGURE_ARGS+= ac_cv_path_${tool:tu}="echo ${tool}"

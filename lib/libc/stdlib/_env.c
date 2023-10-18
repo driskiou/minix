@@ -94,7 +94,9 @@ __warn_references(__findenv,
 /* Our initialization function. */
 void __libc_env_init(void);
 
+#if !defined(__minix)
 char **environ;
+#endif 
 
 /*ARGSUSED*/
 static signed int

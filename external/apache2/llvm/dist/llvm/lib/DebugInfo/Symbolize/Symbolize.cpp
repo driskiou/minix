@@ -257,7 +257,7 @@ bool findDebugBinary(const std::string &OrigPath,
     // Try <FallbackDebugPath>/absolute/path/to/original_binary/debuglink_name
     DebugPath = FallbackDebugPath;
   } else {
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) || defined(__minix)
     // Try /usr/libdata/debug/absolute/path/to/original_binary/debuglink_name
     DebugPath = "/usr/libdata/debug";
 #else
@@ -365,7 +365,7 @@ bool findDebugBinary(const std::vector<std::string> &DebugFileDirectory,
   };
   if (DebugFileDirectory.empty()) {
     SmallString<128> Path = getDebugPath(
-#if defined(__NetBSD__)
+#if defined(__NetBSD__) || defined(__minix)
       // Try /usr/libdata/debug/.build-id/../...
       "/usr/libdata/debug"
 #else

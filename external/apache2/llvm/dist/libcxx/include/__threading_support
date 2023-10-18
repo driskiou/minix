@@ -25,9 +25,14 @@
 #pragma GCC system_header
 #endif
 
-#if defined(_LIBCPP_HAS_THREAD_API_EXTERNAL)
+#if defined(_LIBCPP_HAS_THREAD_API_EXTERNAL) && !defined(__minix)
 # include <__external_threading>
-#elif !defined(_LIBCPP_HAS_NO_THREADS)
+
+#elif defined(__minix)
+#include <minix/mthread.h>
+#define _LIBCPP_NO_THREAD_SAFETY_ANALYSIS
+#define _LIBCPP_HAS_THREAD_API_PTHREAD
+#elif !defined(_LIBCPP_HAS_NO_THREADS) && !defined(__minix)
 
 #if defined(_LIBCPP_HAS_THREAD_API_PTHREAD)
 # include <pthread.h>

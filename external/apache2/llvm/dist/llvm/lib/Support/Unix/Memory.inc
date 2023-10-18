@@ -107,7 +107,7 @@ Memory::allocateMappedMemory(size_t NumBytes,
 #endif
   int Protect = getPosixProtectionFlags(PFlags);
 
-#if defined(__NetBSD__) && defined(PROT_MPROTECT)
+#if (defined(__NetBSD__) || defined(__minix)) && defined(PROT_MPROTECT)
   Protect |= PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC);
 #endif
 

@@ -98,6 +98,7 @@ std::string x86::getX86TargetCPU(const ArgList &Args,
     return "i486";
   case llvm::Triple::Haiku:
   case llvm::Triple::OpenBSD:
+  case llvm::Triple::Minix:
     return "i586";
   case llvm::Triple::FreeBSD:
     return "i686";

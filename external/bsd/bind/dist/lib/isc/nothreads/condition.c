@@ -23,4 +23,4 @@
 
 #include <isc/util.h>
 
-EMPTY_TRANSLATION_UNIT
+//EMPTY_TRANSLATION_UNIT
