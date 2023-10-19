@@ -590,7 +590,7 @@
 ./usr/libdata/debug/usr/lib/libpuffs.so.2.0.debug       minix-debug     debug
 ./usr/libdata/debug/usr/lib/librefuse.so.2.0.debug      minix-debug     debug
 ./usr/libdata/debug/usr/lib/libsaslc.so.0.0.debug       minix-debug     debug
-./usr/libdata/debug/usr/lib/libsqlite3.so.1.2.debug     minix-debug     debug
+./usr/libdata/debug/usr/lib/libsqlite3.so.1.5.debug     minix-debug     debug
 ./usr/libdata/debug/usr/lib/libssl.so.10.5.debug        minix-debug     debug
 ./usr/libdata/debug/usr/lib/libstdc++.so.6.3.debug      minix-debug     libstdcxx,debug
 ./usr/libdata/debug/usr/lib/libsys.so.0.0.debug         minix-debug     debug

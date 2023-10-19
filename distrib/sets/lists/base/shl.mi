@@ -749,7 +749,7 @@
 ./usr/lib/libsl.so.5.0				base-krb5-shlib		compatfile,kerberos
 ./usr/lib/libsqlite3.so				base-sys-shlib		compatfile
 ./usr/lib/libsqlite3.so.1			base-sys-shlib		compatfile
-./usr/lib/libsqlite3.so.1.2			base-sys-shlib		compatfile
+./usr/lib/libsqlite3.so.1.5			base-sys-shlib		compatfile
 ./usr/lib/libss.so				base-obsolete		obsolete
 ./usr/lib/libssh.so				base-secsh-shlib	compatfile,crypto
 ./usr/lib/libssh.so.26				base-secsh-shlib	compatfile,crypto
