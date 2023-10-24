@@ -3688,7 +3688,6 @@
 ./usr/share/zoneinfo/Canada                             minix-base
 ./usr/share/zoneinfo/Canada/Atlantic                    minix-base
 ./usr/share/zoneinfo/Canada/Central                     minix-base
-./usr/share/zoneinfo/Canada/East-Saskatchewan           minix-base
 ./usr/share/zoneinfo/Canada/Eastern                     minix-base
 ./usr/share/zoneinfo/Canada/Mountain                    minix-base
 ./usr/share/zoneinfo/Canada/Newfoundland                minix-base
@@ -3907,7 +3906,6 @@
 ./usr/share/zoneinfo/US/Indiana-Starke                  minix-base
 ./usr/share/zoneinfo/US/Michigan                        minix-base
 ./usr/share/zoneinfo/US/Mountain                        minix-base
-./usr/share/zoneinfo/US/Pacific-New                     minix-base
 ./usr/share/zoneinfo/US/Pacific                         minix-base
 ./usr/share/zoneinfo/US/Samoa                           minix-base
 ./usr/share/zoneinfo/UTC                                minix-base

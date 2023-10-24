@@ -5567,7 +5567,6 @@
 ./usr/share/zoneinfo/Canada			base-sys-share
 ./usr/share/zoneinfo/Canada/Atlantic		base-sys-share		share
 ./usr/share/zoneinfo/Canada/Central		base-sys-share		share
-./usr/share/zoneinfo/Canada/East-Saskatchewan	base-sys-share		share
 ./usr/share/zoneinfo/Canada/Eastern		base-sys-share		share
 ./usr/share/zoneinfo/Canada/Mountain		base-sys-share		share
 ./usr/share/zoneinfo/Canada/Newfoundland	base-sys-share		share
@@ -5841,7 +5840,6 @@
 ./usr/share/zoneinfo/US/Michigan		base-sys-share		share
 ./usr/share/zoneinfo/US/Mountain		base-sys-share		share
 ./usr/share/zoneinfo/US/Pacific			base-sys-share		share
-./usr/share/zoneinfo/US/Pacific-New		base-sys-share		share
 ./usr/share/zoneinfo/US/Samoa			base-sys-share		share
 ./usr/share/zoneinfo/UTC			base-sys-share		share
 ./usr/share/zoneinfo/Universal			base-sys-share		share
