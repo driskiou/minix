@@ -1,0 +1,11 @@
+diff -rNU3 dist/gold/errors.h dist.mxm/gold/errors.h
+--- dist/gold/errors.h	2023-10-24 08:18:29.199988198 +0200
++++ dist.mxm/gold/errors.h	2023-10-24 07:45:17.359995796 +0200
+@@ -24,6 +24,7 @@
+ #define GOLD_ERRORS_H
+ 
+ #include <cstdarg>
++#include <string>
+ 
+ #include "gold-threads.h"
+ 
