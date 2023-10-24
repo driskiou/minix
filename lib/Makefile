@@ -130,7 +130,7 @@ SUBDIR+=        ../external/cddl/osnet/lib/libuutil
 
 SUBDIR+=	../external/mit/expat/lib
 
-SUBDIR+=	../external/public-domain/sqlite/lib
+
 
 #SUBDIR+=	../gnu/lib/libmalloc
 
@@ -327,6 +327,9 @@ SUBDIR+=	../sys/rump/kern/lib
 SUBDIR+=	../sys/rump/net/lib
 .endif
 .endif
+
+# depends on libm
+SUBDIR+=	../external/public-domain/sqlite/lib
 
 # Lua bindings come last, they might depend on anything
 SUBDIR+=	lua
