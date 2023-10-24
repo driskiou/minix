@@ -11,6 +11,9 @@ FETCH=ftp
 which curl >/dev/null
 if [ $? -eq 0 ]; then
 	FETCH="curl -O -f"
+else
+echo "You have to install curl"
+exit 1
 fi
 
 # Fetch sources if not available
