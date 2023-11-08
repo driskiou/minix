@@ -1,149 +1,45 @@
-20170303:
-	The entire network stack has been replaced.  This requires two updates.
-	First, BEFORE rebooting, either before or after rebuilding the system,
-	copy the following new configuration files from /usr/src/etc into /etc:
-
-		# cd /usr/src/etc
-		# cp hosts inetd.conf named.conf nsswitch.conf /etc
-
-	Second, AFTER rebooting, set up a new network configuration for your
-	system.  Run netconf(8) and and follow its instructions:
-
-		# netconf
-
-	If you previously configured your network statically and you forgot its
-	settings, take a look at /etc/rc.network.  That file and /etc/inet.conf
-	are no longer used now.  See the ifconfig.if(5) manual page for more
-	information about how network settings are specified going forward.
-
-20170223:
-	Edit your /etc/rc.conf to set rc_configured to YES.  If you do not,
-	your system will refuse to enter multi-user mode after the next reboot.
-	You can then still make the same edit from single user mode, but that
-	is not as easy.
-
-20170222:
-	Because of naming conflicts, the MINIX 3 service(8) utility has been
-	renamed to "minix-service".  After successfully rebuilding the system
-	*and* rebooting (no earlier!), remove the old service utility:
-
-		# rm /bin/service
-
-	Better yet, use the postinstall(8) command to remove all files marked
-	as obsolete.  It is not a bad idea to do this every now and then:
-
-		# postinstall fix obsolete
-
-	..but only ever after the reboot!  Either way, deleting the old service
-	tool will avoid conflicts with the same-named NetBSD utility later on.
-
-20170218:
-	Before starting a build, you will have to update your master.passwd and
-	group files in /etc.  This is needed because we have switched over from
-	the old set of MINIX users and groups to the new set of NetBSD users
-	and groups, as needed by various imported tools.  Follow these steps.
-
-	1. Make a back-up copy of your old master.passwd and group files:
-
-		# cp /etc/master.passwd /etc/master.passwd~
-		# cp /etc/group /etc/group~
-
-	2. Install /usr/src/etc/master.passwd to /etc/master.passwd, and
-	   install /usr/src/etc/group to /etc/group.  If you have NOT created
-	   any local user accounts yourself, for example because you are
-	   upgrading a fresh MINIX 3 installation right away, all you need to
-	   do is copy over those two files:
-
-		# cp /usr/src/etc/master.passwd /etc/master.passwd
-		# cp /usr/src/etc/group /etc/group
-
-	   If you DO have custom user accounts or groups, you need to merge
-	   their lines (and only those!) into the new master.passwd and group
-	   files manually.  If you are unsure whether you have such custom
-	   entries, you can use the following commands:
-
-		# cd /usr/src
-		# git show 68804c2:etc/master.passwd | diff -u - /etc/master.passwd
-		# git show 68804c2:etc/group | diff -u - /etc/group
-
-	   This should show any changes compared to the old two templates.  If
-	   you have such changes, you need to reapply them after copying over
-	   the new two templates.  The following procedure shows one approach:
-
-		# cd /usr/src
-		# cp /etc/master.passwd /tmp/my-passwd
-		# vi /tmp/my-passwd
-		<remove any lines from /tmp/my-passwd that have no password>
-		# cp /usr/src/etc/master.passwd /etc/master.passwd
-		# cat /tmp/my-passwd >> /etc/master.passwd
-		# rm /tmp/my-passwd
-
-	   ..and follow a similar procedure for /etc/group.
-
-	3. Once the new files are in place, update all derived password files:
-
-		# pwd_mkdb -p /etc/master.passwd
-
-	   If you did everything right so far, the following command:
-
-		# postinstall check uid gid
-
-	   ..should show "postinstall checks passed: uid gid" and no failures.
-
-	4. Now perform a full build as usual:
-
-		# cd /usr/src
-		# make build
-
-	   As part of the build, all /dev files will get new proper ownership.
-
-	5. There may still be files that are owned by users and groups that now
-	   have been renumbered.  It is advisable to run at least the following
-	   three commands to apply the renumbering to the most common files:
-
-		# find / -user 2 -exec chown bin \{\} \;
-		# find / -user 5 -exec chown uucp \{\} \;
-		# find / -user 9998 -exec chown games \{\} \;
-
-	   If you have installed custom programs, you may want to check whether
-	   they are not affected by the change.  This should be rare, though.
-
-	Until a subsequent reboot, various running services will show up in
-	ps(1) output and /proc as owned by "postfix".  This is no problem.
-
-20170122:
-	MINIX 3 did not import NetBSD's passwd.conf file, which makes the
-	userland fall back by default to the old, broken UNIX password hashing
-	algorithm. Among other problems, it truncates passwords to the first
-	eight characters.
-
-	Please install /etc/passwd.conf and reset your passwords with passwd.
-
-20160702:
-	Some tools are required to generate the locale resources which are
-	embedded into libintl, which is why you need to run the following:
-
-	for t in gencat locale mkcsmapper mkesdb mklocale
-	do
-		make -C /usr/src/usr.bin/${t} all install
-	done
-
-	Then the usual "make build".
-
-20150623:
-	In order to use the new Unix98 PTYs, and to ensure that the test set
-	continues to pass, please add the following line to your /etc/fstab:
-
-	"none	/dev/pts	ptyfs	rw,rslabel=ptyfs	0	0"
-
-20140801:
-	As the ABI went under heavy changes it is not possible to do a source
-	upgrade (make build) between:
-		commit 7ebdb97a28234e0181f93a8b786331dda507482
-	        Date:   Sun Feb 16 20:08:20 2014 +0000
-	and
-		commit f1deff716ea30b28693c16f8e48ba1a369e2e922
-		Date:   Thu Jul 31 18:36:24 2014 +0200
-
-	WARNING: Attempting to do so will break your system beyond repair, and
-		 require a full reinstallation. You have been warned.
+20091212:
+        /etc/drivers.conf has been renamed to /etc/system.conf.
+        user "service" has been added to password file /etc/passwd.
+20060818:
+	You need flex in your $PATH, which has become part of the base
+	system. This needs bigger binaries.
+	If you don't have flex yet, you can compile it first by doing:
+	# cp /usr/src/etc/binary_sizes* /etc
+	# binsizes big
+	# cd /usr/src/commands/flex-2.5.4 
+	# sh build
+20061222:
+	Install binaries in the right order because the new readdir
+	implementation and the new mount program are incompatible
+	with older kernels and the new kernels require the new mount.
+	# cd /usr/src
+	# make includes
+	# make libraries
+	# make cmds
+	# make depend
+	# cd /usr/src/tools
+	# make hdboot
+	# make install
+	# cd ..
+	# make install
+	Installing fails for boot. Reboot the system
+	# reboot -x 'unset image; boot'
+	Now install everything
+	# cd /usr/src
+	# make install
+20061222:
+	The archictecture-dependent/-independent split needs ARCH=<arch>
+	in /etc/make.conf, included by some Makefiles and sourced by
+	some shell scripts. To install it, type 'make install' in
+	src/etc, or simply copy the file over.
+20070118:
+	drivers.conf has been updated to include an ACL for mfs. it has
+	to be installed before rebooting after an update of the mount command.
+20070212 (r2751):
+	mkfs needs more memory to make an image; chmem it or do
+	# touch mkfs.c ; make /usr/bin/mkfs
+	in /usr/src/commands/simple.
+20091006 (r5422):
+	OSS requires an improved make to be compiled; run "make install"
+	in /usr/src/commands/make before running "make world".

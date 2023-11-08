@@ -3,7 +3,7 @@
 # daily - daily cleanup of the system.
 
 # Doesn't make sense when running from CD
-if [ ! -z $(sysenv bootcd) ]
+if [ -f /CD ]
 then	exit
 fi
 
@@ -25,9 +25,7 @@ then
     set -- `ls -lT $timestamp`
     test "$6 $7 $9" = "$(date '+%b %d %Y')" && exit
 fi
-
-# Update last-run time
-echo >$timestamp
+>$timestamp
 
 # Remove three day old files from various tmp dirs.
 cleantmp -3 /tmp /usr/tmp /usr/preserve /usr/spool/lpd /usr/spool/at/past
@@ -50,8 +48,8 @@ cycle()
     fi
 }
 
-cycle 100 wtmp
-cycle 100 log
+cycle 100 wtmp 
+cycle 100 log 
 cycle  20 ftplog
 cycle 200 aftplog
 
@@ -67,9 +65,6 @@ do
 	test -f /etc/$file && cp -p /etc/$file old/$file.1
     fi
 done
-
-# Update manpage index but don't warn about nonexistant dirs
-/usr/libexec/makewhatis -f 2>/dev/null
 
 # Continue with a local script if present.
 test -f /usr/local/etc/daily && sh /usr/local/etc/daily $caller

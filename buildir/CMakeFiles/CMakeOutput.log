@@ -1,0 +1,451 @@
+The target system is: Generic -  - 
+The host system is: Linux - 6.1.0-13-amd64 - x86_64
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "CMakeCCompilerId.o"
+
+The C compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdC/CMakeCCompilerId.o"
+
+Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+Compiler: /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ 
+Build flags: 
+Id flags: -c 
+
+The output was:
+0
+
+
+Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CMakeCXXCompilerId.o"
+
+The CXX compiler identification is Clang, found in "/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/3.25.1/CompilerIdCXX/CMakeCXXCompilerId.o"
+
+Detecting C compiler ABI info compiled with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_1ae1d/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_1ae1d.dir/build.make CMakeFiles/cmTC_1ae1d.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz'
+Building C object CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386   -v -MD -MT CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz/CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -isysroot /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+#include "..." search starts here:
+#include <...> search starts here:
+ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6
+ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include
+End of search list.
+Linking C executable cmTC_1ae1d
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_1ae1d.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386  -v CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -o cmTC_1ae1d 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_1ae1d /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -lc /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz'
+
+
+
+Parsed C implicit include dir info from above output: rv=done
+  found start of include info
+  found start of implicit include info
+    add: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+    add: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  end of search list found
+  collapse include dir [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6] ==> [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+  collapse include dir [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include] ==> [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  implicit include dirs: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+
+
+Parsed C implicit link information from above output:
+  link line regex: [^( *|.*[/\])(i586-elf32-minix-ld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\]+-)?ld|collect2)[^/\]*( |$)]
+  ignore line: [Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz]
+  ignore line: []
+  ignore line: [Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_1ae1d/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_1ae1d.dir/build.make CMakeFiles/cmTC_1ae1d.dir/build]
+  ignore line: [gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz']
+  ignore line: [Building C object CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj]
+  ignore line: [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386   -v -MD -MT CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c]
+  ignore line: [clang version 3.6 (branches/release_36 237755)]
+  ignore line: [Target: i586-elf32-minix]
+  ignore line: [Thread model: posix]
+  ignore line: [ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz/CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -isysroot /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-rUGFQz -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c]
+  ignore line: [clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix]
+  ignore line: [ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"]
+  ignore line: [#include "..." search starts here:]
+  ignore line: [#include <...> search starts here:]
+  ignore line: [ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+  ignore line: [ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  ignore line: [End of search list.]
+  ignore line: [Linking C executable cmTC_1ae1d]
+  ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_1ae1d.dir/link.txt --verbose=1]
+  ignore line: [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386  -v CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -o cmTC_1ae1d ]
+  ignore line: [clang version 3.6 (branches/release_36 237755)]
+  ignore line: [Target: i586-elf32-minix]
+  ignore line: [Thread model: posix]
+  link line: [ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_1ae1d /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj -lc /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld] ==> ignore
+    arg [--sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386] ==> ignore
+    arg [--eh-frame-hdr] ==> ignore
+    arg [-dynamic-linker] ==> ignore
+    arg [/usr/libexec/ld.elf_so] ==> ignore
+    arg [-m] ==> ignore
+    arg [elf_i386_minix] ==> ignore
+    arg [-o] ==> ignore
+    arg [cmTC_1ae1d] ==> ignore
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o]
+    arg [CMakeFiles/cmTC_1ae1d.dir/CMakeCCompilerABI.c.obj] ==> ignore
+    arg [-lc] ==> lib [c]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+  implicit libs: [c]
+  implicit objs: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+  implicit dirs: []
+  implicit fwks: []
+
+
+Detecting CXX compiler ABI info compiled with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_ceeb2/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_ceeb2.dir/build.make CMakeFiles/cmTC_ceeb2.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh'
+Building CXX object CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386   -v -MD -MT CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -MF CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj.d -o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -c /usr/share/cmake-3.25/Modules/CMakeCXXCompilerABI.cpp
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh/CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj.d -sys-header-deps -MT CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -isysroot /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 -internal-isystem /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++/ -fdeprecated-macro -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fcxx-exceptions -fexceptions -fdiagnostics-show-option -o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -x c++ /usr/share/cmake-3.25/Modules/CMakeCXXCompilerABI.cpp
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3"
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3//"
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3/backward"
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+#include "..." search starts here:
+#include <...> search starts here:
+ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++
+ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6
+ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include
+End of search list.
+Linking CXX executable cmTC_ceeb2
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ceeb2.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386  -v CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -o cmTC_ceeb2 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_ceeb2 /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -lc++ -lm -lmthread -lc /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh'
+
+
+
+Parsed CXX implicit include dir info from above output: rv=done
+  found start of include info
+  found start of implicit include info
+    add: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++]
+    add: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+    add: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  end of search list found
+  collapse include dir [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++] ==> [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++]
+  collapse include dir [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6] ==> [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+  collapse include dir [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include] ==> [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  implicit include dirs: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+
+
+Parsed CXX implicit link information from above output:
+  link line regex: [^( *|.*[/\])(i586-elf32-minix-ld|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\]+-)?ld|collect2)[^/\]*( |$)]
+  ignore line: [Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh]
+  ignore line: []
+  ignore line: [Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_ceeb2/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_ceeb2.dir/build.make CMakeFiles/cmTC_ceeb2.dir/build]
+  ignore line: [gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh']
+  ignore line: [Building CXX object CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj]
+  ignore line: [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386   -v -MD -MT CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -MF CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj.d -o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -c /usr/share/cmake-3.25/Modules/CMakeCXXCompilerABI.cpp]
+  ignore line: [clang version 3.6 (branches/release_36 237755)]
+  ignore line: [Target: i586-elf32-minix]
+  ignore line: [Thread model: posix]
+  ignore line: [ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh/CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj.d -sys-header-deps -MT CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -isysroot /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 -internal-isystem /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++/ -fdeprecated-macro -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QDKdxh -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fcxx-exceptions -fexceptions -fdiagnostics-show-option -o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -x c++ /usr/share/cmake-3.25/Modules/CMakeCXXCompilerABI.cpp]
+  ignore line: [clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix]
+  ignore line: [ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3"]
+  ignore line: [ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3//"]
+  ignore line: [ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/gnu/include/c++/4.4.3/backward"]
+  ignore line: [ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"]
+  ignore line: [#include "..." search starts here:]
+  ignore line: [#include <...> search starts here:]
+  ignore line: [ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/c++]
+  ignore line: [ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include/clang-3.6]
+  ignore line: [ /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/include]
+  ignore line: [End of search list.]
+  ignore line: [Linking CXX executable cmTC_ceeb2]
+  ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ceeb2.dir/link.txt --verbose=1]
+  ignore line: [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang++ --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386  -v CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -o cmTC_ceeb2 ]
+  ignore line: [clang version 3.6 (branches/release_36 237755)]
+  ignore line: [Target: i586-elf32-minix]
+  ignore line: [Thread model: posix]
+  link line: [ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386 --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_ceeb2 /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj -lc++ -lm -lmthread -lc /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o /home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld] ==> ignore
+    arg [--sysroot=/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386] ==> ignore
+    arg [--eh-frame-hdr] ==> ignore
+    arg [-dynamic-linker] ==> ignore
+    arg [/usr/libexec/ld.elf_so] ==> ignore
+    arg [-m] ==> ignore
+    arg [elf_i386_minix] ==> ignore
+    arg [-o] ==> ignore
+    arg [cmTC_ceeb2] ==> ignore
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o]
+    arg [CMakeFiles/cmTC_ceeb2.dir/CMakeCXXCompilerABI.cpp.obj] ==> ignore
+    arg [-lc++] ==> lib [c++]
+    arg [-lm] ==> lib [m]
+    arg [-lmthread] ==> lib [mthread]
+    arg [-lc] ==> lib [c]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o]
+    arg [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o] ==> obj [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+  implicit libs: [c++;m;mthread;c]
+  implicit objs: [/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crt0.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crti.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtbegin.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtend.o;/home/ludovic/Programmation/minix/master/obj.i386/destdir.i386/usr/lib/crtn.o]
+  implicit dirs: []
+  implicit fwks: []
+
+

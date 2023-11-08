@@ -1,341 +1,211 @@
-#	$NetBSD: Makefile,v 1.235 2015/09/28 17:12:12 christos Exp $
-#	from: @(#)Makefile	5.25.1.1 (Berkeley) 5/7/91
-
-.include <bsd.own.mk>
-
-SUBDIR=		csu .WAIT
-
-.if (${MKGCC} != "no")
-SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libgcc .WAIT
-.endif
-
-.if defined(__MINIX)
-#LSC MINIX libc depends on
-# - libmthread because of sys/lib/libunwind
-SUBDIR+=	.WAIT
-
-SUBDIR+=	../minix/lib/libsys
-SUBDIR+=	../minix/lib/libmthread
-SUBDIR+=	.WAIT
-.endif # defined(__MINIX)
-SUBDIR+=	libc
-SUBDIR+=	.WAIT
-
-.if defined(__MINIX)
-SUBDIR+=	../minix/lib/libasyn \
-		../minix/lib/libaudiodriver \
-		../minix/lib/libbdev \
-		../minix/lib/libblockdriver \
-		../minix/lib/libchardriver \
-		../minix/lib/libddekit \
-		../minix/lib/libdevman \
-		../minix/lib/libexec \
-		../minix/lib/libfsdriver \
-		../minix/lib/libinputdriver \
-		../minix/lib/liblwip \
-		../minix/lib/libminc \
-		../minix/lib/libminixfs \
-		../minix/lib/libnetdriver \
-		../minix/lib/libsffs \
-		../minix/lib/libsockdriver \
-		../minix/lib/libsockevent \
-		../minix/lib/libtimers \
-		../minix/lib/libusb \
-		../minix/lib/libvtreefs
-
-.if (${HAVE_LIBGCC} == "no")
-SUBDIR+=	../minix/lib/libgcc_s_empty
-.endif
-
-.if (${MACHINE_ARCH} == "i386")
-SUBDIR+=	../minix/lib/libacpi \
-		../minix/lib/libhgfs \
-		../minix/lib/libvassert \
-		../minix/lib/libvboxfs \
-		../minix/lib/libvirtio
-.endif
-
-.if (${MACHINE_ARCH} == "earm")
-SUBDIR+=	../minix/lib/libclkconf \
-		../minix/lib/libgpio \
-		../minix/lib/libi2cdriver
-.endif
-
-.if (${MKMAGIC} == "yes")
-SUBDIR+=	../minix/lib/libmagicrt
-.endif
-
-.endif # defined(__MINIX)
-#
-# The SUBDIRs above are included here for completeness but should be built
-# and installed prior to make(dependall) in this file, as libraries listed
-# below will depend on versions from DESTDIR only.
-#
-
-SUBDIR+=	i18n_module
-
-SUBDIR+=	\
-		libbz2 \
-		libcrypt \
-		libintl libkvm libm \
-		libpci libprop \
-		libpuffs librmt \
-		libtelnet libterminfo \
-		libutil libwrap libz
-
-.if !defined(BSD_MK_COMPAT_FILE)
-#SUBDIR+=	libkern
-.endif
-
-.if (${MACHINE_CPU} == "arm" || ${MACHINE_CPU} == "aarch64")
-LIBC_MACHINE_ARCH?=${MACHINE_ARCH}
-LIBC_MACHINE_CPU?=${MACHINE_CPU}
-.if ${LIBC_MACHINE_CPU} == "arm" && empty(LIBC_MACHINE_ARCH:M*hf*)
-.if !defined(__MINIX)
-SUBDIR+=	libc_vfp
-.endif # !defined(__MINIX)
-.endif
-.endif
-.if (${MKRUMP} != "no")
-SUBDIR+=	librumpclient
-.endif
-.if (${MKSKEY} != "no")
-SUBDIR+=	libskey
-.endif
-
-.if (${MKMDNS} != "no")
-SUBDIR+=	../external/apache2/mDNSResponder/lib
-.endif
-
-#SUBDIR+=	../external/bsd/am-utils/lib
-SUBDIR+=	../external/bsd/blacklist/lib
-
-SUBDIR+=	../external/bsd/flex/lib
-#SUBDIR+=	../external/bsd/tre/lib
-SUBDIR+=	../external/bsd/elftoolchain/lib/libelf
-#SUBDIR+=	../external/bsd/liblzf/lib
-SUBDIR+=	../external/bsd/libpcap/lib
-
-.if ${MKSLJIT} != "no"
-SUBDIR+=	../external/bsd/sljit/lib
-SUBDIR+=	libbpfjit
-.endif
-
-.if (${MKZFS} != "no")
-SUBDIR+=        ../external/cddl/osnet/lib/libavl
-SUBDIR+=        ../external/cddl/osnet/lib/libnvpair
-SUBDIR+=        ../external/cddl/osnet/lib/libumem
-SUBDIR+=        ../external/cddl/osnet/lib/libuutil
-.endif
-
-SUBDIR+=	../external/mit/expat/lib
-
-
-
-#SUBDIR+=	../gnu/lib/libmalloc
-
-.if (${MKGCC} != "no")
-. if !defined(__MINIX) || ${MKLIBSTDCXX} == "yes"
-SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libobjc
-SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libgomp
-#SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libmudflap
-#SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libmudflapth
-. endif # !defined(__MINIX) || ${MKLIBSTDCXX} == "yes"
-. if !defined(__MINIX) || ${MKLIBSTDCXX} == "yes"
-# Should probably move GMP, MPFR and MPC builds into the GCC >= 4.5
-# specific build area, but we get better parallelism this way.
-# We don't build compat versions of these.
-. if !defined(MLIBDIR)
-SUBDIR+=	../external/lgpl3/gmp/lib/libgmp
-SUBDIR+=	../external/lgpl3/mpfr/lib/libmpfr
-SUBDIR+=	../external/lgpl3/mpc/lib/libmpc
-.   endif # !defined(__MINIX) || ${MKLIBSTDCXX} == "yes"
-. endif
-.endif
-
-#
-# Libraries that depend upon any listed previously
-# (and those that depend upon these [and ...])
-#
-#==================== 1st library dependency barrier ====================
-SUBDIR+=	.WAIT
-
-.if ${MKDTRACE} != "no"
-SUBDIR+=	../external/bsd/librtld_db/lib		# depends on libutil
-.endif
-
-.if ${MKDTRACE} != "no" || ${MKCTF} != "no"
-SUBDIR+=        ../external/cddl/osnet/lib/libctf
-.endif
-
-SUBDIR+=	../external/public-domain/xz/lib	# depends on libpthread
-
-.if (${MKCRYPTO} != "no")
-SUBDIR+=	../crypto/external/bsd/netpgp/libmj
-SUBDIR+=	../crypto/external/bsd/netpgp/lib/verify # depends on libz
-.endif
-
-#SUBDIR+=	../external/bsd/libdwarf/lib # depends on libelf
-SUBDIR+=	../external/mit/lua/lib # depends on libm
-SUBDIR+=	libcurses	# depends on libterminfo
-#SUBDIR+=	libdm		# depends on libprop
-SUBDIR+=	libedit		# depends on libterminfo
-SUBDIR+=	libexecinfo 	# depends on libelf
-#SUBDIR+=	libppath	# depends on libprop
-#SUBDIR+=	libperfuse	# depends on libpuffs
-#SUBDIR+=	libquota	# depends on libprop and librpcsvc
-SUBDIR+=	librefuse	# depends on libpuffs
-#SUBDIR+=	libisns 	# depends on libpthread
-.if (${MKRUMP} != "no")
-SUBDIR+=	librumpuser	# depends on libpthread
-SUBDIR+=	librumphijack	# depends on librumpclient and libpthread
-.endif
-
-.if (${MKNPF} != "no")
-SUBDIR+=	libnpf		# depends on libprop
-.endif
-
-.if (${MKCRYPTO} != "no")
-SUBDIR+=	../crypto/external/bsd/openssl/lib # depends on libcrypt
-.endif
-
-SUBDIR+=	../external/bsd/file/lib	# depends on libz
-
-.if (${MKISCSI} != "no")
-SUBDIR+=	../external/bsd/iscsi/lib	# depends on libpthread
-.endif
-
-.if (${MKZFS} != "no")
-SUBDIR+=        ../external/cddl/osnet/lib/libzfs
-SUBDIR+=        ../external/cddl/osnet/lib/libzpool
-.endif
-
-.if (${MKLVM} != "no")
-SUBDIR+=	../external/gpl2/lvm2/lib	# depends on libprop
-.endif
-
-.if (${MKBINUTILS} != "no")
-SUBDIR+=	../external/gpl3/binutils/lib	# libbfd depends on libz
-.endif
-
-.if (${MKLIBCXX} != "no")
-SUBDIR+=	../external/bsd/libc++
-.endif
-
-.if (${MKGCC} != "no" && ${MKCXX} != "no" && ${MKLIBSTDCXX} != "no")
-SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libstdc++-v3
-SUBDIR+=	../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libsupc++
-.endif
-
-#==================== 2nd library dependency barrier ====================
-SUBDIR+=	.WAIT
-
-SANITIZER_DIR=../external/gpl3/${EXTERNAL_GCC_SUBDIR}/lib/libasan
-.if exists(${SANITIZER_DIR})
-#SUBDIR+=	${SANITIZER_DIR}
-.endif
-
-SUBDIR+=	../external/bsd/libarchive/lib	# depends on libxz
-
-.if (${MKNPF} != "no")
-SUBDIR+=	npf		# depends on libnpf
-.endif
-
-.if (${MKATF} != "no")
-SUBDIR+=	../external/bsd/atf/lib		# depends on libstdc++
-.endif
-
-.if (${MKKYUA} != "no")
-SUBDIR+=	../external/bsd/lutok/lib	# depends on lua and libstdc++
-.endif
-
-SUBDIR+=	libform		# depends on libcurses
-SUBDIR+=	libmenu		# depends on libcurses
-#SUBDIR+=	libradius	# depends on libcrypto if (${MKCRYPTO} != "no")
-.if (${MKRUMP} != "no")
-SUBDIR+=	librump		# depends on librumpuser
-.endif
-
-.if (${MKKERBEROS} != "no")
-SUBDIR+=	../crypto/external/bsd/heimdal/lib	# depends on libcrypto
-							# libedit, libterminfo,
-.endif
-
-.if (${MKCRYPTO} != "no")
-#SUBDIR+=	../crypto/external/bsd/openssh/lib # depends on libcrypto, libz
-SUBDIR+=	../crypto/external/bsd/netpgp/lib  # depends on libcrypto, ...
-.endif
-
-SUBDIR+=	../external/bsd/libevent/lib	# depends on libcrypto
-.if ${MKDTRACE} != "no"
-SUBDIR+=	../external/bsd/libproc/lib	# depends on libstdc++, libctf
-.endif
-SUBDIR+=	../external/bsd/fetch/lib	# depends on libssl
-
-.if (${MKLDAP} != "no")
-SUBDIR+=	../external/bsd/openldap/lib	# depends on libcrypto, ...
-.endif
-
-#==================== 3rd library dependency barrier ====================
-SUBDIR+=	.WAIT
-
-SUBDIR+=	../external/bsd/bind/lib	# depends on heimdal, libcrypto
-
-.if ${MKDTRACE} != "no"
-SUBDIR+=        ../external/cddl/osnet/lib/libdtrace	# depends on libproc
-.endif
-
-.if (${MKRUMP} != "no")
-SUBDIR+=	librumpdev	# depends on librump
-SUBDIR+=	librumpnet	# depends on librump
-SUBDIR+=	librumpvfs	# depends on librump
-.endif
-
-.if (${MKPAM} != "no")
-SUBDIR+=	libpam		# depends on heimdal
-.endif
-
-.if (${MKCRYPTO} != "no")
-SUBDIR+=	../crypto/external/bsd/libsaslc	# depends on heimdal, openssl
-.endif
-
-SUBDIR+=	../external/bsd/mdocml/lib
-
-.if (${MKRUMP} != "no")
-#==================== 4th library dependency barrier ====================
-SUBDIR+=	.WAIT
-
-SUBDIR+=	libukfs		# depends on librumpvfs, librump
-
-.if (${MKTPM} != "no")
-SUBDIR+=	../crypto/external/cpl/trousers/lib
-.endif
-
-#==================== 5th library dependency barrier ====================
-SUBDIR+=	.WAIT
-
-SUBDIR+=	libp2k		# depends on libukfs, librumpvfs, libpuffs
-
-.if (${MKTPM} != "no")
-SUBDIR+=	../crypto/external/cpl/tpm-tools/lib	# depends on trousers
-.endif
-
-.if !defined(BSD_MK_COMPAT_FILE)
-SUBDIR+=	../sys/rump/dev/lib
-SUBDIR+=	../sys/rump/fs/lib
-SUBDIR+=	../sys/rump/kern/lib
-SUBDIR+=	../sys/rump/net/lib
-.endif
-.endif
-
-# depends on libm
-SUBDIR+=	../external/public-domain/sqlite/lib
-
-# Lua bindings come last, they might depend on anything
-SUBDIR+=	lua
-
-# Needed by rump and rescue which are outside the smbfs tree
-#SUBDIR+=	../external/bsd/smbfs/lib
-
-.include <bsd.buildinstall.mk>
-.include <bsd.subdir.mk>
+#Generated from ./Makefile.in
+all: all-ack
+
+all-ack:
+all-gnu:
+
+makefiles: Makefile
+Makedepend-ack Makedepend-gnu: 
+	sh ./generate.sh . obj-ack obj-gnu
+
+Makefile: Makefile.in Makedepend-ack Makedepend-gnu
+	sh ./generate.sh . obj-ack obj-gnu
+	@echo
+	@echo *Attention*
+	@echo Makefile is regenerated... rerun command to see changes
+	@echo *Attention*
+	@echo
+
+all-ack: makefiles
+	mkdir -p obj-ack/./ansi
+	cd ansi && $(MAKE) $@
+	mkdir -p obj-ack/./curses
+	cd curses && $(MAKE) $@
+	mkdir -p obj-ack/./dummy
+	cd dummy && $(MAKE) $@
+	mkdir -p obj-ack/./editline
+	cd editline && $(MAKE) $@
+	mkdir -p obj-ack/./end
+	cd end && $(MAKE) $@
+	mkdir -p obj-ack/./ip
+	cd ip && $(MAKE) $@
+	mkdir -p obj-ack/./math
+	cd math && $(MAKE) $@
+	mkdir -p obj-ack/./other
+	cd other && $(MAKE) $@
+	mkdir -p obj-ack/./posix
+	cd posix && $(MAKE) $@
+	mkdir -p obj-ack/./regex
+	cd regex && $(MAKE) $@
+	mkdir -p obj-ack/./stdio
+	cd stdio && $(MAKE) $@
+	mkdir -p obj-ack/./stdtime
+	cd stdtime && $(MAKE) $@
+	mkdir -p obj-ack/./syscall
+	cd syscall && $(MAKE) $@
+	mkdir -p obj-ack/./syslib
+	cd syslib && $(MAKE) $@
+	mkdir -p obj-ack/./util
+	cd util && $(MAKE) $@
+	mkdir -p obj-ack/./sysutil
+	cd sysutil && $(MAKE) $@
+	mkdir -p obj-ack/./sysvipc
+	cd sysvipc && $(MAKE) $@
+	mkdir -p obj-ack/./timers
+	cd timers && $(MAKE) $@
+	mkdir -p obj-ack/./i386
+	cd i386 && $(MAKE) $@
+	mkdir -p obj-ack/./ack
+	cd ack && $(MAKE) $@
+	mkdir -p obj-ack/./gnu
+	cd gnu && $(MAKE) $@
+
+all-gnu: makefiles
+	mkdir -p obj-gnu/./ansi
+	cd ansi && $(MAKE) $@
+	mkdir -p obj-gnu/./curses
+	cd curses && $(MAKE) $@
+	mkdir -p obj-gnu/./dummy
+	cd dummy && $(MAKE) $@
+	mkdir -p obj-gnu/./editline
+	cd editline && $(MAKE) $@
+	mkdir -p obj-gnu/./end
+	cd end && $(MAKE) $@
+	mkdir -p obj-gnu/./ip
+	cd ip && $(MAKE) $@
+	mkdir -p obj-gnu/./math
+	cd math && $(MAKE) $@
+	mkdir -p obj-gnu/./other
+	cd other && $(MAKE) $@
+	mkdir -p obj-gnu/./posix
+	cd posix && $(MAKE) $@
+	mkdir -p obj-gnu/./regex
+	cd regex && $(MAKE) $@
+	mkdir -p obj-gnu/./stdio
+	cd stdio && $(MAKE) $@
+	mkdir -p obj-gnu/./stdtime
+	cd stdtime && $(MAKE) $@
+	mkdir -p obj-gnu/./syscall
+	cd syscall && $(MAKE) $@
+	mkdir -p obj-gnu/./syslib
+	cd syslib && $(MAKE) $@
+	mkdir -p obj-gnu/./util
+	cd util && $(MAKE) $@
+	mkdir -p obj-gnu/./sysutil
+	cd sysutil && $(MAKE) $@
+	mkdir -p obj-gnu/./sysvipc
+	cd sysvipc && $(MAKE) $@
+	mkdir -p obj-gnu/./timers
+	cd timers && $(MAKE) $@
+	mkdir -p obj-gnu/./i386
+	cd i386 && $(MAKE) $@
+	mkdir -p obj-gnu/./ack
+	cd ack && $(MAKE) $@
+	mkdir -p obj-gnu/./gnu
+	cd gnu && $(MAKE) $@
+
+clean depend depend-ack depend-gnu:: makefiles
+	cd ansi && $(MAKE) $@
+	cd curses && $(MAKE) $@
+	cd dummy && $(MAKE) $@
+	cd editline && $(MAKE) $@
+	cd end && $(MAKE) $@
+	cd ip && $(MAKE) $@
+	cd math && $(MAKE) $@
+	cd other && $(MAKE) $@
+	cd posix && $(MAKE) $@
+	cd regex && $(MAKE) $@
+	cd stdio && $(MAKE) $@
+	cd stdtime && $(MAKE) $@
+	cd syscall && $(MAKE) $@
+	cd syslib && $(MAKE) $@
+	cd util && $(MAKE) $@
+	cd sysutil && $(MAKE) $@
+	cd sysvipc && $(MAKE) $@
+	cd timers && $(MAKE) $@
+	cd i386 && $(MAKE) $@
+	cd ack && $(MAKE) $@
+	cd gnu && $(MAKE) $@
+
+makefiles: ansi/Makefile
+makefiles: curses/Makefile
+makefiles: dummy/Makefile
+makefiles: editline/Makefile
+makefiles: end/Makefile
+makefiles: ip/Makefile
+makefiles: math/Makefile
+makefiles: other/Makefile
+makefiles: posix/Makefile
+makefiles: regex/Makefile
+makefiles: stdio/Makefile
+makefiles: stdtime/Makefile
+makefiles: syscall/Makefile
+makefiles: syslib/Makefile
+makefiles: util/Makefile
+makefiles: sysutil/Makefile
+makefiles: sysvipc/Makefile
+makefiles: timers/Makefile
+makefiles: i386/Makefile
+makefiles: ack/Makefile
+makefiles: gnu/Makefile
+
+ansi/Makefile: ansi/Makefile.in
+	cd ansi && sh .././generate.sh ./ansi ../obj-ack ../obj-gnu && $(MAKE) makefiles
+curses/Makefile: curses/Makefile.in
+	cd curses && sh .././generate.sh ./curses ../obj-ack ../obj-gnu && $(MAKE) makefiles
+dummy/Makefile: dummy/Makefile.in
+	cd dummy && sh .././generate.sh ./dummy ../obj-ack ../obj-gnu && $(MAKE) makefiles
+editline/Makefile: editline/Makefile.in
+	cd editline && sh .././generate.sh ./editline ../obj-ack ../obj-gnu && $(MAKE) makefiles
+end/Makefile: end/Makefile.in
+	cd end && sh .././generate.sh ./end ../obj-ack ../obj-gnu && $(MAKE) makefiles
+ip/Makefile: ip/Makefile.in
+	cd ip && sh .././generate.sh ./ip ../obj-ack ../obj-gnu && $(MAKE) makefiles
+math/Makefile: math/Makefile.in
+	cd math && sh .././generate.sh ./math ../obj-ack ../obj-gnu && $(MAKE) makefiles
+other/Makefile: other/Makefile.in
+	cd other && sh .././generate.sh ./other ../obj-ack ../obj-gnu && $(MAKE) makefiles
+posix/Makefile: posix/Makefile.in
+	cd posix && sh .././generate.sh ./posix ../obj-ack ../obj-gnu && $(MAKE) makefiles
+regex/Makefile: regex/Makefile.in
+	cd regex && sh .././generate.sh ./regex ../obj-ack ../obj-gnu && $(MAKE) makefiles
+stdio/Makefile: stdio/Makefile.in
+	cd stdio && sh .././generate.sh ./stdio ../obj-ack ../obj-gnu && $(MAKE) makefiles
+stdtime/Makefile: stdtime/Makefile.in
+	cd stdtime && sh .././generate.sh ./stdtime ../obj-ack ../obj-gnu && $(MAKE) makefiles
+syscall/Makefile: syscall/Makefile.in
+	cd syscall && sh .././generate.sh ./syscall ../obj-ack ../obj-gnu && $(MAKE) makefiles
+syslib/Makefile: syslib/Makefile.in
+	cd syslib && sh .././generate.sh ./syslib ../obj-ack ../obj-gnu && $(MAKE) makefiles
+util/Makefile: util/Makefile.in
+	cd util && sh .././generate.sh ./util ../obj-ack ../obj-gnu && $(MAKE) makefiles
+sysutil/Makefile: sysutil/Makefile.in
+	cd sysutil && sh .././generate.sh ./sysutil ../obj-ack ../obj-gnu && $(MAKE) makefiles
+sysvipc/Makefile: sysvipc/Makefile.in
+	cd sysvipc && sh .././generate.sh ./sysvipc ../obj-ack ../obj-gnu && $(MAKE) makefiles
+timers/Makefile: timers/Makefile.in
+	cd timers && sh .././generate.sh ./timers ../obj-ack ../obj-gnu && $(MAKE) makefiles
+i386/Makefile: i386/Makefile.in
+	cd i386 && sh .././generate.sh ./i386 ../obj-ack ../obj-gnu && $(MAKE) makefiles
+ack/Makefile: ack/Makefile.in
+	cd ack && sh .././generate.sh ./ack ../obj-ack ../obj-gnu && $(MAKE) makefiles
+gnu/Makefile: gnu/Makefile.in
+	cd gnu && sh .././generate.sh ./gnu ../obj-ack ../obj-gnu && $(MAKE) makefiles
+
+clean::
+	rm -f obj-ack/./*
+	rm -f obj-gnu/./*
+
+install: install-ack
+
+install-ack: all-ack
+	cp obj-ack/*.[ao] /usr/lib/i386
+
+install-gnu: all-gnu
+	cp obj-gnu/*.[ao] /usr/gnu/lib
+
+include Makedepend-ack
+include .depend-ack
+
+include Makedepend-gnu
+include .depend-gnu

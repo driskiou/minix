@@ -1,0 +1,558 @@
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-TrD0Lm
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_1f497/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_1f497.dir/build.make CMakeFiles/cmTC_1f497.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-TrD0Lm'
+Building C object CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-TrD0Lm/CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-TrD0Lm -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_1f497
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_1f497.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -o cmTC_1f497 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_1f497 crt0.o crti.o crtbegin.o CMakeFiles/cmTC_1f497.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_1f497.dir/build.make:100: cmTC_1f497] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-TrD0Lm'
+gmake: *** [Makefile:127: cmTC_1f497/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BlxvU7
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_68981/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_68981.dir/build.make CMakeFiles/cmTC_68981.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BlxvU7'
+Building C object CMakeFiles/cmTC_68981.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_68981.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_68981.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_68981.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BlxvU7/testCCompiler.c
+Linking C executable cmTC_68981
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_68981.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_68981.dir/testCCompiler.c.obj -o cmTC_68981 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_68981.dir/build.make:100: cmTC_68981] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BlxvU7'
+gmake: *** [Makefile:127: cmTC_68981/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-g7ZBaN
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_c1a7c/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_c1a7c.dir/build.make CMakeFiles/cmTC_c1a7c.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-g7ZBaN'
+Building C object CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-g7ZBaN/CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-g7ZBaN -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_c1a7c
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_c1a7c.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -o cmTC_c1a7c 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_c1a7c crt0.o crti.o crtbegin.o CMakeFiles/cmTC_c1a7c.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_c1a7c.dir/build.make:100: cmTC_c1a7c] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-g7ZBaN'
+gmake: *** [Makefile:127: cmTC_c1a7c/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-a8X18m
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_0a1a3/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_0a1a3.dir/build.make CMakeFiles/cmTC_0a1a3.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-a8X18m'
+Building C object CMakeFiles/cmTC_0a1a3.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_0a1a3.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_0a1a3.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_0a1a3.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-a8X18m/testCCompiler.c
+Linking C executable cmTC_0a1a3
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_0a1a3.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_0a1a3.dir/testCCompiler.c.obj -o cmTC_0a1a3 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_0a1a3.dir/build.make:100: cmTC_0a1a3] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-a8X18m'
+gmake: *** [Makefile:127: cmTC_0a1a3/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QbMeaP
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_dacc5/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_dacc5.dir/build.make CMakeFiles/cmTC_dacc5.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QbMeaP'
+Building C object CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QbMeaP/CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QbMeaP -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_dacc5
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_dacc5.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -o cmTC_dacc5 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_dacc5 crt0.o crti.o crtbegin.o CMakeFiles/cmTC_dacc5.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_dacc5.dir/build.make:100: cmTC_dacc5] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-QbMeaP'
+gmake: *** [Makefile:127: cmTC_dacc5/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-FlOMG5
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_4b124/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_4b124.dir/build.make CMakeFiles/cmTC_4b124.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-FlOMG5'
+Building C object CMakeFiles/cmTC_4b124.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_4b124.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_4b124.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_4b124.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-FlOMG5/testCCompiler.c
+Linking C executable cmTC_4b124
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_4b124.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_4b124.dir/testCCompiler.c.obj -o cmTC_4b124 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_4b124.dir/build.make:100: cmTC_4b124] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-FlOMG5'
+gmake: *** [Makefile:127: cmTC_4b124/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BVYE4l
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_142c5/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_142c5.dir/build.make CMakeFiles/cmTC_142c5.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BVYE4l'
+Building C object CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BVYE4l/CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BVYE4l -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_142c5
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_142c5.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -o cmTC_142c5 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_142c5 crt0.o crti.o crtbegin.o CMakeFiles/cmTC_142c5.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_142c5.dir/build.make:100: cmTC_142c5] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-BVYE4l'
+gmake: *** [Makefile:127: cmTC_142c5/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-4wnuFG
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_60092/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_60092.dir/build.make CMakeFiles/cmTC_60092.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-4wnuFG'
+Building C object CMakeFiles/cmTC_60092.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_60092.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_60092.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_60092.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-4wnuFG/testCCompiler.c
+Linking C executable cmTC_60092
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_60092.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_60092.dir/testCCompiler.c.obj -o cmTC_60092 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_60092.dir/build.make:100: cmTC_60092] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-4wnuFG'
+gmake: *** [Makefile:127: cmTC_60092/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-0tCgJ4
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_dc3a8/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_dc3a8.dir/build.make CMakeFiles/cmTC_dc3a8.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-0tCgJ4'
+Building C object CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-0tCgJ4/CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-0tCgJ4 -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_dc3a8
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_dc3a8.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -o cmTC_dc3a8 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_dc3a8 crt0.o crti.o crtbegin.o CMakeFiles/cmTC_dc3a8.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_dc3a8.dir/build.make:100: cmTC_dc3a8] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-0tCgJ4'
+gmake: *** [Makefile:127: cmTC_dc3a8/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-IkipLU
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_7ddff/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_7ddff.dir/build.make CMakeFiles/cmTC_7ddff.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-IkipLU'
+Building C object CMakeFiles/cmTC_7ddff.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_7ddff.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_7ddff.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_7ddff.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-IkipLU/testCCompiler.c
+Linking C executable cmTC_7ddff
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_7ddff.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_7ddff.dir/testCCompiler.c.obj -o cmTC_7ddff 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_7ddff.dir/build.make:100: cmTC_7ddff] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-IkipLU'
+gmake: *** [Makefile:127: cmTC_7ddff/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-HhCxGN
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_3756f/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_3756f.dir/build.make CMakeFiles/cmTC_3756f.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-HhCxGN'
+Building C object CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-HhCxGN/CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-HhCxGN -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_3756f
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_3756f.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -o cmTC_3756f 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_3756f crt0.o crti.o crtbegin.o CMakeFiles/cmTC_3756f.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_3756f.dir/build.make:100: cmTC_3756f] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-HhCxGN'
+gmake: *** [Makefile:127: cmTC_3756f/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-1c8ge4
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_88f8e/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_88f8e.dir/build.make CMakeFiles/cmTC_88f8e.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-1c8ge4'
+Building C object CMakeFiles/cmTC_88f8e.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_88f8e.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_88f8e.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_88f8e.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-1c8ge4/testCCompiler.c
+Linking C executable cmTC_88f8e
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_88f8e.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_88f8e.dir/testCCompiler.c.obj -o cmTC_88f8e 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_88f8e.dir/build.make:100: cmTC_88f8e] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-1c8ge4'
+gmake: *** [Makefile:127: cmTC_88f8e/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-RIojh5
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_ea9de/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_ea9de.dir/build.make CMakeFiles/cmTC_ea9de.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-RIojh5'
+Building C object CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-RIojh5/CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-RIojh5 -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_ea9de
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ea9de.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -o cmTC_ea9de 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_ea9de crt0.o crti.o crtbegin.o CMakeFiles/cmTC_ea9de.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_ea9de.dir/build.make:100: cmTC_ea9de] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-RIojh5'
+gmake: *** [Makefile:127: cmTC_ea9de/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-kLfi2j
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_34d1f/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_34d1f.dir/build.make CMakeFiles/cmTC_34d1f.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-kLfi2j'
+Building C object CMakeFiles/cmTC_34d1f.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_34d1f.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_34d1f.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_34d1f.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-kLfi2j/testCCompiler.c
+Linking C executable cmTC_34d1f
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_34d1f.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_34d1f.dir/testCCompiler.c.obj -o cmTC_34d1f 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_34d1f.dir/build.make:100: cmTC_34d1f] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-kLfi2j'
+gmake: *** [Makefile:127: cmTC_34d1f/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-zu8zEL
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_b643a/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_b643a.dir/build.make CMakeFiles/cmTC_b643a.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-zu8zEL'
+Building C object CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-zu8zEL/CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-zu8zEL -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_b643a
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_b643a.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -o cmTC_b643a 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_b643a crt0.o crti.o crtbegin.o CMakeFiles/cmTC_b643a.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_b643a.dir/build.make:100: cmTC_b643a] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-zu8zEL'
+gmake: *** [Makefile:127: cmTC_b643a/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-yAmhrj
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_ff16c/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_ff16c.dir/build.make CMakeFiles/cmTC_ff16c.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-yAmhrj'
+Building C object CMakeFiles/cmTC_ff16c.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_ff16c.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_ff16c.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_ff16c.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-yAmhrj/testCCompiler.c
+Linking C executable cmTC_ff16c
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ff16c.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_ff16c.dir/testCCompiler.c.obj -o cmTC_ff16c 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_ff16c.dir/build.make:100: cmTC_ff16c] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-yAmhrj'
+gmake: *** [Makefile:127: cmTC_ff16c/fast] Error 2
+
+
+
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-84LDf3
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_8866e/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_8866e.dir/build.make CMakeFiles/cmTC_8866e.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-84LDf3'
+Building C object CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang   -v -MD -MT CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -MF CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj.d -o CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang" -cc1 -triple i586-elf32-minix -emit-obj -mrelax-all -disable-free -main-file-name CMakeCCompilerABI.c -mrelocation-model static -mthread-model posix -mdisable-fp-elim -masm-verbose -mconstructor-aliases -munwind-tables -target-cpu i586 -target-linker-version 2.40 -v -dwarf-column-info -coverage-file /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-84LDf3/CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -resource-dir /home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6 -dependency-file CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj.d -sys-header-deps -MT CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -fdebug-compilation-dir /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-84LDf3 -ferror-limit 19 -fmessage-length 0 -mstackrealign -fobjc-runtime=gnustep -fdiagnostics-show-option -o CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -x c /usr/share/cmake-3.25/Modules/CMakeCCompilerABI.c
+clang -cc1 version 3.6 based upon LLVM 3.6.1 default target i386-elf32-minix
+ignoring nonexistent directory "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/../lib/clang/3.6/include"
+ignoring nonexistent directory "/usr/include/clang-3.6"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/include
+End of search list.
+Linking C executable cmTC_8866e
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_8866e.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang  -v CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -o cmTC_8866e 
+clang version 3.6 (branches/release_36 237755)
+Target: i586-elf32-minix
+Thread model: posix
+ "/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld" --eh-frame-hdr -dynamic-linker /usr/libexec/ld.elf_so -m elf_i386_minix -o cmTC_8866e crt0.o crti.o crtbegin.o CMakeFiles/cmTC_8866e.dir/CMakeCCompilerABI.c.obj -lc crtend.o crtn.o
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_8866e.dir/build.make:100: cmTC_8866e] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-84LDf3'
+gmake: *** [Makefile:127: cmTC_8866e/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-K4MGfR
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_9cb13/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_9cb13.dir/build.make CMakeFiles/cmTC_9cb13.dir/build
+gmake[1]: Entering directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-K4MGfR'
+Building C object CMakeFiles/cmTC_9cb13.dir/testCCompiler.c.obj
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang    -MD -MT CMakeFiles/cmTC_9cb13.dir/testCCompiler.c.obj -MF CMakeFiles/cmTC_9cb13.dir/testCCompiler.c.obj.d -o CMakeFiles/cmTC_9cb13.dir/testCCompiler.c.obj -c /home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-K4MGfR/testCCompiler.c
+Linking C executable cmTC_9cb13
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_9cb13.dir/link.txt --verbose=1
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-clang CMakeFiles/cmTC_9cb13.dir/testCCompiler.c.obj -o cmTC_9cb13 
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crt0.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crti.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtbegin.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find -lc
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtend.o: No such file or directory
+/home/ludovic/Programmation/minix/master/obj.i386/tooldir.Linux-6.1.0-13-amd64-x86_64/bin/i586-elf32-minix-ld: cannot find crtn.o: No such file or directory
+i586-elf32-minix-clang: error: linker command failed with exit code 1 (use -v to see invocation)
+gmake[1]: *** [CMakeFiles/cmTC_9cb13.dir/build.make:100: cmTC_9cb13] Error 1
+gmake[1]: Leaving directory '/home/ludovic/Programmation/minix/src/buildir/CMakeFiles/CMakeScratch/TryCompile-K4MGfR'
+gmake: *** [Makefile:127: cmTC_9cb13/fast] Error 2
+
+
+
